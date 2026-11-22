@@ -81,6 +81,7 @@ pub struct App {
     selftest_to: Option<PathBuf>,
     /// Pages per file for the "Split document" dialog (None: dialog closed).
     split_every: Option<usize>,
+    ocr: crate::ocr_dialog::OcrDialog,
     /// Connection to other magic-pdf windows.
     ipc: Option<crate::ipc::Server>,
     /// Index of the tab being dragged in the tab bar.
@@ -212,6 +213,7 @@ impl App {
             screenshot_requested: false,
             selftest_to: std::env::var_os("MAGIC_PDF_SELFTEST").map(PathBuf::from),
             split_every: None,
+            ocr: Default::default(),
             ipc: None,
             tab_drag: None,
             tab_menu_peers: Vec::new(),
@@ -845,6 +847,11 @@ impl App {
                     let _ = tx.send(crate::print::submit(&job, &bytes));
                     ctx.request_repaint();
                 });
+            }
+            Response::OcrProgress { .. } | Response::OcrFinished { .. } => {
+                if let Some(n) = self.ocr.on_response(&resp) {
+                    self.notice(&n);
+                }
             }
             Response::Printed { pages } => {
                 if let Some(n) = pages {
@@ -1549,6 +1556,12 @@ impl App {
                     });
                     if let Some(a) = sidebar::page_menu(ui, n, total) {
                         self.page_action(a);
+                    }
+                    ui.separator();
+                    if ui.button("Recognise text (OCR)…").clicked()
+                        && let Some(t) = self.tabs.get(self.active)
+                    {
+                        self.ocr.open(t.id, t.page_selection.len() > 1);
                     }
                 });
             });
@@ -2405,6 +2418,9 @@ impl eframe::App for App {
             self.page_action(a);
         }
         self.split_dialog(&ctx);
+        for r in self.ocr.show(&ctx, self.tabs.get(self.active)) {
+            self.send(r);
+        }
         self.password_dialog(&ctx);
         self.unsaved_dialog(&ctx);
         self.print_dialog_ui(&ctx);

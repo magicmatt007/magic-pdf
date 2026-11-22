@@ -336,6 +336,21 @@ pub mod form_mods {
     pub const ALT: i32 = 1 << 2;
 }
 
+/// How a text recognition run ended.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OcrOutcome {
+    Done {
+        /// Pages that received a text layer.
+        recognised: usize,
+        /// Pages skipped because they already have text.
+        skipped: usize,
+        /// Words added.
+        words: usize,
+    },
+    Cancelled,
+    Failed(String),
+}
+
 /// Print settings for the CUPS (`lp`) path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrintJob {
@@ -483,6 +498,21 @@ pub enum Request {
     MarkDirty {
         doc: DocId,
     },
+    /// Recognise text (OCR) on `pages` with Tesseract (`exe`) in `languages` (e.g.
+    /// "deu+eng") and add it as an invisible text layer, as one undoable edit. Pages
+    /// that already have text are skipped unless `force` (which also replaces an
+    /// earlier recognition). Answered with `OcrProgress` and finally `OcrFinished`.
+    Ocr {
+        doc: DocId,
+        pages: Vec<usize>,
+        exe: PathBuf,
+        languages: String,
+        force: bool,
+    },
+    /// Stop a running recognition; nothing is added to the document.
+    CancelOcr {
+        doc: DocId,
+    },
     /// Show the native print dialog and print (Windows).
     #[cfg_attr(not(windows), allow(dead_code))]
     PrintNative {
@@ -594,6 +624,17 @@ pub enum Response {
     PrintReady {
         job: PrintJob,
         bytes: Vec<u8>,
+    },
+    /// Text recognition is working on its `done + 1`th of `total` pages.
+    OcrProgress {
+        doc: DocId,
+        done: usize,
+        total: usize,
+    },
+    /// Text recognition ended (also when cancelled or failed).
+    OcrFinished {
+        doc: DocId,
+        result: OcrOutcome,
     },
     /// Native printing finished (`None`: cancelled).
     #[cfg_attr(not(windows), allow(dead_code))]

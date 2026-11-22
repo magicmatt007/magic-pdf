@@ -419,6 +419,32 @@ impl Doc {
                 })?;
                 self.import_pages(&src, pages.as_deref(), *at)
             }
+            PageOp::TextLayer { pages, replace } => {
+                const FPDF_FONT_TRUETYPE: c_int = 2;
+                let ttf = crate::fonts::REGULAR;
+                // One embedded font (as CID font, so any Unicode text can be stored)
+                // shared by all text objects of this operation.
+                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                if font.is_null() {
+                    return Err("PDFium could not load the text layer font".into());
+                }
+                let result = pages.iter().try_for_each(|(i, words)| {
+                    let page = self.page(*i).ok_or("page not found")?;
+                    if *replace {
+                        page.remove_invisible_text();
+                    }
+                    page.add_invisible_words(words, font);
+                    if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
+                        Ok(())
+                    } else {
+                        Err("PDFium could not write the page content".to_string())
+                    }
+                });
+                unsafe { lib.FPDFFont_Close(font) };
+                // Text pages are re-read on next use.
+                self.close_all_pages();
+                result.map(|()| 0)
+            }
         }
     }
 
@@ -579,6 +605,135 @@ impl<'d> Page<'d> {
             }
             lib.FPDFBitmap_Destroy(bitmap);
             Some(out)
+        }
+    }
+
+    /// Renders the page content alone (no annotations or form fields) as 8-bit grey
+    /// pixels, for text recognition.
+    pub fn render_gray(&self, width: usize, height: usize) -> Option<Vec<u8>> {
+        let lib = self.lib();
+        unsafe {
+            let bitmap = lib.FPDFBitmap_CreateEx(width as c_int, height as c_int, FPDF_BITMAP_BGRA, ptr::null_mut(), 0);
+            if bitmap.is_null() {
+                return None;
+            }
+            lib.FPDFBitmap_FillRect(bitmap, 0, 0, width as c_int, height as c_int, 0xFFFF_FFFF);
+            lib.FPDF_RenderPageBitmap(bitmap, self.handle, 0, 0, width as c_int, height as c_int, 0, 0);
+            let stride = lib.FPDFBitmap_GetStride(bitmap) as usize;
+            let buf = lib.FPDFBitmap_GetBuffer(bitmap) as *const u8;
+            let mut out = Vec::with_capacity(width * height);
+            for y in 0..height {
+                let row = std::slice::from_raw_parts(buf.add(y * stride), width * 4);
+                out.extend(row.as_chunks::<4>().0.iter().map(|px| {
+                    ((px[0] as u32 * 114 + px[1] as u32 * 587 + px[2] as u32 * 299) / 1000) as u8
+                }));
+            }
+            lib.FPDFBitmap_Destroy(bitmap);
+            Some(out)
+        }
+    }
+
+    /// Number of characters of the page's text that are not white space.
+    pub fn text_char_count(&self) -> usize {
+        let lib = self.lib();
+        let Some(tp) = self.text_page() else { return 0 };
+        let n = unsafe { lib.FPDFText_CountChars(tp.handle) };
+        (0..n)
+            .filter(|&i| char::from_u32(unsafe { lib.FPDFText_GetUnicode(tp.handle, i) }).is_some_and(|c| !c.is_whitespace()))
+            .count()
+    }
+
+    /// Maps a point of a `width` x `height` rendering (as from `render_gray`) to page space.
+    fn device_to_page(&self, width: usize, height: usize, x: f32, y: f32) -> (f32, f32) {
+        let (mut px, mut py) = (0.0, 0.0);
+        unsafe {
+            self.lib().FPDF_DeviceToPage(
+                self.handle,
+                0,
+                0,
+                width as c_int,
+                height as c_int,
+                0,
+                x.round() as c_int,
+                y.round() as c_int,
+                &mut px,
+                &mut py,
+            )
+        };
+        (px as f32, py as f32)
+    }
+
+    /// Places words recognised on a `width` x `height` rendering of this page.
+    pub fn place_ocr_words(&self, width: usize, height: usize, words: Vec<super::ocr::HocrWord>) -> Vec<super::ocr::OcrWord> {
+        words
+            .into_iter()
+            .filter_map(|w| {
+                let origin = self.device_to_page(width, height, w.bbox[0], w.baseline);
+                let end = self.device_to_page(width, height, w.bbox[2], w.baseline);
+                let top = self.device_to_page(width, height, w.bbox[0], w.baseline - w.size);
+                let (ux, uy) = (top.0 - origin.0, top.1 - origin.1);
+                let size = ux.hypot(uy);
+                (size > 0.0).then(|| super::ocr::OcrWord {
+                    text: w.text,
+                    origin,
+                    end,
+                    up: (ux / size, uy / size),
+                    size,
+                })
+            })
+            .collect()
+    }
+
+    /// Adds words as invisible text (render mode 3), each stretched along its baseline
+    /// to the width the word has in the image. Call FPDFPage_GenerateContent after.
+    fn add_invisible_words(&self, words: &[super::ocr::OcrWord], font: FPDF_FONT) {
+        const INVISIBLE: FPDF_TEXT_RENDERMODE = 3;
+        let lib = self.lib();
+        for w in words {
+            unsafe {
+                let obj = lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, w.size);
+                if obj.is_null() {
+                    continue;
+                }
+                let text = wide(&w.text);
+                lib.FPDFText_SetText(obj, text.as_ptr());
+                lib.FPDFTextObj_SetTextRenderMode(obj, INVISIBLE);
+                let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                let ok = lib.FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t);
+                let natural = r - l;
+                if !lib.is_true(ok) || natural <= 0.0 {
+                    lib.FPDFPageObj_Destroy(obj);
+                    continue;
+                }
+                // Text space x runs along the baseline (scaled to the word's width),
+                // y along `up`; the left edge of the glyphs lands on `origin`.
+                let a = (w.end.0 - w.origin.0) / natural;
+                let bb = (w.end.1 - w.origin.1) / natural;
+                let (c, d) = w.up;
+                let e = w.origin.0 - a * l;
+                let f = w.origin.1 - bb * l;
+                lib.FPDFPageObj_Transform(obj, a as f64, bb as f64, c as f64, d as f64, e as f64, f as f64);
+                lib.FPDFPage_InsertObject(self.handle, obj);
+            }
+        }
+    }
+
+    /// Removes invisible text objects (an earlier text recognition).
+    fn remove_invisible_text(&self) {
+        const FPDF_PAGEOBJ_TEXT: c_int = 1;
+        const INVISIBLE: FPDF_TEXT_RENDERMODE = 3;
+        let lib = self.lib();
+        unsafe {
+            for i in (0..lib.FPDFPage_CountObjects(self.handle)).rev() {
+                let obj = lib.FPDFPage_GetObject(self.handle, i);
+                if !obj.is_null()
+                    && lib.FPDFPageObj_GetType(obj) == FPDF_PAGEOBJ_TEXT
+                    && lib.FPDFTextObj_GetTextRenderMode(obj) == INVISIBLE
+                    && lib.is_true(lib.FPDFPage_RemoveObject(self.handle, obj))
+                {
+                    lib.FPDFPageObj_Destroy(obj);
+                }
+            }
         }
     }
 
