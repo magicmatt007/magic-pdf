@@ -105,8 +105,13 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
     }
 
-    fn start() -> Engine {
-        Engine::start(|| {}).expect("PDFium available (run scripts/fetch-pdfium.sh)")
+    /// PDFium is not thread-safe, so engine tests run one at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn start() -> (std::sync::MutexGuard<'static, ()>, Engine) {
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = Engine::start(|| {}).expect("PDFium available (run scripts/fetch-pdfium.sh)");
+        (guard, engine)
     }
 
     fn open(engine: &Engine, doc: DocId, path: PathBuf) -> DocInfo {
@@ -159,7 +164,7 @@ mod tests {
 
     #[test]
     fn open_render_text_search() {
-        let engine = start();
+        let (_serial, engine) = start();
         let info = open(&engine, 1, sample());
         assert_eq!(info.page_sizes.len(), 40);
         assert_eq!(info.page_sizes[2], (842.0, 595.0));
@@ -243,7 +248,7 @@ mod tests {
         let out = dir.join("out.pdf");
         std::fs::copy(sample(), &src).unwrap();
 
-        let engine = start();
+        let (_serial, engine) = start();
         open(&engine, 1, src.clone());
         let (_, before) = render(&engine, 1, 0, Rotation::R0, 0);
 
@@ -406,7 +411,7 @@ mod tests {
         let out = dir.join("filled.pdf");
         let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
 
-        let engine = start();
+        let (_serial, engine) = start();
         open(&engine, 1, form);
         engine.send(Request::ScanAnnots { doc: 1 });
         let ws = widgets(&engine, 1);

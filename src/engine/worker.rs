@@ -94,6 +94,18 @@ struct Worker {
     wake: Box<dyn Fn() + Send>,
 }
 
+/// Binds and initialises PDFium once per process; it stays loaded until exit.
+fn shared_pdfium() -> Result<&'static Pdfium, String> {
+    static PDFIUM: std::sync::Mutex<Option<&'static Pdfium>> = std::sync::Mutex::new(None);
+    let mut slot = PDFIUM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = *slot {
+        return Ok(p);
+    }
+    let p: &'static Pdfium = Box::leak(Box::new(bind_pdfium()?));
+    *slot = Some(p);
+    Ok(p)
+}
+
 fn bind_pdfium() -> Result<Pdfium, String> {
     let mut errors = Vec::new();
     for dir in library_search_dirs() {
@@ -128,7 +140,7 @@ pub(super) fn run(
     ready: Sender<Result<(), String>>,
     wake: Box<dyn Fn() + Send>,
 ) {
-    let pdfium = match bind_pdfium() {
+    let pdfium = match shared_pdfium() {
         Ok(p) => p,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -136,8 +148,6 @@ pub(super) fn run(
         }
     };
     let _ = ready.send(Ok(()));
-    // The library stays initialised for the whole process.
-    let pdfium: &'static Pdfium = Box::leak(Box::new(pdfium));
     let lib: Lib = pdfium.bindings();
 
     let mut w = Worker {
