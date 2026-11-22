@@ -579,7 +579,7 @@ impl App {
         }
     }
 
-    /// Sends keyboard input to the focused form field. Returns early (leaving events in
+    /// Sends keyboard input to the focused form field. Does nothing (leaving events in
     /// place) when no field has focus or an egui widget is being typed into.
     fn route_form_keys(&mut self, ctx: &egui::Context) {
         let Some(tab) = self.tabs.get(self.active) else { return };
@@ -587,82 +587,7 @@ impl App {
             return;
         }
         let doc = tab.id;
-        let mut reqs = Vec::new();
-        let mut kill_focus = false;
-        ctx.input_mut(|i| {
-            i.events.retain(|e| {
-                match e {
-                    egui::Event::Text(t) => {
-                        for c in t.chars() {
-                            reqs.push(Request::FormKey {
-                                doc,
-                                key: FormKey::Char(c as u32),
-                                modifiers: 0,
-                            });
-                        }
-                        false
-                    }
-                    egui::Event::Paste(text) => {
-                        reqs.push(Request::FormPaste { doc, text: text.clone() });
-                        false
-                    }
-                    egui::Event::Copy => {
-                        reqs.push(Request::FormCopy { doc, cut: false });
-                        false
-                    }
-                    egui::Event::Cut => {
-                        reqs.push(Request::FormCopy { doc, cut: true });
-                        false
-                    }
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => {
-                        let ctrl = modifiers.command || modifiers.ctrl;
-                        if ctrl {
-                            match key {
-                                Key::A => reqs.push(Request::FormSelectAll { doc }),
-                                Key::Z if modifiers.shift => reqs.push(Request::FormUndo { doc, redo: true }),
-                                Key::Z => reqs.push(Request::FormUndo { doc, redo: false }),
-                                Key::Y => reqs.push(Request::FormUndo { doc, redo: true }),
-                                // Other shortcuts (save, print, …) keep working.
-                                _ => return true,
-                            }
-                            return false;
-                        }
-                        if *key == Key::Escape {
-                            kill_focus = true;
-                            return false;
-                        }
-                        let Some(vk) = virtual_key(*key) else { return true };
-                        let mods = (if modifiers.shift { form_mods::SHIFT } else { 0 })
-                            | (if modifiers.alt { form_mods::ALT } else { 0 });
-                        reqs.push(Request::FormKey {
-                            doc,
-                            key: FormKey::Down(vk),
-                            modifiers: mods,
-                        });
-                        // Keys that produce characters PDFium expects as WM_CHAR-style input.
-                        let ch = match key {
-                            Key::Backspace => Some(8),
-                            Key::Enter => Some(13),
-                            _ => None,
-                        };
-                        if let Some(c) = ch {
-                            reqs.push(Request::FormKey {
-                                doc,
-                                key: FormKey::Char(c),
-                                modifiers: mods,
-                            });
-                        }
-                        false
-                    }
-                    _ => true,
-                }
-            });
-        });
+        let (mut reqs, kill_focus) = ctx.input_mut(|i| take_form_input(&mut i.events, doc));
         if kill_focus {
             reqs.push(Request::FormKillFocus { doc });
             if let Some(t) = self.tabs.get_mut(self.active) {
@@ -1661,6 +1586,94 @@ impl eframe::App for App {
     }
 }
 
+/// Removes the keyboard input meant for a focused form field from `events` and turns it
+/// into engine requests. Returns the requests and whether Esc asked to leave the field.
+///
+/// Plain key presses all belong to the field, so single-letter tool shortcuts cannot
+/// fire while typing. Ctrl shortcuts other than the field's own editing commands
+/// (save, print, …) and the function keys stay in `events` for the app.
+fn take_form_input(events: &mut Vec<egui::Event>, doc: DocId) -> (Vec<Request>, bool) {
+    let mut reqs = Vec::new();
+    let mut kill_focus = false;
+    events.retain(|e| match e {
+        egui::Event::Text(t) => {
+            for c in t.chars() {
+                reqs.push(Request::FormKey {
+                    doc,
+                    key: FormKey::Char(c as u32),
+                    modifiers: 0,
+                });
+            }
+            false
+        }
+        egui::Event::Paste(text) => {
+            reqs.push(Request::FormPaste { doc, text: text.clone() });
+            false
+        }
+        egui::Event::Copy => {
+            reqs.push(Request::FormCopy { doc, cut: false });
+            false
+        }
+        egui::Event::Cut => {
+            reqs.push(Request::FormCopy { doc, cut: true });
+            false
+        }
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            if modifiers.command || modifiers.ctrl {
+                match key {
+                    Key::A => reqs.push(Request::FormSelectAll { doc }),
+                    Key::Z if modifiers.shift => reqs.push(Request::FormUndo { doc, redo: true }),
+                    Key::Z => reqs.push(Request::FormUndo { doc, redo: false }),
+                    Key::Y => reqs.push(Request::FormUndo { doc, redo: true }),
+                    // Other shortcuts (save, print, …) keep working.
+                    _ => return true,
+                }
+                return false;
+            }
+            if *key == Key::Escape {
+                kill_focus = true;
+                return false;
+            }
+            let Some(vk) = virtual_key(*key) else {
+                // Letters and other keys arrive as Text; keep only function keys (F3, F9…).
+                return is_function_key(*key);
+            };
+            let mods = (if modifiers.shift { form_mods::SHIFT } else { 0 })
+                | (if modifiers.alt { form_mods::ALT } else { 0 });
+            reqs.push(Request::FormKey {
+                doc,
+                key: FormKey::Down(vk),
+                modifiers: mods,
+            });
+            // Keys that produce characters PDFium expects as WM_CHAR-style input.
+            let ch = match key {
+                Key::Backspace => Some(8),
+                Key::Enter => Some(13),
+                _ => None,
+            };
+            if let Some(c) = ch {
+                reqs.push(Request::FormKey {
+                    doc,
+                    key: FormKey::Char(c),
+                    modifiers: mods,
+                });
+            }
+            false
+        }
+        _ => true,
+    });
+    (reqs, kill_focus)
+}
+
+fn is_function_key(key: Key) -> bool {
+    key.name().strip_prefix('F').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Windows virtual-key codes, which PDFium's form module uses on every platform.
 fn virtual_key(key: Key) -> Option<u32> {
     Some(match key {
@@ -1680,4 +1693,75 @@ fn virtual_key(key: Key) -> Option<u32> {
         Key::Delete => 0x2E,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn chars(reqs: &[Request]) -> String {
+        reqs.iter()
+            .filter_map(|r| match r {
+                Request::FormKey {
+                    key: FormKey::Char(c), ..
+                } => char::from_u32(*c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typing_letters_never_reaches_tool_shortcuts() {
+        // Typing "He": each letter arrives as a key press plus a text event.
+        let mut events = vec![
+            key(Key::H, Modifiers::SHIFT),
+            egui::Event::Text("H".into()),
+            key(Key::E, Modifiers::NONE),
+            egui::Event::Text("e".into()),
+        ];
+        let (reqs, kill) = take_form_input(&mut events, 1);
+        assert!(events.is_empty(), "letter keys left for shortcuts: {events:?}");
+        assert_eq!(chars(&reqs), "He");
+        assert!(!kill);
+    }
+
+    #[test]
+    fn app_shortcuts_and_function_keys_still_work() {
+        let mut events = vec![
+            key(Key::S, Modifiers::COMMAND),
+            key(Key::P, Modifiers::COMMAND),
+            key(Key::F3, Modifiers::NONE),
+            egui::Event::PointerGone,
+        ];
+        let (reqs, _) = take_form_input(&mut events, 1);
+        assert!(reqs.is_empty());
+        assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn editing_keys_go_to_the_field() {
+        let mut events = vec![
+            key(Key::Backspace, Modifiers::NONE),
+            key(Key::Delete, Modifiers::NONE),
+            key(Key::Z, Modifiers::COMMAND),
+            key(Key::Escape, Modifiers::NONE),
+        ];
+        let (reqs, kill) = take_form_input(&mut events, 1);
+        assert!(events.is_empty());
+        assert!(kill);
+        assert!(matches!(reqs[0], Request::FormKey { key: FormKey::Down(0x08), .. }));
+        assert!(matches!(reqs[1], Request::FormKey { key: FormKey::Char(8), .. }));
+        assert!(matches!(reqs[2], Request::FormKey { key: FormKey::Down(0x2E), .. }));
+        assert!(matches!(reqs[3], Request::FormUndo { redo: false, .. }));
+    }
 }
