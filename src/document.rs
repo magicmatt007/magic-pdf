@@ -112,6 +112,8 @@ pub struct DocTab {
     pub annots: HashMap<usize, Vec<AnnotInfo>>,
     pub annots_scanned: bool,
     pub selected_annot: Option<AnnotSelection>,
+    /// Mark the document unsaved once opened (a tab moved here with unsaved changes).
+    pub mark_dirty_on_open: bool,
     /// A just-created annotation to open for typing once it is listed.
     pub pending_edit: Option<(usize, usize)>,
     pub draft: Option<Draft>,
@@ -180,6 +182,7 @@ impl DocTab {
             annots_scanned: false,
             selected_annot: None,
             pending_edit: None,
+            mark_dirty_on_open: false,
             draft: None,
             page_versions: HashMap::new(),
             can_undo: false,

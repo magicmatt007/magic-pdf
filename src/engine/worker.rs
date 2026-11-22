@@ -364,6 +364,22 @@ impl Worker {
                     Err(e) => self.error(doc, format!("Splitting failed: {e}")),
                 }
             }
+            Request::ExportToFile { doc, path } => {
+                let Some(od) = self.docs.get(&doc) else { return };
+                let result = od
+                    .export(self.lib)
+                    .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+                match result {
+                    Ok(()) => self.send(Response::ExportedTo { doc, path }),
+                    Err(e) => self.error(doc, format!("Moving the document failed: {e}")),
+                }
+            }
+            Request::MarkDirty { doc } => {
+                if let Some(od) = self.docs.get_mut(&doc) {
+                    od.form_dirty = true;
+                }
+                self.send_edit_state(doc);
+            }
             Request::PrintNative {
                 doc,
                 title,

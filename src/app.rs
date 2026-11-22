@@ -1,6 +1,6 @@
 //! Application shell: tabs, menus, toolbar, keyboard shortcuts and engine plumbing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -76,12 +76,75 @@ pub struct App {
     screenshot_requested: bool,
     /// Pages per file for the "Split document" dialog (None: dialog closed).
     split_every: Option<usize>,
+    /// Connection to other magic-pdf windows.
+    ipc: Option<crate::ipc::Server>,
+    /// Index of the tab being dragged in the tab bar.
+    tab_drag: Option<usize>,
+    /// Other windows, listed in a tab's "Move to window" menu.
+    tab_menu_peers: Vec<(crate::ipc::Peer, String)>,
+    /// Tabs being moved to another window, waiting for their export.
+    moves: HashMap<DocId, MoveTarget>,
+    /// Temporary files of tabs received from other windows, deleted once opened.
+    temp_files: HashMap<DocId, PathBuf>,
+    was_focused: bool,
+}
+
+/// Where a tab is moved.
+#[derive(Clone, Debug, PartialEq)]
+enum MoveTarget {
+    /// A new magic-pdf window, opened at this screen position if known.
+    NewWindow(Option<[f32; 2]>),
+    Peer(crate::ipc::Peer),
+}
+
+/// Outcome of releasing a dragged tab.
+#[derive(Clone, Debug, PartialEq)]
+enum TabDrop {
+    Stay,
+    /// Move the tab to this position in the tab bar.
+    Reorder(usize),
+    /// Over another magic-pdf window (index into the peer list).
+    Peer(usize),
+    /// Outside every window: open a new one (at this screen position if known).
+    NewWindow(Option<[f32; 2]>),
+}
+
+/// Decides what dropping a dragged tab at `pointer` (window coordinates) means.
+/// `origin` is the window's screen position (unknown on Wayland); `peer_rects` are the
+/// other windows' screen rectangles as `[x, y, w, h]`.
+fn decide_tab_drop(
+    pointer: Option<egui::Pos2>,
+    window: egui::Rect,
+    origin: Option<egui::Pos2>,
+    tab_rects: &[egui::Rect],
+    peer_rects: &[Option<[f32; 4]>],
+) -> TabDrop {
+    let Some(p) = pointer else { return TabDrop::NewWindow(None) };
+    if window.contains(p) {
+        // The whole width of the tab bar counts (dropping right of the last tab moves
+        // the tab to the end).
+        let tabs = tab_rects.iter().fold(egui::Rect::NOTHING, |a, r| a.union(*r));
+        if !(tabs.top() - 12.0..=tabs.bottom() + 12.0).contains(&p.y) {
+            return TabDrop::Stay;
+        }
+        let index = tab_rects.iter().position(|r| p.x < r.center().x).unwrap_or(tab_rects.len().saturating_sub(1));
+        return TabDrop::Reorder(index);
+    }
+    let global = origin.map(|o| o + p.to_vec2());
+    if let Some(g) = global
+        && let Some(i) = peer_rects
+            .iter()
+            .position(|r| r.is_some_and(|[x, y, w, h]| g.x >= x && g.x <= x + w && g.y >= y && g.y <= y + h))
+    {
+        return TabDrop::Peer(i);
+    }
+    TabDrop::NewWindow(global.map(|g| [g.x, g.y]))
 }
 
 type PrintResult = Result<String, String>;
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, args: crate::Args) -> Self {
         let ctx = cc.egui_ctx.clone();
         let wake_ctx = ctx.clone();
         let engine = Engine::start(move || wake_ctx.request_repaint());
@@ -119,11 +182,141 @@ impl App {
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             screenshot_requested: false,
             split_every: None,
+            ipc: None,
+            tab_drag: None,
+            tab_menu_peers: Vec::new(),
+            moves: HashMap::new(),
+            temp_files: HashMap::new(),
+            was_focused: true,
         };
-        for f in files {
+        let wake = app.ctx.clone();
+        match crate::ipc::Server::start(move || wake.request_repaint()) {
+            Ok(server) => app.ipc = Some(server),
+            Err(e) => log::warn!("other windows cannot reach this one: {e}"),
+        }
+        for f in args.files {
             app.open(&f);
         }
+        if let Some(t) = args.take {
+            app.take(t);
+        }
         app
+    }
+
+    /// Opens a tab handed over from another window.
+    fn take(&mut self, t: crate::ipc::TabTransfer) {
+        let original = simplify_path(t.original.clone());
+        if self.tabs.iter().any(|tab| tab.path == original) {
+            self.error = Some(format!("{} is already open in this window.", original.display()));
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut tab = DocTab::new(id, original.clone(), self.settings.default_mode, self.settings.file_state(&original));
+        tab.pending_goto = Some(t.page);
+        tab.mark_dirty_on_open = t.dirty;
+        self.send(Request::Open {
+            doc: id,
+            path: t.file.clone(),
+            password: None,
+        });
+        if t.file != t.original {
+            self.temp_files.insert(id, t.file);
+        }
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+    }
+
+    /// Moves a tab to another window (exporting unsaved changes first).
+    fn move_tab(&mut self, doc: DocId, target: MoveTarget) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == doc) else { return };
+        if tab.info().is_none() {
+            return;
+        }
+        if tab.dirty {
+            let name = tab.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = std::env::temp_dir().join(format!("magic-pdf-move-{}-{doc}-{name}", std::process::id()));
+            self.moves.insert(doc, target);
+            self.send(Request::ExportToFile { doc, path });
+        } else {
+            let path = tab.path.clone();
+            self.complete_move(doc, path, target);
+        }
+    }
+
+    fn complete_move(&mut self, doc: DocId, file: PathBuf, target: MoveTarget) {
+        let Some(index) = self.tabs.iter().position(|t| t.id == doc) else { return };
+        let tab = &self.tabs[index];
+        let transfer = crate::ipc::TabTransfer {
+            file: file.clone(),
+            original: tab.path.clone(),
+            page: tab.current_page,
+            dirty: tab.dirty,
+        };
+        let result = match target {
+            MoveTarget::Peer(peer) => {
+                if peer.send(&crate::ipc::Message::Take(transfer)) {
+                    Ok(())
+                } else {
+                    Err("the other window did not respond".to_string())
+                }
+            }
+            MoveTarget::NewWindow(at) => {
+                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "magic-pdf".into()));
+                if let Some([x, y]) = at {
+                    cmd.arg("--at").arg(format!("{x},{y}"));
+                }
+                cmd.arg("--take")
+                    .arg(&transfer.file)
+                    .arg(&transfer.original)
+                    .arg(transfer.page.to_string())
+                    .arg(if transfer.dirty { "1" } else { "0" });
+                cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+            }
+        };
+        match result {
+            // The other window has it now (including unsaved changes): close here
+            // without asking to save.
+            Ok(()) => self.close_tab_now(index),
+            Err(e) => {
+                if file != self.tabs[index].path {
+                    let _ = std::fs::remove_file(&file);
+                }
+                self.error = Some(format!("Could not move the tab: {e}"));
+            }
+        }
+    }
+
+    /// Handles requests from other windows and tells them where this window is.
+    fn handle_ipc(&mut self, ctx: &egui::Context) {
+        let Some(server) = &self.ipc else { return };
+        let messages: Vec<_> = server.messages.try_iter().collect();
+        let (rect, focused) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.focused.unwrap_or(false))
+        });
+        if let Ok(mut w) = server.window.lock() {
+            w.rect = rect.map(|r| [r.min.x, r.min.y, r.width(), r.height()]);
+            w.title = match self.tabs.get(self.active) {
+                Some(t) => format!("{} — magic-pdf", t.name),
+                None => "magic-pdf".into(),
+            };
+        }
+        if focused && !self.was_focused {
+            // The most recently used window receives files opened from the desktop.
+            server.touch();
+        }
+        self.was_focused = focused;
+        for m in messages {
+            match m {
+                crate::ipc::Message::Open(path) => self.open(&path),
+                crate::ipc::Message::Take(t) => self.take(t),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
     }
 
     fn send(&self, req: Request) {
@@ -270,7 +463,15 @@ impl App {
                     tab.state = LoadState::Ready(info);
                     let page = tab.pending_goto.unwrap_or(0);
                     tab.goto_page(page);
+                    let mark_dirty = std::mem::take(&mut tab.mark_dirty_on_open);
                     self.send(Request::ScanAnnots { doc });
+                    if mark_dirty {
+                        self.send(Request::MarkDirty { doc });
+                    }
+                    if let Some(tmp) = self.temp_files.remove(&doc) {
+                        // The document is in memory now.
+                        let _ = std::fs::remove_file(tmp);
+                    }
                 }
             }
             Response::OpenFailed {
@@ -425,6 +626,11 @@ impl App {
                 }
             }
             Response::Exported { message } => self.notice(&message),
+            Response::ExportedTo { doc, path } => {
+                if let Some(target) = self.moves.remove(&doc) {
+                    self.complete_move(doc, path, target);
+                }
+            }
             Response::PageWidgets { doc, page, widgets } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     if widgets.is_empty() {
@@ -1465,18 +1671,54 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut Ui) {
         let mut close = None;
+        let mut move_to = None;
+        let mut tab_rects = Vec::new();
         egui::ScrollArea::horizontal().id_salt("tabbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let resp = ui
-                        .selectable_label(i == self.active, tab.title())
-                        .on_hover_text(tab.path.display().to_string());
+                        .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
+                        .on_hover_text(format!("{}\nDrag out of the window to open it in its own window", tab.path.display()));
+                    tab_rects.push(resp.rect);
                     if resp.clicked() {
                         self.active = i;
                     }
                     if resp.middle_clicked() {
                         close = Some(tab.id);
                     }
+                    if resp.drag_started_by(egui::PointerButton::Primary) {
+                        self.tab_drag = Some(i);
+                        self.active = i;
+                    }
+                    if resp.secondary_clicked() {
+                        // Listed once when the menu opens (asks the other windows).
+                        self.tab_menu_peers = crate::ipc::peers()
+                            .into_iter()
+                            .filter_map(|p| p.window().map(|w| (p, w.title)))
+                            .collect();
+                    }
+                    let (doc, peers) = (tab.id, &self.tab_menu_peers);
+                    resp.context_menu(|ui| {
+                        if ui.button("Move to new window").clicked() {
+                            move_to = Some((doc, MoveTarget::NewWindow(None)));
+                            ui.close();
+                        }
+                        ui.add_enabled_ui(!peers.is_empty(), |ui| {
+                            ui.menu_button("Move to window", |ui| {
+                                for (peer, title) in peers {
+                                    if ui.button(title).clicked() {
+                                        move_to = Some((doc, MoveTarget::Peer(peer.clone())));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                        if ui.button("Close").clicked() {
+                            close = Some(doc);
+                            ui.close();
+                        }
+                    });
                     if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text("Close (Ctrl+W)").clicked() {
                         close = Some(tab.id);
                     }
@@ -1484,8 +1726,66 @@ impl App {
                 }
             });
         });
+        self.tab_drag_feedback(ui.ctx(), &tab_rects, &mut move_to);
+        if let Some((doc, target)) = move_to {
+            self.move_tab(doc, target);
+        }
         if let Some(id) = close {
             self.request_close(vec![id], false);
+        }
+    }
+
+    /// Shows the dragged tab under the pointer and handles the drop.
+    fn tab_drag_feedback(&mut self, ctx: &egui::Context, tab_rects: &[egui::Rect], move_to: &mut Option<(DocId, MoveTarget)>) {
+        let Some(i) = self.tab_drag else { return };
+        let Some(tab) = self.tabs.get(i) else {
+            self.tab_drag = None;
+            return;
+        };
+        let (pointer, down, window, origin) = ctx.input(|inp| {
+            (
+                inp.pointer.latest_pos(),
+                inp.pointer.primary_down(),
+                inp.viewport_rect(),
+                inp.viewport().inner_rect.map(|r| r.min),
+            )
+        });
+        if down {
+            if let Some(p) = pointer {
+                let outside = !window.contains(p);
+                egui::Area::new(egui::Id::unique("tab_drag"))
+                    .fixed_pos(p + egui::vec2(12.0, 8.0))
+                    .order(egui::Order::Tooltip)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(tab.title());
+                            if outside {
+                                ui.weak("Release to move it to its own window");
+                            }
+                        });
+                    });
+            }
+            return;
+        }
+        self.tab_drag = None;
+        let pointer_outside = pointer.is_none_or(|p| !window.contains(p));
+        let peers = if pointer_outside && origin.is_some() {
+            crate::ipc::peers()
+        } else {
+            Vec::new()
+        };
+        let peer_rects: Vec<Option<[f32; 4]>> = peers.iter().map(|p| p.window().and_then(|w| w.rect)).collect();
+        match decide_tab_drop(pointer, window, origin, tab_rects, &peer_rects) {
+            TabDrop::Stay => {}
+            TabDrop::Reorder(j) if j != i => {
+                let tab = self.tabs.remove(i);
+                self.tabs.insert(j, tab);
+                self.active = j;
+            }
+            TabDrop::Reorder(_) => {}
+            TabDrop::Peer(p) => *move_to = Some((tab.id, MoveTarget::Peer(peers[p].clone()))),
+            TabDrop::NewWindow(at) => *move_to = Some((tab.id, MoveTarget::NewWindow(at))),
         }
     }
 
@@ -1750,6 +2050,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.cache.begin_frame();
         self.process_responses();
+        self.handle_ipc(&ctx);
         self.handle_close_request(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
@@ -2006,6 +2307,33 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn dropping_a_dragged_tab() {
+        use egui::{Rect, pos2, vec2};
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0));
+        let tabs = [
+            Rect::from_min_size(pos2(10.0, 50.0), vec2(100.0, 20.0)),
+            Rect::from_min_size(pos2(120.0, 50.0), vec2(100.0, 20.0)),
+            Rect::from_min_size(pos2(230.0, 50.0), vec2(100.0, 20.0)),
+        ];
+        let origin = Some(pos2(500.0, 300.0));
+        let other = [Some([1600.0, 300.0, 800.0, 600.0])];
+        // In the tab bar: reorder.
+        assert_eq!(decide_tab_drop(Some(pos2(130.0, 60.0)), window, origin, &tabs, &other), TabDrop::Reorder(1));
+        assert_eq!(decide_tab_drop(Some(pos2(900.0, 60.0)), window, origin, &tabs, &other), TabDrop::Reorder(2));
+        // On the page: nothing happens.
+        assert_eq!(decide_tab_drop(Some(pos2(500.0, 500.0)), window, origin, &tabs, &other), TabDrop::Stay);
+        // Over the other window (screen x = 500 + 1200 = 1700).
+        assert_eq!(decide_tab_drop(Some(pos2(1200.0, 100.0)), window, origin, &tabs, &other), TabDrop::Peer(0));
+        // Elsewhere outside: new window at the drop point.
+        assert_eq!(
+            decide_tab_drop(Some(pos2(-200.0, 100.0)), window, origin, &tabs, &other),
+            TabDrop::NewWindow(Some([300.0, 400.0]))
+        );
+        // Window position unknown (Wayland): always a new window.
+        assert_eq!(decide_tab_drop(Some(pos2(1200.0, 100.0)), window, None, &tabs, &other), TabDrop::NewWindow(None));
     }
 
     #[test]

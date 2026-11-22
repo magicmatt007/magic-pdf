@@ -440,6 +440,17 @@ pub enum Request {
         dir: PathBuf,
         stem: String,
     },
+    /// Write the document with all edits to `path` (for moving a tab to another
+    /// window); answered with `ExportedTo`.
+    ExportToFile {
+        doc: DocId,
+        path: PathBuf,
+    },
+    /// Treat the document as having unsaved changes (a tab moved here from another
+    /// window with unsaved edits).
+    MarkDirty {
+        doc: DocId,
+    },
     /// Show the native print dialog and print (Windows).
     #[cfg_attr(not(windows), allow(dead_code))]
     PrintNative {
@@ -525,6 +536,10 @@ pub enum Response {
         doc: DocId,
         info: DocInfo,
         mapping: super::pages::PageMapping,
+    },
+    ExportedTo {
+        doc: DocId,
+        path: PathBuf,
     },
     /// Pages were written to other files.
     Exported {
