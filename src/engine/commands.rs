@@ -223,9 +223,8 @@ impl AnnotKind {
     /// How the kind can be resized.
     pub fn resize(self) -> Resize {
         match self {
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink => Resize::Free,
-            // A text box's height follows its text.
-            AnnotKind::FreeText => Resize::WidthOnly,
+            // A text box can be made larger than its text, never smaller.
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::FreeText => Resize::Free,
             _ => Resize::None,
         }
     }
@@ -244,7 +243,6 @@ pub type Rgb = [u8; 3];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resize {
     None,
-    WidthOnly,
     Free,
 }
 

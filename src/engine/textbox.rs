@@ -158,13 +158,14 @@ fn rgb(c: Rgb) -> String {
     )
 }
 
-/// Lays out `rich` in a box whose top-left corner and width come from `rect`.
-/// Returns the box rectangle (height fitted to the text) and the appearance stream.
+/// Lays out `rich` in a box at `rect`. The box keeps its top edge, width and height,
+/// but grows downwards if the text needs more room. Returns the box rectangle and the
+/// appearance stream.
 pub fn appearance(rect: PdfBox, rich: &RichText, style: &BoxStyle, fonts: &dyn FontSet) -> (PdfBox, String) {
     let inner_w = (rect.right - rect.left - 2.0 * PADDING).max(1.0);
     let lines = layout(rich, inner_w, fonts);
     let r = PdfBox {
-        bottom: rect.top - box_height(&lines),
+        bottom: rect.top - box_height(&lines).max(rect.top - rect.bottom),
         ..rect
     };
     let (w, h) = (r.right - r.left, r.top - r.bottom);
@@ -371,9 +372,10 @@ mod tests {
             border: ([255, 0, 0], 1.0),
             fill: Some([255, 255, 255]),
         };
+        // A box only 1 pt tall grows to fit the text.
         let rect = PdfBox {
             left: 100.0,
-            bottom: 0.0,
+            bottom: 499.0,
             right: 148.0,
             top: 500.0,
         };
@@ -400,6 +402,22 @@ mod tests {
         let (_, s) = appearance(rect, &u, &style, &fonts());
         // 1.2 pt below the baseline (486.75), 0.6 pt thick.
         assert!(s.contains("104.00 485.25 5.00 0.60 re f"), "{s}");
+    }
+
+    #[test]
+    fn a_box_taller_than_its_text_keeps_its_height() {
+        let style = BoxStyle {
+            border: ([0, 0, 0], 1.0),
+            fill: None,
+        };
+        let rect = PdfBox {
+            left: 100.0,
+            bottom: 300.0,
+            right: 300.0,
+            top: 500.0,
+        };
+        let (r, _) = appearance(rect, &plain("short", 10.0), &style, &fonts());
+        assert_eq!(r, rect);
     }
 
     #[test]

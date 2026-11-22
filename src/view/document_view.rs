@@ -961,7 +961,7 @@ fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect
     {
         let s = to_screen(&a.rect);
         painter.rect_stroke(s.expand(3.0), CornerRadius::same(2), Stroke::new(1.5, blue), StrokeKind::Outside);
-        for (_, h) in handles(s, a.kind.resize(), tab.rotation.swaps_axes()) {
+        for (_, h) in handles(s, a.kind.resize()) {
             painter.rect(h, CornerRadius::same(1), Color32::WHITE, Stroke::new(1.5, blue), StrokeKind::Middle);
         }
     }
@@ -1009,8 +1009,11 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
 const HANDLE: f32 = 8.0;
 
 /// Resize handles (number, screen rectangle) for a selected annotation.
-fn handles(screen: Rect, resize: Resize, rotated: bool) -> Vec<(u8, Rect)> {
-    let all = [
+fn handles(screen: Rect, resize: Resize) -> Vec<(u8, Rect)> {
+    if resize == Resize::None {
+        return Vec::new();
+    }
+    [
         screen.left_top(),
         screen.center_top(),
         screen.right_top(),
@@ -1019,18 +1022,11 @@ fn handles(screen: Rect, resize: Resize, rotated: bool) -> Vec<(u8, Rect)> {
         screen.center_bottom(),
         screen.left_bottom(),
         screen.left_center(),
-    ];
-    let wanted: &[u8] = match resize {
-        Resize::Free => &[0, 1, 2, 3, 4, 5, 6, 7],
-        // In a view rotated by 90°, the box's width runs up and down; only offer
-        // width handles when they would change the width.
-        Resize::WidthOnly if !rotated => &[3, 7],
-        _ => &[],
-    };
-    wanted
-        .iter()
-        .map(|&i| (i, Rect::from_center_size(all[i as usize], vec2(HANDLE, HANDLE))))
-        .collect()
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, p)| (i as u8, Rect::from_center_size(p, vec2(HANDLE, HANDLE))))
+    .collect()
 }
 
 fn handle_cursor(h: u8) -> CursorIcon {
@@ -1176,7 +1172,7 @@ fn annot_drag_input(
     let handle_under = |at: Pos2| {
         selected.as_ref().and_then(|a| {
             let screen = pdf_box_to_screen(tab, page, &a.rect, view)?;
-            handles(screen, a.kind.resize(), tab.rotation.swaps_axes())
+            handles(screen, a.kind.resize())
                 .into_iter()
                 .find(|(_, r)| r.expand(2.0).contains(at))
                 .map(|(h, _)| (a.clone(), h))
@@ -1481,15 +1477,18 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
             let (a, b) = (r.primary.index.0, r.secondary.index.0);
             (a.min(b), a.max(b))
         });
-    if let Some((a, b)) = range {
+    let text_focused = ctx.memory(|m| m.has_focus(edit_id));
+    if let Some((a, b)) = range.filter(|_| text_focused) {
         // Moving the cursor picks up the style of the text before it.
         if a == b && re.last_cursor != Some(a) {
             let at = if a > 0 { re.styles.get(a - 1) } else { re.styles.first() };
             re.typing = at.copied().unwrap_or(re.typing);
         }
         re.last_cursor = Some(a);
+        re.selection = Some((a, b));
     }
-    let selected = range.filter(|(a, b)| a < b);
+    // While the formatting bar is used, the text's selection is the one it last had.
+    let selected = re.selection.filter(|(a, b)| a < b && *b <= re.styles.len());
     let current = selected.and_then(|(a, _)| re.styles.get(a).copied()).unwrap_or(re.typing);
     let apply = |re: &mut crate::document::RichEdit, f: &dyn Fn(&mut CharStyle)| match selected {
         Some((a, b)) => {
@@ -1543,18 +1542,18 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                         apply(re, &|s| s.color = c);
                     }
                     let mut size = current.size;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut size)
+                    let size_field = ui.add(
+                        egui::DragValue::new(&mut size)
                                 .range(4.0..=96.0)
                                 .speed(0.2)
                                 .suffix(" pt")
                                 // Typed values apply on Enter, not per keystroke.
                                 .update_while_editing(false),
-                        )
-                        .on_hover_text("Font size (drag, or click and type)")
-                        .changed()
-                    {
+                    )
+                    .on_hover_text("Font size (drag, or click and type)");
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_bar_size"), size_field.rect));
+                    if size_field.changed() {
                         apply(re, &|s| s.size = size);
                     }
                     ui.separator();
@@ -1621,6 +1620,8 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                 .inner_margin(pad)
                 .show(ui, |ui| {
                     ui.set_width(width);
+                    // A box made taller than its text keeps its height while editing.
+                    ui.set_min_height((screen.height() - 2.0 * pad - 2.0 * border).max(0.0));
                     let edit = ui.add(
                         egui::TextEdit::multiline(&mut contents)
                             .id(edit_id)
@@ -1632,7 +1633,10 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     );
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_text_box_editor"), edit.rect));
-                    if sel.focus_contents && !egui::Popup::is_any_open(ui.ctx()) {
+                    // Return focus to the text only when nothing else has it (a typed
+                    // font size in the bar, the colour picker's hex field, ...).
+                    let others_focused = ui.ctx().memory(|m| m.focused()).is_some_and(|f| f != edit_id);
+                    if sel.focus_contents && !egui::Popup::is_any_open(ui.ctx()) && !others_focused {
                         edit.request_focus();
                         sel.focus_contents = false;
                     }
@@ -2175,9 +2179,9 @@ mod tests {
 
         // Text boxes only resize in width; notes not at all.
         let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 40.0));
-        assert_eq!(handles(screen, AnnotKind::FreeText.resize(), false).len(), 2);
-        assert!(handles(screen, AnnotKind::Note.resize(), false).is_empty());
-        assert_eq!(handles(screen, AnnotKind::Ink.resize(), false).len(), 8);
+        assert_eq!(handles(screen, AnnotKind::FreeText.resize()).len(), 8);
+        assert!(handles(screen, AnnotKind::Note.resize()).is_empty());
+        assert_eq!(handles(screen, AnnotKind::Ink.resize()).len(), 8);
         assert!(!AnnotKind::Highlight.movable());
     }
 
@@ -2289,5 +2293,43 @@ mod tests {
         frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::Enter, none), Tool::Hand);
         frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
         assert_eq!(sizes(&tab), vec![14.0]);
+    }
+
+    #[test]
+    fn typing_a_size_for_selected_text_in_the_format_bar() {
+        let (ctx, mut tab, mut cache) = editing_box();
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("Hello".into())], Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::A, egui::Modifiers::COMMAND), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let field: Rect = ctx.data(|d| d.get_temp(Id::unique("test_bar_size"))).expect("size field");
+        click(&ctx, &mut tab, &mut cache, field.center(), Tool::Hand);
+        for _ in 0..2 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::A, egui::Modifiers::COMMAND), Tool::Hand);
+        for t in ["2", "0"] {
+            frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text(t.into())], Tool::Hand);
+        }
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::Enter, egui::Modifiers::NONE), Tool::Hand);
+        for _ in 0..2 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        let rich = finish(&ctx, &mut tab, &mut cache);
+        assert_eq!(rich.text(), "Hello", "the typed digits went into the size, not the text");
+        assert!(rich.spans.iter().all(|s| s.style.size == 20.0), "{rich:?}");
+    }
+
+    #[test]
+    fn text_box_height_handle_resizes() {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::FreeText);
+        tab.select_annot(0, 4);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let screen = pdf_box_to_screen(&tab, 0, &tab.annots[&0][0].rect, tab.view_rect).unwrap();
+        let z = tab.viewport.zoom;
+        let bottom = screen.center_bottom();
+        drag(&ctx, &mut tab, &mut cache, bottom, bottom + vec2(0.0, 50.0), Tool::Hand);
+        let r = sent_rect(&tab).expect("resize sent");
+        assert!((r.bottom - (600.0 - 50.0 / z)).abs() < 0.5, "{r:?}");
+        assert_eq!((r.left, r.right, r.top), (100.0, 200.0, 700.0));
     }
 }

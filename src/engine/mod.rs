@@ -1158,4 +1158,67 @@ mod tests {
         assert_eq!(tb.rich.as_ref().map(|r| r.spans.len()), Some(1));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn text_boxes_resize_but_never_below_their_text() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::FreeText,
+                rect: PdfBox {
+                    left: 100.0,
+                    bottom: 680.0,
+                    right: 300.0,
+                    top: 700.0,
+                },
+                color: [0, 0, 0],
+                interior: None,
+                width: 1.0,
+                contents: "one line".into(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 0],
+            },
+        });
+        let index = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            _ => None,
+        });
+        let drain = |engine: &Engine| while engine.rx.recv_timeout(Duration::from_millis(100)).is_ok() {};
+        let resize = |rect: PdfBox| {
+            drain(&engine);
+            engine.send(Request::UpdateAnnot {
+                doc: 1,
+                page: 0,
+                index,
+                change: AnnotChange {
+                    rect: Some(rect),
+                    ..Default::default()
+                },
+            });
+            annots(&engine, 1).into_iter().find(|a| a.index == index).unwrap().rect
+        };
+        // Taller and wider than the text: kept.
+        let big = PdfBox {
+            left: 100.0,
+            bottom: 500.0,
+            right: 400.0,
+            top: 700.0,
+        };
+        assert_eq!(resize(big), big);
+        // Much smaller than the text: the height grows back to fit one line.
+        let r = resize(PdfBox {
+            left: 100.0,
+            bottom: 695.0,
+            right: 400.0,
+            top: 700.0,
+        });
+        assert_eq!(r.top, 700.0);
+        assert!((r.top - r.bottom - (8.0 + 15.0)).abs() < 0.01, "{r:?}");
+    }
 }

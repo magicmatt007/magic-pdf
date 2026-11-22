@@ -115,6 +115,9 @@ pub struct RichEdit {
     pub committed: RichText,
     /// Cursor position (characters) in the last frame, to follow cursor moves.
     pub last_cursor: Option<usize>,
+    /// The selection (start, end) as of the last frame the text had focus; kept while
+    /// the formatting bar is used, as egui forgets it when the text loses focus.
+    pub selection: Option<(usize, usize)>,
 }
 
 impl RichEdit {
@@ -126,6 +129,7 @@ impl RichEdit {
             align: rich.align,
             committed: rich.clone(),
             last_cursor: None,
+            selection: None,
         }
     }
 
