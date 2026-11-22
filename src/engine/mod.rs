@@ -693,4 +693,83 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn shape_fill_can_be_turned_on_and_off() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox {
+            left: 100.0,
+            bottom: 300.0,
+            right: 300.0,
+            top: 500.0,
+        };
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::Square,
+                rect,
+                color: [0, 0, 255],
+                interior: None,
+                width: 2.0,
+                contents: String::new(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+            },
+        });
+        let index = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            _ => None,
+        });
+        // Count red pixels inside the shape (page 0 rendered 300 px wide: 595 pt).
+        let red_inside = |engine: &Engine, version| {
+            let (size, rgba) = render(engine, 1, 0, Rotation::R0, version);
+            let s = size[0] as f32 / 595.0;
+            let (x0, x1) = ((120.0 * s) as usize, (280.0 * s) as usize);
+            let (y0, y1) = (((842.0 - 480.0) * s) as usize, ((842.0 - 320.0) * s) as usize);
+            let mut n = 0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = &rgba[(y * size[0] + x) * 4..][..4];
+                    if p[0] > 200 && p[1] < 80 && p[2] < 80 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert_eq!(red_inside(&engine, 1), 0);
+        let set = |interior| Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index,
+            change: AnnotChange {
+                interior: Some(interior),
+                ..Default::default()
+            },
+        };
+        engine.send(set(Some([255, 0, 0])));
+        let a = annots(&engine, 1);
+        assert_eq!(a.iter().find(|a| a.index == index).unwrap().interior, Some([255, 0, 0]));
+        assert!(red_inside(&engine, 2) > 1000, "fill not drawn");
+        engine.send(set(None));
+        let a = annots(&engine, 1);
+        assert_eq!(a.iter().find(|a| a.index == index).unwrap().interior, None, "fill not removed");
+        assert_eq!(red_inside(&engine, 3), 0, "fill still drawn");
+        // Again after the appearance was regenerated (PDFium then hides colours).
+        engine.send(set(Some([255, 0, 0])));
+        let _ = annots(&engine, 1);
+        assert!(red_inside(&engine, 4) > 1000);
+        engine.send(set(None));
+        let a = annots(&engine, 1);
+        assert_eq!(a.iter().find(|a| a.index == index).unwrap().interior, None);
+        assert_eq!(red_inside(&engine, 5), 0);
+        // Undo brings the fill back.
+        engine.send(Request::Undo { doc: 1 });
+        let a = annots(&engine, 1);
+        assert_eq!(a.iter().find(|a| a.index == index).unwrap().interior, Some([255, 0, 0]));
+        assert!(red_inside(&engine, 6) > 1000);
+    }
 }

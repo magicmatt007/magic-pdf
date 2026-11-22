@@ -266,6 +266,18 @@ impl DocTab {
         self.selection = None;
     }
 
+    /// Esc: drops the text selection, an annotation being drawn, the annotation
+    /// popup (saving its comment) and the thumbnail selection.
+    pub fn cancel_interaction(&mut self) {
+        self.selection = None;
+        self.selecting = false;
+        self.draft = None;
+        self.deselect_annot();
+        self.page_selection.clear();
+        self.page_anchor = None;
+        self.pages_focused = false;
+    }
+
     /// Pages that page operations act on: the thumbnail selection, else the current page.
     pub fn target_pages(&self) -> Vec<usize> {
         if self.page_selection.is_empty() {

@@ -941,6 +941,14 @@ impl App {
             }
         }
 
+        // Esc cancels whatever is in progress and returns to the Hand tool.
+        if !typing && shortcut(Modifiers::NONE, Key::Escape) {
+            self.tool = Tool::Hand;
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.cancel_interaction();
+            }
+        }
+
         let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
 
@@ -977,11 +985,6 @@ impl App {
         }
         if typing {
             return;
-        }
-        if shortcut(Modifiers::NONE, Key::Escape) {
-            tab.selection = None;
-            tab.deselect_annot();
-            tab.draft = None;
         }
         let horizontal = tab.mode.is_horizontal();
         let single = tab.mode == LayoutMode::SinglePage;
@@ -1395,7 +1398,10 @@ impl App {
         let Some(color) = tool.color(style).copied() else { return };
         let mut changed = false;
         let resp = color_swatch(ui, color, false).on_hover_text("Colour for new annotations");
-        egui::Popup::from_toggle_button_response(&resp).show(|ui| {
+        egui::Popup::from_toggle_button_response(&resp)
+            // Stay open while ticking Fill or picking colours.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
             ui.horizontal(|ui| {
                 for c in PALETTE {
                     if color_swatch(ui, c, c == color).clicked()
@@ -1421,10 +1427,18 @@ impl App {
                         .changed();
                     let mut fill = style.shape_fill.is_some();
                     if ui.checkbox(&mut fill, "Fill").changed() {
-                        style.shape_fill = fill.then_some(style.shape);
+                        style.shape_fill = fill.then(|| document_view::tint(style.shape));
                         changed = true;
                     }
                     if let Some(f) = &mut style.shape_fill {
+                        ui.horizontal(|ui| {
+                            for c in document_view::FILL_PALETTE {
+                                if color_swatch(ui, c, *f == c).clicked() {
+                                    *f = c;
+                                    changed = true;
+                                }
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.label("Fill colour");
                             changed |= ui.color_edit_button_srgb(f).changed();

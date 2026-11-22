@@ -105,6 +105,26 @@ pub const PALETTE: [Rgb; 10] = [
     [0, 0, 0],
 ];
 
+/// Fill colours: light tints that keep page content readable, plus white and the
+/// strong colours.
+pub const FILL_PALETTE: [Rgb; 10] = [
+    [255, 255, 255],
+    [255, 245, 170],
+    [255, 214, 170],
+    [255, 190, 190],
+    [220, 200, 245],
+    [190, 215, 255],
+    [190, 240, 210],
+    [220, 220, 220],
+    [220, 30, 30],
+    [0, 110, 230],
+];
+
+/// A light tint of `c`, the default fill for a shape with border colour `c`.
+pub fn tint(c: Rgb) -> Rgb {
+    c.map(|v| (v as f32 + (255.0 - v as f32) * 0.75).round() as u8)
+}
+
 pub struct ViewContext<'a> {
     pub cache: &'a mut TextureCache,
     pub tool: Tool,
@@ -1060,8 +1080,21 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
                     }
                     if annot.kind.has_interior() {
                         let mut filled = annot.interior.is_some();
-                        if ui.checkbox(&mut filled, "Fill").changed() {
-                            change.interior = Some(filled.then(|| annot.color.unwrap_or([255, 255, 255])));
+                        let fill_box = ui.checkbox(&mut filled, "Fill");
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_fill_box"), fill_box.rect));
+                        if fill_box.changed() {
+                            change.interior = Some(filled.then(|| tint(annot.color.unwrap_or([0, 0, 0]))));
+                        }
+                        if let Some(current) = annot.interior {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.weak("Fill");
+                                for c in FILL_PALETTE {
+                                    if color_swatch(ui, c, current == c).clicked() {
+                                        change.interior = Some(Some(c));
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -1390,5 +1423,45 @@ mod tests {
             frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("ok".into())], tool);
             assert!(tab.selected_annot.as_ref().unwrap().contents.ends_with("ok"));
         }
+    }
+
+    #[test]
+    fn fill_checkbox_on_a_selected_shape_sends_an_update() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        tab.annots.insert(
+            0,
+            vec![AnnotInfo {
+                index: 5,
+                kind: AnnotKind::Square,
+                rect: PdfBox {
+                    left: 100.0,
+                    bottom: 600.0,
+                    right: 200.0,
+                    top: 700.0,
+                },
+                color: Some([0, 0, 255]),
+                interior: None,
+                width: 2.0,
+                contents: String::new(),
+                author: String::new(),
+                modified: String::new(),
+            }],
+        );
+        tab.select_annot(0, 5);
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        let fill: Rect = ctx.data(|d| d.get_temp(Id::unique("test_fill_box"))).expect("fill checkbox shown");
+        tab.outbox.clear();
+        click(&ctx, &mut tab, &mut cache, fill.center(), Tool::Hand);
+        let interior = tab.outbox.iter().find_map(|r| match r {
+            Request::UpdateAnnot { change, .. } => change.interior,
+            _ => None,
+        });
+        assert!(matches!(interior, Some(Some(_))), "ticking Fill sent {interior:?}");
+        assert!(tab.selected_annot.is_some(), "popup stays open");
     }
 }

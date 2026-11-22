@@ -805,6 +805,13 @@ impl<'d> Page<'d> {
     }
 
     fn annot_color(&self, a: &Annot, kind: FPDFANNOT_COLORTYPE) -> Option<Rgb> {
+        // "No fill" is stored as a non-array /IC (there is no API to remove the key);
+        // only a real colour array counts.
+        const FPDF_OBJECT_ARRAY: FPDF_OBJECT_TYPE = 5;
+        let key = if kind == COLORTYPE_INTERIOR { "IC" } else { "C" };
+        if unsafe { self.lib().FPDFAnnot_GetValueType(a.handle, key) } != FPDF_OBJECT_ARRAY {
+            return None;
+        }
         let (mut r, mut g, mut b, mut al) = (0, 0, 0, 0);
         let ok = unsafe { self.lib().FPDFAnnot_GetColor(a.handle, kind, &mut r, &mut g, &mut b, &mut al) };
         self.lib().is_true(ok).then_some([r as u8, g as u8, b as u8])
