@@ -2,6 +2,7 @@
 //! documents. PDFium is not thread-safe, so the UI only talks to it through channels.
 
 pub mod commands;
+pub mod pages;
 mod pdf;
 #[cfg(windows)]
 mod print_windows;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
+pub use pages::{PageMapping, PageOp, move_target};
 pub use pdf::FIELD_TEXT;
 
 pub struct Engine {
@@ -120,11 +122,11 @@ mod tests {
             path,
             password: None,
         });
-        match recv(engine) {
-            Response::Opened { info, .. } => info,
+        recv_until(engine, |r| match r {
+            Response::Opened { doc: d, info } if d == doc => Some(info),
             Response::OpenFailed { error, .. } => panic!("open failed: {error}"),
-            _ => panic!("unexpected response"),
-        }
+            _ => None,
+        })
     }
 
     fn render(engine: &Engine, doc: DocId, page: usize, rotation: Rotation, version: u32) -> ([usize; 2], Vec<u8>) {
@@ -511,6 +513,183 @@ mod tests {
         let check = ws.iter().find(|w| w.name == "agree").unwrap();
         assert_eq!(text.value, "Hell");
         assert!(check.checked, "checkbox state was not saved");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn pages_changed(engine: &Engine) -> (DocInfo, PageMapping) {
+        recv_until(engine, |r| match r {
+            Response::PagesChanged { info, mapping, .. } => Some((info, mapping)),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn page_operations_with_undo_save_extract_split() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_serial, engine) = start();
+        let info = open(&engine, 1, sample());
+        let original = info.page_sizes.clone();
+        assert_eq!(original.len(), 40);
+
+        // An annotation on page 4 (index 3).
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 3,
+            annot: NewAnnot {
+                kind: AnnotKind::Square,
+                rect: PdfBox {
+                    left: 50.0,
+                    bottom: 50.0,
+                    right: 150.0,
+                    top: 150.0,
+                },
+                color: [255, 0, 0],
+                interior: None,
+                width: 2.0,
+                contents: "on page 4".into(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+            },
+        });
+        recv_until(&engine, |r| matches!(r, Response::AnnotAdded { .. }).then_some(()));
+
+        let pages_with_note = |engine: &Engine| -> Vec<usize> {
+            engine.send(Request::ScanAnnots { doc: 1 });
+            let mut pages = Vec::new();
+            recv_until(engine, |r| match r {
+                Response::PageAnnots { page, annots, .. } => {
+                    if annots.iter().any(|a| a.contents == "on page 4") {
+                        pages.push(page);
+                    }
+                    None
+                }
+                Response::AnnotScanDone { .. } => Some(()),
+                _ => None,
+            });
+            pages
+        };
+
+        // Delete page 2: the annotated page becomes page 3 (index 2).
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Delete { pages: vec![1] },
+        });
+        let (info, m) = pages_changed(&engine);
+        assert_eq!(info.page_sizes.len(), 39);
+        assert_eq!(m.map[3], Some(2));
+        assert_eq!(pages_with_note(&engine), vec![2]);
+
+        // Move the first page to the end.
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Move { pages: vec![0], to: 38 },
+        });
+        let (info, _) = pages_changed(&engine);
+        assert_eq!(info.page_sizes[38], original[0]);
+        assert_eq!(info.page_sizes[0], original[2]);
+
+        // Rotate the third page: width and height swap.
+        let (w, h) = info.page_sizes[2];
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Rotate {
+                pages: vec![2],
+                quarter_turns: 1,
+            },
+        });
+        let (info, m) = pages_changed(&engine);
+        assert_eq!(info.page_sizes[2], (h, w));
+        assert_eq!(m.changed, vec![2]);
+
+        // Insert a blank page at the start and another PDF at the end.
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::InsertBlank {
+                at: 0,
+                size: (100.0, 200.0),
+            },
+        });
+        let (info, _) = pages_changed(&engine);
+        assert_eq!(info.page_sizes[0], (100.0, 200.0));
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+        engine.send(Request::InsertFile {
+            doc: 1,
+            path: form,
+            at: 40,
+        });
+        let (info, _) = pages_changed(&engine);
+        assert_eq!(info.page_sizes.len(), 41);
+        // Deleted page 2, moved page 1 to the end, inserted a page in front: index 2.
+        assert_eq!(pages_with_note(&engine), vec![2]);
+
+        // Invalid operations are refused without changing anything.
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Delete {
+                pages: (0..41).collect(),
+            },
+        });
+        recv_until(&engine, |r| matches!(r, Response::Error { .. }).then_some(()));
+
+        // Undo everything: back to the original document, annotation on page 4.
+        let mut sizes_now = Vec::new();
+        for _ in 0..5 {
+            engine.send(Request::Undo { doc: 1 });
+            sizes_now = pages_changed(&engine).0.page_sizes;
+        }
+        assert_eq!(sizes_now, original);
+        assert_eq!(pages_with_note(&engine), vec![3]);
+
+        // Redo two steps (delete page 2, move first page to the end) and save.
+        for _ in 0..2 {
+            engine.send(Request::Redo { doc: 1 });
+            pages_changed(&engine);
+        }
+        let out = dir.join("edited.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let reopened = open(&engine, 2, out);
+        assert_eq!(reopened.page_sizes.len(), 39);
+        assert_eq!(reopened.page_sizes[38], original[0]);
+
+        // Extract two pages, then split into files of 15 pages.
+        let extracted = dir.join("two.pdf");
+        engine.send(Request::ExtractPages {
+            doc: 1,
+            pages: vec![0, 5],
+            path: extracted.clone(),
+        });
+        recv_until(&engine, |r| matches!(r, Response::Exported { .. }).then_some(()));
+        assert_eq!(open(&engine, 3, extracted).page_sizes.len(), 2);
+        let parts = dir.join("parts");
+        std::fs::create_dir_all(&parts).unwrap();
+        engine.send(Request::SplitDocument {
+            doc: 1,
+            every: 15,
+            dir: parts.clone(),
+            stem: "doc".into(),
+        });
+        recv_until(&engine, |r| match r {
+            Response::Exported { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        let counts: Vec<usize> = (1..=3)
+            .map(|n| open(&engine, 10 + n, parts.join(format!("doc-{n:02}.pdf"))).page_sizes.len())
+            .collect();
+        assert_eq!(counts, vec![15, 15, 9]);
+        // Splitting again would overwrite: refused.
+        engine.send(Request::SplitDocument {
+            doc: 1,
+            every: 15,
+            dir: parts,
+            stem: "doc".into(),
+        });
+        recv_until(&engine, |r| matches!(r, Response::Error { .. }).then_some(()));
 
         std::fs::remove_dir_all(&dir).ok();
     }

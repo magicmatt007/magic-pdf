@@ -24,7 +24,12 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Printing: a print dialog backed by CUPS on Linux/macOS (printer, copies, page
   range, two-sided, fit to paper) and the native print dialog on Windows
 
-Page editing is planned for a later phase. Document JavaScript is never executed.
+- Page editing in the thumbnail sidebar or the Pages menu: select pages (Ctrl/Shift
+  click), drag to reorder, rotate, delete, insert blank pages or pages from other
+  PDFs (also by dropping files between thumbnails), extract to a new file, split
+  into several files; all undoable and saved with the document
+
+Document JavaScript is never executed.
 
 ## Building
 
@@ -74,6 +79,7 @@ cargo test                               # layout/viewport unit tests + PDFium e
 | Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+P | Print |
+| Click / Ctrl / Shift + click thumbnail | Select pages (Del deletes them) |
 | Ctrl+F, Enter, F3 | Search |
 | F9 | Sidebar |
 

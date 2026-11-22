@@ -8,12 +8,12 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Ui};
 
 use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
 use crate::icons;
-use crate::engine::{DocId, Engine, FormKey, PrintJob, Request, Response, SearchQuery, form_mods};
+use crate::engine::{DocId, Engine, FormKey, PageOp, PrintJob, Request, Response, SearchQuery, form_mods, move_target};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
 use crate::view::document_view::{self, PALETTE, Tool, ViewContext, color_swatch};
 use crate::view::layout::LayoutMode;
-use crate::view::sidebar::{self, SidebarTab};
+use crate::view::sidebar::{self, PageAction, SidebarTab};
 use crate::view::viewport::FitMode;
 
 const TEXTURE_BUDGET: usize = 768 * 1024 * 1024;
@@ -74,6 +74,8 @@ pub struct App {
     /// once pages have rendered, saves it and quits.
     screenshot_to: Option<PathBuf>,
     screenshot_requested: bool,
+    /// Pages per file for the "Split document" dialog (None: dialog closed).
+    split_every: Option<usize>,
 }
 
 type PrintResult = Result<String, String>;
@@ -116,6 +118,7 @@ impl App {
             print_results: std::sync::mpsc::channel(),
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             screenshot_requested: false,
+            split_every: None,
         };
         for f in files {
             app.open(&f);
@@ -404,6 +407,15 @@ impl App {
                     self.finish_close(&intent.docs, intent.quit);
                 }
             }
+            Response::PagesChanged { doc, info, mapping } => {
+                self.cache.remap(doc, &mapping);
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.apply_page_mapping(info, &mapping);
+                    // Annotation and field positions are re-read for the new pages.
+                    self.send(Request::ScanAnnots { doc });
+                }
+            }
+            Response::Exported { message } => self.notice(&message),
             Response::PageWidgets { doc, page, widgets } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     if widgets.is_empty() {
@@ -444,6 +456,121 @@ impl App {
                     self.close_intent = None;
                 }
                 self.error = Some(message);
+            }
+        }
+    }
+
+    /// Carries out a page operation on the active document.
+    fn page_action(&mut self, action: PageAction) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(info) = tab.info() else { return };
+        let (doc, count) = (tab.id, info.page_sizes.len());
+        let targets = tab.target_pages();
+        let last = *targets.iter().max().unwrap_or(&tab.current_page);
+        let stem = tab
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".into());
+        let dir = tab.path.parent().map(Path::to_path_buf);
+        let edit = |op| Request::EditPages { doc, op };
+        let req = match action {
+            PageAction::Rotate(q) => Some(edit(PageOp::Rotate {
+                pages: targets,
+                quarter_turns: q,
+            })),
+            PageAction::Delete => Some(edit(PageOp::Delete { pages: targets })),
+            PageAction::MoveToStart => Some(edit(PageOp::Move { pages: targets, to: 0 })),
+            PageAction::MoveToEnd => {
+                let to = count - targets.len();
+                Some(edit(PageOp::Move { pages: targets, to }))
+            }
+            PageAction::MoveTo { pages, gap } => {
+                move_target(&pages, gap, count).map(|to| edit(PageOp::Move { pages, to }))
+            }
+            PageAction::InsertBlankAfter => Some(edit(PageOp::InsertBlank {
+                at: last + 1,
+                size: info.page_sizes[last.min(count - 1)],
+            })),
+            PageAction::InsertFileAfter => {
+                let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+                if let Some(d) = &dir {
+                    dialog = dialog.set_directory(d);
+                }
+                dialog.pick_file().map(|path| Request::InsertFile { doc, path, at: last + 1 })
+            }
+            PageAction::InsertFiles { gap, paths } => {
+                // Insert in reverse so the files end up in the order they were dropped.
+                for path in paths.into_iter().rev() {
+                    self.send(Request::InsertFile { doc, path, at: gap });
+                }
+                None
+            }
+            PageAction::Extract => {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("PDF documents", &["pdf"])
+                    .set_file_name(format!("{stem}-pages.pdf"));
+                if let Some(d) = &dir {
+                    dialog = dialog.set_directory(d);
+                }
+                dialog.save_file().map(|path| Request::ExtractPages {
+                    doc,
+                    pages: targets,
+                    path,
+                })
+            }
+            PageAction::Split => {
+                self.split_every = Some(1);
+                None
+            }
+        };
+        if let Some(r) = req {
+            self.send(r);
+        }
+    }
+
+    fn split_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut every) = self.split_every else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            self.split_every = None;
+            return;
+        };
+        let (doc, count) = (tab.id, tab.page_count());
+        let stem = tab
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".into());
+        let dir = tab.path.parent().map(Path::to_path_buf);
+        let mut go = false;
+        let mut cancel = false;
+        egui::Window::new("Split document")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Pages per file");
+                    ui.add(egui::DragValue::new(&mut every).range(1..=count.max(1)));
+                });
+                let files = count.div_ceil(every.max(1));
+                ui.weak(format!("Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …"));
+                ui.horizontal(|ui| {
+                    go = ui.button("Choose folder…").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        self.split_every = Some(every);
+        if cancel {
+            self.split_every = None;
+        } else if go {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(d) = &dir {
+                dialog = dialog.set_directory(d);
+            }
+            if let Some(dir) = dialog.pick_folder() {
+                self.split_every = None;
+                self.send(Request::SplitDocument { doc, every, dir, stem });
             }
         }
     }
@@ -765,7 +892,15 @@ impl App {
                 self.undo(false);
             }
             if shortcut(Modifiers::NONE, Key::Delete) || shortcut(Modifiers::NONE, Key::Backspace) {
-                self.delete_selected_annot();
+                let delete_pages = self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|t| t.selected_annot.is_none() && t.pages_focused && !t.page_selection.is_empty());
+                if delete_pages {
+                    self.page_action(PageAction::Delete);
+                } else {
+                    self.delete_selected_annot();
+                }
             }
             for (key, tool) in [
                 (Key::H, Tool::Hand),
@@ -941,6 +1076,24 @@ impl App {
                         .lost_focus()
                     {
                         self.settings.save();
+                    }
+                });
+            });
+            ui.menu_button("Pages", |ui| {
+                let (n, total) = self
+                    .tabs
+                    .get(self.active)
+                    .filter(|t| t.info().is_some())
+                    .map(|t| (t.target_pages().len(), t.page_count()))
+                    .unwrap_or((0, 0));
+                ui.add_enabled_ui(total > 0, |ui| {
+                    ui.weak(if n == 1 {
+                        "Acts on the selected (or current) page".to_string()
+                    } else {
+                        format!("Acts on {n} selected pages")
+                    });
+                    if let Some(a) = sidebar::page_menu(ui, n, total) {
+                        self.page_action(a);
                     }
                 });
             });
@@ -1427,7 +1580,9 @@ impl App {
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
                         ("U / N / D / R / E", "Highlight, note, draw, rectangle, ellipse"),
-                        ("Del", "Delete the selected annotation"),
+                        ("Del", "Delete the selected annotation or thumbnail pages"),
+                        ("Ctrl / Shift + click thumbnail", "Select several pages"),
+                        ("Drag thumbnails", "Reorder pages"),
                         ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
                         ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
                         ("F9", "Toggle sidebar"),
@@ -1458,8 +1613,18 @@ impl App {
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
-        for path in dropped {
-            self.open(&path);
+        if dropped.is_empty() {
+            return;
+        }
+        let gap = self.tabs.get_mut(self.active).and_then(|t| t.thumb_drop_gap.take());
+        match gap {
+            // Dropped between thumbnails: insert the pages there.
+            Some(gap) => self.page_action(PageAction::InsertFiles { gap, paths: dropped }),
+            None => {
+                for path in dropped {
+                    self.open(&path);
+                }
+            }
         }
     }
 
@@ -1583,13 +1748,14 @@ impl eframe::App for App {
             });
         }
 
+        let mut page_actions = Vec::new();
         if self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
             let tab = &mut self.tabs[self.active];
             egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(190.0)
                 .size_range(120.0..=500.0)
-                .show(ui, |ui| sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache));
+                .show(ui, |ui| sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions));
         }
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -1611,6 +1777,10 @@ impl eframe::App for App {
             );
         });
 
+        for a in page_actions {
+            self.page_action(a);
+        }
+        self.split_dialog(&ctx);
         self.password_dialog(&ctx);
         self.unsaved_dialog(&ctx);
         self.print_dialog_ui(&ctx);

@@ -6,7 +6,10 @@ use std::path::Path;
 use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError};
 use pdfium_render::prelude::{Pdfium, PdfiumLibraryBindingsAccessor};
 
+use std::sync::Arc;
+
 use super::commands::*;
+use super::pages::{PageMapping, PageOp};
 use super::library_search_dirs;
 use super::pdf::{Doc, Lib, OpenError};
 
@@ -19,12 +22,27 @@ enum Edit {
     Add { page: usize, index: usize },
     Delete { page: usize, index: usize },
     Update { page: usize, index: usize, undo: AnnotChange, redo: AnnotChange },
+    /// A page operation. Undo restores the document from `snapshot` (taken before the
+    /// operation, with the annotation bookkeeping of that moment); redo re-applies `op`.
+    Pages(Box<PagesEdit>),
 }
 
+#[derive(Clone, Debug)]
+struct PagesEdit {
+    op: PageOp,
+    snapshot: Arc<Vec<u8>>,
+    deleted: HashMap<(usize, usize), i32>,
+    colors: HashMap<(usize, usize), (Option<Rgb>, Option<Rgb>)>,
+}
+
+/// Memory allowed for page-operation undo snapshots per document.
+const SNAPSHOT_BUDGET: usize = 512 * 1024 * 1024;
+
 impl Edit {
-    fn page(&self) -> usize {
+    fn snapshot_bytes(&self) -> usize {
         match self {
-            Edit::Add { page, .. } | Edit::Delete { page, .. } | Edit::Update { page, .. } => *page,
+            Edit::Pages(p) => p.snapshot.len(),
+            _ => 0,
         }
     }
 }
@@ -295,6 +313,54 @@ impl Worker {
                     Err(e) => self.error(doc, format!("Preparing the print job failed: {e}")),
                 }
             }
+            Request::EditPages { doc, op } => self.edit_pages(doc, op),
+            Request::InsertFile { doc, path, at } => match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let op = PageOp::InsertFile {
+                        at,
+                        source: Arc::new(bytes),
+                        name,
+                        pages: None,
+                        count: 0,
+                    };
+                    self.edit_pages(doc, op);
+                }
+                Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
+            },
+            Request::ExtractPages { doc, pages, path } => {
+                let result = self.extract(doc, &[(pages, path.clone())]);
+                match result {
+                    Ok(()) => self.send(Response::Exported {
+                        message: format!("Saved pages to {}", path.display()),
+                    }),
+                    Err(e) => self.error(doc, format!("Extracting pages failed: {e}")),
+                }
+            }
+            Request::SplitDocument { doc, every, dir, stem } => {
+                let count = self.docs.get(&doc).map_or(0, |od| od.doc.page_count());
+                let every = every.max(1);
+                let parts: Vec<(Vec<usize>, std::path::PathBuf)> = (0..count)
+                    .step_by(every)
+                    .enumerate()
+                    .map(|(n, start)| {
+                        (
+                            (start..(start + every).min(count)).collect(),
+                            dir.join(format!("{stem}-{:02}.pdf", n + 1)),
+                        )
+                    })
+                    .collect();
+                let n = parts.len();
+                match self.extract(doc, &parts) {
+                    Ok(()) => self.send(Response::Exported {
+                        message: format!("Split into {n} files in {}", dir.display()),
+                    }),
+                    Err(e) => self.error(doc, format!("Splitting failed: {e}")),
+                }
+            }
             Request::PrintNative {
                 doc,
                 title,
@@ -465,6 +531,117 @@ impl Worker {
         self.send_widgets(doc, page_index);
     }
 
+    fn doc_info(od: &OpenDoc) -> DocInfo {
+        DocInfo {
+            page_sizes: (0..od.doc.page_count()).map(|i| od.doc.page_size(i)).collect(),
+            outline: od.doc.outline(),
+            title: od.doc.title(),
+        }
+    }
+
+    fn pages_changed(&self, doc: DocId, mapping: PageMapping) {
+        let Some(od) = self.docs.get(&doc) else { return };
+        let info = Self::doc_info(od);
+        self.send(Response::PagesChanged { doc, info, mapping });
+        self.send(Response::FormFocus { doc, page: None });
+        self.send_edit_state(doc);
+    }
+
+    fn edit_pages(&mut self, doc: DocId, mut op: PageOp) {
+        let Some(od) = self.docs.get_mut(&doc) else { return };
+        let count = od.doc.page_count();
+        if let Err(e) = op.validate(count) {
+            self.error(doc, format!("{}: {e}", op.label()));
+            return;
+        }
+        let snapshot = match od.doc.save_to_bytes() {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                self.error(doc, e);
+                return;
+            }
+        };
+        match od.doc.apply_page_op(&op) {
+            Ok(inserted) => {
+                if let PageOp::InsertFile { count: n, .. } = &mut op {
+                    *n = inserted;
+                }
+                let mapping = op.mapping(count);
+                let edit = PagesEdit {
+                    op,
+                    snapshot,
+                    deleted: od.deleted.clone(),
+                    colors: od.colors.clone(),
+                };
+                remap_bookkeeping(od, &mapping);
+                Self::push_edit(od, Edit::Pages(Box::new(edit)));
+                trim_snapshots(od);
+                self.pages_changed(doc, mapping);
+            }
+            Err(e) => {
+                // A failed operation may have half-applied; restore the snapshot.
+                if let Ok(d) = Doc::open_bytes(self.lib, snapshot.as_ref().clone(), None) {
+                    od.doc = d;
+                }
+                self.error(doc, format!("{} failed: {e}", op.label()));
+                self.pages_changed(doc, PageMapping {
+                    map: (0..count).map(Some).collect(),
+                    new_count: count,
+                    changed: (0..count).collect(),
+                });
+            }
+        }
+    }
+
+    fn undo_redo_pages(&mut self, doc: DocId, edit: PagesEdit, undo: bool) {
+        let lib = self.lib;
+        let Some(od) = self.docs.get_mut(&doc) else { return };
+        let mapping = if undo {
+            let current = od.doc.page_count();
+            let doc_now = match Doc::open_bytes(lib, edit.snapshot.as_ref().clone(), None) {
+                Ok(d) => d,
+                Err(_) => {
+                    self.error(doc, "could not restore the document");
+                    return;
+                }
+            };
+            let before = doc_now.page_count();
+            od.doc = doc_now;
+            od.deleted = edit.deleted.clone();
+            od.colors = edit.colors.clone();
+            let m = edit.op.mapping(before);
+            debug_assert_eq!(m.new_count, current);
+            od.redo.push(Edit::Pages(Box::new(edit)));
+            m.inverse()
+        } else {
+            let count = od.doc.page_count();
+            if let Err(e) = od.doc.apply_page_op(&edit.op) {
+                self.error(doc, format!("Redo failed: {e}"));
+                return;
+            }
+            let m = edit.op.mapping(count);
+            remap_bookkeeping(od, &m);
+            od.undo.push(Edit::Pages(Box::new(edit)));
+            m
+        };
+        self.pages_changed(doc, mapping);
+    }
+
+    /// Writes each (pages, path) to a new PDF, taken from the document with all edits.
+    fn extract(&self, doc: DocId, parts: &[(Vec<usize>, std::path::PathBuf)]) -> Result<(), String> {
+        let od = self.docs.get(&doc).ok_or("document not open")?;
+        if let Some((_, p)) = parts.iter().find(|(_, p)| p.exists() && parts.len() > 1) {
+            return Err(format!("{} already exists", p.display()));
+        }
+        let source = Doc::open_bytes(self.lib, od.export(self.lib)?, None).map_err(|_| "could not prepare the pages")?;
+        for (pages, path) in parts {
+            let out = Doc::create(self.lib)?;
+            out.import_pages(&source, Some(pages), 0)?;
+            write_atomically(path, &out.save_to_bytes()?).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     fn with_focused_page(&self, doc: DocId, f: impl FnOnce(&super::pdf::Page)) {
         let Some(od) = self.docs.get(&doc) else { return };
         if let Some((page, _)) = od.doc.focused_field()
@@ -626,7 +803,14 @@ impl Worker {
     fn undo_redo(&mut self, doc: DocId, undo: bool) {
         let Some(od) = self.docs.get_mut(&doc) else { return };
         let Some(edit) = (if undo { od.undo.pop() } else { od.redo.pop() }) else { return };
-        let page_index = edit.page();
+        let page_index = match &edit {
+            Edit::Add { page, .. } | Edit::Delete { page, .. } | Edit::Update { page, .. } => *page,
+            Edit::Pages(p) => {
+                let p = p.clone();
+                self.undo_redo_pages(doc, *p, undo);
+                return;
+            }
+        };
         let ok = {
             let Some(page) = od.doc.page(page_index) else { return };
             // Adding and un-deleting are both "show", removing and deleting both "hide".
@@ -645,6 +829,7 @@ impl Worker {
                 (Edit::Update { index, undo: u, redo: r, .. }, is_undo) => {
                     page.update_annot(*index, if is_undo { u } else { r }).is_ok()
                 }
+                (Edit::Pages(_), _) => unreachable!("handled above"),
             }
         };
         if let Edit::Update { index, undo: u, redo: r, .. } = &edit {
@@ -678,6 +863,24 @@ impl Worker {
             }
             Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
         }
+    }
+}
+
+/// Renumbers page-keyed annotation bookkeeping after a page operation.
+fn remap_bookkeeping(od: &mut OpenDoc, m: &PageMapping) {
+    let remap = |key: &(usize, usize)| m.map.get(key.0).copied().flatten().map(|p| (p, key.1));
+    od.deleted = od.deleted.iter().filter_map(|(k, v)| remap(k).map(|k| (k, *v))).collect();
+    od.colors = od.colors.iter().filter_map(|(k, v)| remap(k).map(|k| (k, *v))).collect();
+}
+
+/// Drops the oldest history when page snapshots use too much memory.
+fn trim_snapshots(od: &mut OpenDoc) {
+    let total = |v: &[Edit]| v.iter().map(Edit::snapshot_bytes).sum::<usize>();
+    while total(&od.undo) > SNAPSHOT_BUDGET {
+        // Remove everything up to and including the oldest page operation.
+        let Some(first) = od.undo.iter().position(|e| matches!(e, Edit::Pages(_))) else { break };
+        od.undo.drain(..=first);
+        od.saved_at = od.saved_at.and_then(|s| s.checked_sub(first + 1));
     }
 }
 

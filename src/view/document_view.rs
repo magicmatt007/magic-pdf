@@ -246,6 +246,10 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         )
     });
     let hovered = response.hovered() || response.contains_pointer();
+    if response.clicked() || response.drag_started() {
+        // Delete now refers to annotations again, not to selected thumbnails.
+        tab.pages_focused = false;
+    }
     if !ui.input(|i| i.pointer.primary_down()) {
         tab.selecting = false;
     }

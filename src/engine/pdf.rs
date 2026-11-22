@@ -340,6 +340,103 @@ impl Doc {
         (page >= 0).then_some((page as usize, kind))
     }
 
+    /// Closes all cached pages (required before changing the page structure).
+    pub fn close_all_pages(&self) {
+        let pages: Vec<_> = self.pages.borrow_mut().drain(..).collect();
+        for (_, page) in pages {
+            unsafe { self.close_page(page) };
+        }
+    }
+
+    /// An empty document (for extracting pages into).
+    pub fn create(lib: Lib) -> Result<Doc, String> {
+        let handle = unsafe { lib.FPDF_CreateNewDocument() };
+        if handle.is_null() {
+            return Err("PDFium could not create a document".into());
+        }
+        let info: FPDF_FORMFILLINFO = unsafe { std::mem::zeroed() };
+        Ok(Doc {
+            lib,
+            handle,
+            form: ptr::null_mut(),
+            pages: RefCell::new(Vec::new()),
+            env: Box::new(FormEnv {
+                info,
+                invalidated: RefCell::new(Vec::new()),
+                changed: Cell::new(false),
+            }),
+            _data: Vec::new(),
+        })
+    }
+
+    /// Applies a page operation. Returns the number of pages inserted (InsertFile).
+    pub fn apply_page_op(&self, op: &super::pages::PageOp) -> Result<usize, String> {
+        use super::pages::PageOp;
+        self.kill_form_focus();
+        self.close_all_pages();
+        let lib = self.lib;
+        match op {
+            PageOp::Delete { pages } => {
+                let mut p = pages.clone();
+                p.sort_unstable();
+                p.dedup();
+                for &i in p.iter().rev() {
+                    unsafe { lib.FPDFPage_Delete(self.handle, i as c_int) };
+                }
+                Ok(0)
+            }
+            PageOp::Move { pages, to } => {
+                let mut p: Vec<c_int> = pages.iter().map(|&i| i as c_int).collect();
+                p.sort_unstable();
+                p.dedup();
+                let ok = unsafe { lib.FPDF_MovePages(self.handle, p.as_ptr(), p.len() as c_ulong, *to as c_int) };
+                if lib.is_true(ok) { Ok(0) } else { Err("PDFium could not move the pages".into()) }
+            }
+            PageOp::Rotate { pages, quarter_turns } => {
+                for &i in pages {
+                    let page = self.page(i).ok_or("page not found")?;
+                    let current = unsafe { lib.FPDFPage_GetRotation(page.handle) };
+                    unsafe { lib.FPDFPage_SetRotation(page.handle, (current + quarter_turns).rem_euclid(4)) };
+                }
+                // Page sizes and geometry changed; reload pages on next use.
+                self.close_all_pages();
+                Ok(0)
+            }
+            PageOp::InsertBlank { at, size } => {
+                let page = unsafe { lib.FPDFPage_New(self.handle, *at as c_int, size.0 as f64, size.1 as f64) };
+                if page.is_null() {
+                    return Err("PDFium could not create a page".into());
+                }
+                unsafe { lib.FPDF_ClosePage(page) };
+                Ok(1)
+            }
+            PageOp::InsertFile { at, source, pages, .. } => {
+                let src = Doc::open_bytes(lib, source.as_ref().clone(), None).map_err(|e| match e {
+                    OpenError::Password => "password-protected files cannot be inserted".to_string(),
+                    OpenError::Other(m) => m,
+                })?;
+                self.import_pages(&src, pages.as_deref(), *at)
+            }
+        }
+    }
+
+    /// Imports pages of `src` (all if None) at index `at`. Returns how many.
+    pub fn import_pages(&self, src: &Doc, pages: Option<&[usize]>, at: usize) -> Result<usize, String> {
+        let lib = self.lib;
+        let indices: Vec<c_int> = match pages {
+            Some(p) => p.iter().map(|&i| i as c_int).collect(),
+            None => (0..src.page_count() as c_int).collect(),
+        };
+        let ok = unsafe {
+            lib.FPDF_ImportPagesByIndex(self.handle, src.handle, indices.as_ptr(), indices.len() as c_ulong, at as c_int)
+        };
+        if lib.is_true(ok) {
+            Ok(indices.len())
+        } else {
+            Err("PDFium could not import the pages".into())
+        }
+    }
+
     pub fn kill_form_focus(&self) {
         if !self.form.is_null() {
             unsafe { self.lib.FORM_ForceToKillFocus(self.form) };

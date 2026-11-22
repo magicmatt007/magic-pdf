@@ -134,6 +134,24 @@ impl TextureCache {
         });
     }
 
+    /// Renumbers a document's textures after a page operation. Textures of removed or
+    /// changed (e.g. rotated) pages are dropped.
+    pub fn remap(&mut self, doc: DocId, mapping: &crate::engine::PageMapping) {
+        let old = std::mem::take(&mut self.entries);
+        self.total_bytes = 0;
+        for (key, entry) in old {
+            let new_page = if key.doc == doc {
+                mapping.map.get(key.page).copied().flatten().filter(|p| !mapping.changed.contains(p))
+            } else {
+                Some(key.page)
+            };
+            if let Some(page) = new_page {
+                self.total_bytes += entry.bytes;
+                self.entries.insert(RenderKey { page, ..key }, entry);
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;
@@ -211,6 +229,26 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(best(&mut cache, 1000, 6), key(1000, 5));
         }
+    }
+
+    #[test]
+    fn remap_follows_moved_pages() {
+        let ctx = egui::Context::default();
+        let mut cache = TextureCache::new(usize::MAX);
+        for page in 0..3 {
+            insert(&mut cache, &ctx, RenderKey { page, ..key(500, 0) });
+        }
+        // Delete page 0, rotate (what becomes) page 1.
+        let m = crate::engine::PageMapping {
+            map: vec![None, Some(0), Some(1)],
+            new_count: 2,
+            changed: vec![1],
+        };
+        cache.remap(1, &m);
+        assert!(cache.contains(&RenderKey { page: 0, ..key(500, 0) }));
+        assert!(!cache.contains(&RenderKey { page: 1, ..key(500, 0) }));
+        assert!(!cache.contains(&RenderKey { page: 2, ..key(500, 0) }));
+        assert_eq!(cache.total_bytes, 4);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Per-tab document state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use eframe::egui::{Pos2, Rect, Vec2};
@@ -116,6 +116,15 @@ pub struct DocTab {
     pub can_undo: bool,
     pub can_redo: bool,
     pub dirty: bool,
+    /// Pages selected in the thumbnail sidebar (for page operations).
+    pub page_selection: BTreeSet<usize>,
+    /// Anchor for Shift+click range selection of pages.
+    pub page_anchor: Option<usize>,
+    /// Gap (insert-before page) under the pointer while files are dragged over the
+    /// thumbnails.
+    pub thumb_drop_gap: Option<usize>,
+    /// The thumbnails were clicked last (so Delete removes pages, not annotations).
+    pub pages_focused: bool,
     /// Form field widgets per page.
     pub widgets: HashMap<usize, Vec<WidgetInfo>>,
     /// Page whose form field has keyboard focus.
@@ -171,6 +180,10 @@ impl DocTab {
             can_undo: false,
             can_redo: false,
             dirty: false,
+            page_selection: BTreeSet::new(),
+            page_anchor: None,
+            pages_focused: false,
+            thumb_drop_gap: None,
             widgets: HashMap::new(),
             form_focus: None,
             form_pressed: false,
@@ -251,6 +264,51 @@ impl DocTab {
             focus_contents: false,
         });
         self.selection = None;
+    }
+
+    /// Pages that page operations act on: the thumbnail selection, else the current page.
+    pub fn target_pages(&self) -> Vec<usize> {
+        if self.page_selection.is_empty() {
+            vec![self.current_page]
+        } else {
+            self.page_selection.iter().copied().collect()
+        }
+    }
+
+    /// Updates everything keyed by page number after the page structure changed.
+    pub fn apply_page_mapping(&mut self, info: DocInfo, m: &crate::engine::PageMapping) {
+        let map = |p: usize| m.map.get(p).copied().flatten();
+        let keep = |p: usize| map(p).filter(|n| !m.changed.contains(n));
+        fn remap<T>(old: HashMap<usize, T>, f: impl Fn(usize) -> Option<usize>) -> HashMap<usize, T> {
+            old.into_iter().filter_map(|(p, v)| f(p).map(|n| (n, v))).collect()
+        }
+        self.texts = remap(std::mem::take(&mut self.texts), keep);
+        self.geoms = remap(std::mem::take(&mut self.geoms), keep);
+        self.annots = remap(std::mem::take(&mut self.annots), map);
+        self.widgets = remap(std::mem::take(&mut self.widgets), map);
+        self.page_versions = remap(std::mem::take(&mut self.page_versions), map);
+        for p in &m.changed {
+            *self.page_versions.entry(*p).or_insert(0) += 1;
+        }
+        self.page_selection = self.page_selection.iter().filter_map(|p| map(*p)).collect();
+        self.page_anchor = self.page_anchor.and_then(map);
+        let count = info.page_sizes.len();
+        // Stay on the same page if it still exists, else on the page now at its place.
+        let current = map(self.current_page).unwrap_or(self.current_page.min(count.saturating_sub(1)));
+        self.state = LoadState::Ready(info);
+        self.layout_params = None;
+        self.selection = None;
+        self.selected_annot = None;
+        self.draft = None;
+        self.form_focus = None;
+        self.form_pressed = false;
+        self.search.hits.clear();
+        self.search.current = None;
+        self.search.submitted = None;
+        self.requested.clear();
+        self.last_wanted.clear();
+        self.page_input.clear();
+        self.goto_page(current);
     }
 
     /// Display name with an unsaved-changes marker.

@@ -406,6 +406,31 @@ pub enum Request {
         doc: DocId,
         job: PrintJob,
     },
+    /// Change the page structure (undoable).
+    EditPages {
+        doc: DocId,
+        op: super::pages::PageOp,
+    },
+    /// Insert the pages of another PDF file at `at` (undoable).
+    InsertFile {
+        doc: DocId,
+        path: PathBuf,
+        at: usize,
+    },
+    /// Write `pages` to a new PDF file.
+    ExtractPages {
+        doc: DocId,
+        pages: Vec<usize>,
+        path: PathBuf,
+    },
+    /// Write the document as several files of `every` pages each, named
+    /// `<stem>-01.pdf`, `<stem>-02.pdf`, … in `dir`.
+    SplitDocument {
+        doc: DocId,
+        every: usize,
+        dir: PathBuf,
+        stem: String,
+    },
     /// Show the native print dialog and print (Windows).
     #[cfg_attr(not(windows), allow(dead_code))]
     PrintNative {
@@ -483,6 +508,17 @@ pub enum Response {
     },
     Error {
         doc: DocId,
+        message: String,
+    },
+    /// The page structure changed: new document info and how old page numbers map
+    /// to new ones.
+    PagesChanged {
+        doc: DocId,
+        info: DocInfo,
+        mapping: super::pages::PageMapping,
+    },
+    /// Pages were written to other files.
+    Exported {
         message: String,
     },
     /// Form widgets of a page (sent with `PageAnnots` and after field edits).
