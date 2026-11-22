@@ -15,8 +15,9 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Text selection and copy, internal and external links
 - Tabs, recent files, drag & drop, password-protected files, night mode
 
-- Annotations: highlight, underline, strikeout, sticky notes, text boxes typed
-  directly on the page, freehand drawing, rectangles and ellipses (with separate
+- Annotations: highlight, underline, strikeout, sticky notes, rich text boxes typed
+  directly on the page (bold, italic, underline, strikethrough, colours and sizes per
+  word, alignment; Ctrl+B/I/U; stored as standard PDF rich text), freehand drawing, rectangles and ellipses (with separate
   fill colours); any colour (70-colour palette, recent colours, custom colour or
   hex code), line widths, comments, a Comments sidebar; drag annotations to move
   them, resize with handles (Shift keeps proportions), nudge with arrow keys; undo/redo,
@@ -134,7 +135,9 @@ WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the [GNU Affero General Public License](LICENSE) for details.
 
 Toolbar icons are from [Phosphor Icons](https://phosphoricons.com) (MIT license,
-see `assets/fonts/phosphor/LICENSE`).
+see `assets/fonts/phosphor/LICENSE`). Text boxes use
+[Noto Sans](https://notofonts.github.io) (SIL Open Font License, see
+`assets/fonts/noto-sans/OFL.txt`).
 
 PDFium is distributed under its own BSD-style license; `scripts/fetch-pdfium.*` places a
 copy in `third_party/pdfium/LICENSE`, which must ship alongside the library.

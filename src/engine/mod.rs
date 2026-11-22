@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod pages;
+pub mod rich;
 pub mod textbox;
 mod pdf;
 #[cfg(windows)]
@@ -15,6 +16,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
 pub use pages::{PageMapping, PageOp, move_target};
+pub use rich::{Align, CharStyle, RichText};
 pub use pdf::FIELD_TEXT;
 
 pub struct Engine {
@@ -74,6 +76,7 @@ pub fn library_search_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rich::Span;
     use std::time::Duration;
 
     fn recv(engine: &Engine) -> Response {
@@ -1035,6 +1038,124 @@ mod tests {
         assert_eq!(sq.color, Some([0, 110, 230]), "border colour after reopening");
         assert_eq!(sq.interior, Some([255, 255, 255]), "fill after reopening");
         assert!((sq.width - 10.0).abs() < 0.01);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rich_text_boxes() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-rich-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_serial, engine) = start();
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+        open(&engine, 1, form);
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::FreeText,
+                rect: PdfBox {
+                    left: 300.0,
+                    bottom: 380.0,
+                    right: 500.0,
+                    top: 400.0,
+                },
+                color: [220, 30, 30],
+                interior: None,
+                width: 1.0,
+                contents: "plain".into(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 0],
+            },
+        });
+        let index = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            _ => None,
+        });
+        let base = CharStyle::default();
+        let rich = RichText {
+            spans: vec![
+                Span {
+                    text: "Fett ".into(),
+                    style: CharStyle { bold: true, ..base },
+                },
+                Span {
+                    text: "kursiv ".into(),
+                    style: CharStyle { italic: true, ..base },
+                },
+                Span {
+                    text: "rot".into(),
+                    style: CharStyle {
+                        color: [220, 30, 30],
+                        underline: true,
+                        size: 18.0,
+                        ..base
+                    },
+                },
+                Span {
+                    text: "\nGrüße, Привет".into(),
+                    style: CharStyle {
+                        bold: true,
+                        italic: true,
+                        ..base
+                    },
+                },
+            ],
+            align: Align::Center,
+        };
+        let drain = |engine: &Engine| while engine.rx.recv_timeout(Duration::from_millis(100)).is_ok() {};
+        drain(&engine);
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index,
+            change: AnnotChange {
+                rich: Some(rich.clone()),
+                ..Default::default()
+            },
+        });
+        let list = annots(&engine, 1);
+        let tb = list.iter().find(|a| a.index == index).unwrap();
+        assert_eq!(tb.rich.as_ref(), Some(&rich));
+        assert_eq!(tb.contents, "Fett kursiv rot\nGrüße, Привет");
+        // Two lines: the 18 pt line and a 12 pt line.
+        let h = tb.rect.top - tb.rect.bottom;
+        assert!((h - (8.0 + 18.0 * 1.25 + 12.0 * 1.25)).abs() < 0.01, "{h}");
+
+        // Red text pixels exist (the 18 pt "rot").
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let red = rgba.chunks(4).filter(|p| p[0] > 180 && p[1] < 90 && p[2] < 90).count();
+        assert!(red > 30, "red text not drawn: {red} px at {size:?}");
+
+        let out = dir.join("rich.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let bytes = std::fs::read(&out).unwrap();
+        let has = |n: &str| bytes.windows(n.len()).any(|w| w == n.as_bytes());
+        assert!(has("/RC") && has("/DS"));
+        assert!(!has("/FontFile"), "no font embedded");
+        if let Some(keep) = std::env::var_os("MAGIC_PDF_KEEP_RICH") {
+            std::fs::copy(&out, keep).unwrap();
+        }
+
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let list = recv_until(&engine, |r| match r {
+            Response::PageAnnots { doc: 2, page: 0, annots, .. } => Some(annots),
+            _ => None,
+        });
+        let again = list.iter().find(|a| a.kind == AnnotKind::FreeText).unwrap();
+        assert_eq!(again.rich.as_ref(), Some(&rich), "styles survive saving");
+
+        // Undo goes back to the plain text.
+        drain(&engine);
+        engine.send(Request::Undo { doc: 1 });
+        let list = annots(&engine, 1);
+        let tb = list.iter().find(|a| a.index == index).unwrap();
+        assert_eq!(tb.contents, "plain");
+        assert_eq!(tb.rich.as_ref().map(|r| r.spans.len()), Some(1));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

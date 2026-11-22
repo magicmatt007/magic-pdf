@@ -60,6 +60,7 @@ jobs:
           Copy-Item LICENSE "$dir\LICENSE.txt"
           Copy-Item third_party\pdfium\LICENSE "$dir\PDFIUM-LICENSE.txt"
           Copy-Item assets\fonts\phosphor\LICENSE "$dir\PHOSPHOR-LICENSE.txt"
+          Copy-Item assets\fonts\noto-sans\OFL.txt "$dir\NOTO-SANS-LICENSE.txt"
           Compress-Archive -Path "$dir\*" -DestinationPath "dist\magic-pdf-$env:VERSION-windows-portable.zip"
 
       - name: Keep the build as a workflow artifact

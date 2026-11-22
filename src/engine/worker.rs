@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::commands::*;
 use super::pages::{PageMapping, PageOp};
 use super::library_search_dirs;
-use super::pdf::{Doc, Lib, OpenError, PdfiumFont};
+use super::pdf::{Doc, FontFamily, Lib, OpenError};
 
 const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
 
@@ -21,7 +21,7 @@ const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
 enum Edit {
     Add { page: usize, index: usize },
     Delete { page: usize, index: usize },
-    Update { page: usize, index: usize, undo: AnnotChange, redo: AnnotChange },
+    Update { page: usize, index: usize, undo: Box<AnnotChange>, redo: Box<AnnotChange> },
     /// A page operation. Undo restores the document from `snapshot` (taken before the
     /// operation, with the annotation bookkeeping of that moment); redo re-applies `op`.
     Pages(Box<PagesEdit>),
@@ -110,8 +110,8 @@ struct Worker {
     scans: Vec<ScanJob>,
     tx: Sender<Response>,
     wake: Box<dyn Fn() + Send>,
-    /// Font for text box appearances, loaded on first use.
-    text_font: Option<PdfiumFont>,
+    /// Fonts for text box appearances, loaded on first use.
+    text_font: Option<FontFamily>,
 }
 
 /// Binds and initialises PDFium once per process; it stays loaded until exit.
@@ -730,7 +730,7 @@ impl Worker {
     /// Redraws a text box annotation (after creating or changing it).
     fn refresh_text_box(&mut self, doc: DocId, page_index: usize, index: usize) {
         if self.text_font.is_none() {
-            match PdfiumFont::load(self.lib, epaint_default_fonts::UBUNTU_LIGHT) {
+            match FontFamily::load_noto_sans(self.lib) {
                 Ok(f) => self.text_font = Some(f),
                 Err(e) => {
                     self.error(doc, e);
@@ -817,8 +817,8 @@ impl Worker {
                     Edit::Update {
                         page: page_index,
                         index,
-                        undo,
-                        redo: change,
+                        undo: Box::new(undo),
+                        redo: Box::new(change),
                     },
                 );
                 self.refresh_text_box(doc, page_index, index);

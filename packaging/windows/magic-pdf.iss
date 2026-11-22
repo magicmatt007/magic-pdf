@@ -49,6 +49,7 @@ Source: "{#Root}\third_party\pdfium\pdfium.dll"; DestDir: "{app}"; Flags: ignore
 Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "{#Root}\third_party\pdfium\LICENSE"; DestDir: "{app}"; DestName: "PDFIUM-LICENSE.txt"; Flags: ignoreversion
 Source: "{#Root}\assets\fonts\phosphor\LICENSE"; DestDir: "{app}"; DestName: "PHOSPHOR-LICENSE.txt"; Flags: ignoreversion
+Source: "{#Root}\assets\fonts\noto-sans\OFL.txt"; DestDir: "{app}"; DestName: "NOTO-SANS-LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"

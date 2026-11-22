@@ -278,9 +278,11 @@ pub struct AnnotInfo {
     pub contents: String,
     pub author: String,
     pub modified: String,
-    /// Text boxes: font size and text colour (from /DA).
+    /// Text boxes: font size and text colour of the first character.
     pub font_size: Option<f32>,
     pub text_color: Option<Rgb>,
+    /// Text boxes: the styled text.
+    pub rich: Option<super::rich::RichText>,
 }
 
 /// Property changes; `None` leaves a property untouched.
@@ -292,6 +294,8 @@ pub struct AnnotChange {
     pub contents: Option<String>,
     pub font_size: Option<f32>,
     pub text_color: Option<Rgb>,
+    /// Text boxes: new styled text (replaces the text and its styles).
+    pub rich: Option<super::rich::RichText>,
     /// Move or resize: the new rectangle (PDF page space).
     pub rect: Option<PdfBox>,
     /// Move or resize as an exact transform `[sx, sy, tx, ty]` (x' = sx*x + tx); used

@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::engine::{AnnotInfo, DocId, DocInfo, PageGeom, PageText, PdfBox, RenderKey, Request, Rotation, WidgetInfo};
+use crate::engine::{
+    Align, AnnotInfo, AnnotKind, CharStyle, DocId, DocInfo, PageGeom, PageText, PdfBox, RenderKey, Request, RichText,
+    Rotation, WidgetInfo,
+};
 use crate::settings::FileState;
 use crate::view::layout::{self, Layout, LayoutMode, LayoutParams};
 use crate::view::viewport::{FitMode, Viewport};
@@ -96,6 +99,63 @@ pub struct AnnotSelection {
     pub focus_contents: bool,
     /// A text box's text is being edited on the page.
     pub editing: bool,
+    /// Text boxes: styles of the text being edited.
+    pub rich: Option<RichEdit>,
+}
+
+/// Styles of a text box's text while it is edited (one per character of
+/// `AnnotSelection::contents`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RichEdit {
+    pub styles: Vec<CharStyle>,
+    /// Style for newly typed text.
+    pub typing: CharStyle,
+    pub align: Align,
+    /// The text as last saved, to avoid saving unchanged text.
+    pub committed: RichText,
+    /// Cursor position (characters) in the last frame, to follow cursor moves.
+    pub last_cursor: Option<usize>,
+}
+
+impl RichEdit {
+    pub fn new(rich: &RichText) -> RichEdit {
+        let chars = rich.chars();
+        RichEdit {
+            styles: chars.iter().map(|c| c.1).collect(),
+            typing: rich.first_style(CharStyle::default()),
+            align: rich.align,
+            committed: rich.clone(),
+            last_cursor: None,
+        }
+    }
+
+    pub fn to_rich(&self, text: &str) -> RichText {
+        let chars: Vec<(char, CharStyle)> = text
+            .chars()
+            .zip(self.styles.iter().copied().chain(std::iter::repeat(self.typing)))
+            .collect();
+        RichText::from_chars(&chars, self.align)
+    }
+}
+
+/// Keeps per-character styles in step with an edit from `old` to `new`: characters
+/// outside the changed middle keep their style, inserted ones get `typing`.
+pub fn sync_styles(old: &str, new: &str, styles: &[CharStyle], typing: CharStyle) -> Vec<CharStyle> {
+    let (a, b): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let max_suffix = a.len().min(b.len()) - prefix;
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take(max_suffix)
+        .take_while(|(x, y)| x == y)
+        .count();
+    let style = |i: usize| styles.get(i).copied().unwrap_or(typing);
+    let mut out: Vec<CharStyle> = (0..prefix).map(style).collect();
+    out.extend(std::iter::repeat_n(typing, b.len() - prefix - suffix));
+    out.extend((a.len() - suffix..a.len()).map(style));
+    out
 }
 
 pub struct DocTab {
@@ -266,6 +326,21 @@ impl DocTab {
     /// Ends editing the selected annotation, saving its comment if it was changed.
     pub fn deselect_annot(&mut self) {
         let Some(sel) = self.selected_annot.take() else { return };
+        if let Some(edit) = &sel.rich {
+            let rich = edit.to_rich(&sel.contents);
+            if rich != edit.committed && self.annot(sel.page, sel.index).is_some() {
+                self.outbox.push(Request::UpdateAnnot {
+                    doc: self.id,
+                    page: sel.page,
+                    index: sel.index,
+                    change: crate::engine::AnnotChange {
+                        rich: Some(rich),
+                        ..Default::default()
+                    },
+                });
+            }
+            return;
+        }
         let changed = self.annot(sel.page, sel.index).is_some() && sel.contents != sel.committed;
         if changed {
             self.outbox.push(Request::UpdateAnnot {
@@ -289,7 +364,21 @@ impl DocTab {
             return;
         }
         self.deselect_annot();
-        let contents = self.annot(page, index).map(|a| a.contents.clone()).unwrap_or_default();
+        let annot = self.annot(page, index);
+        let contents = annot.map(|a| a.contents.clone()).unwrap_or_default();
+        let rich = annot.filter(|a| a.kind == AnnotKind::FreeText).map(|a| {
+            RichEdit::new(&a.rich.clone().unwrap_or_else(|| {
+                RichText::plain(
+                    &a.contents,
+                    CharStyle {
+                        size: a.font_size.unwrap_or(12.0),
+                        color: a.text_color.unwrap_or([0, 0, 0]),
+                        ..Default::default()
+                    },
+                )
+            }))
+        });
+        let contents = rich.as_ref().map(|r| r.committed.text()).unwrap_or(contents);
         self.selected_annot = Some(AnnotSelection {
             page,
             index,
@@ -297,6 +386,7 @@ impl DocTab {
             contents,
             focus_contents: false,
             editing: false,
+            rich,
         });
         self.selection = None;
     }
@@ -576,4 +666,37 @@ pub fn same_line(a: &PdfBox, b: &PdfBox) -> bool {
 /// Quad points (TL, TR, BL, BR) for a line box, as used by text markup annotations.
 pub fn quad(b: &PdfBox) -> [f32; 8] {
     [b.left, b.top, b.right, b.top, b.left, b.bottom, b.right, b.bottom]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn st(bold: bool) -> CharStyle {
+        CharStyle {
+            bold,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn styles_follow_text_edits() {
+        let (n, b) = (st(false), st(true));
+        // "ab" with b bold; type "X" between them in normal style.
+        assert_eq!(sync_styles("ab", "aXb", &[n, b], n), vec![n, n, b]);
+        // Delete the bold character.
+        assert_eq!(sync_styles("ab", "a", &[n, b], n), vec![n]);
+        // Replace a selection ("bc" -> "Z") with bold typing.
+        assert_eq!(sync_styles("abcd", "aZd", &[n, n, n, n], b), vec![n, b, n]);
+        // Repeated letters: "aa" -> "aaa" inserts one new character.
+        assert_eq!(sync_styles("aa", "aaa", &[b, b], n).len(), 3);
+        assert_eq!(sync_styles("", "hi", &[], b), vec![b, b]);
+    }
+
+    #[test]
+    fn rich_edit_round_trip() {
+        let rich = RichText::from_chars(&[('a', st(true)), ('b', st(false))], Align::Right);
+        let e = RichEdit::new(&rich);
+        assert_eq!(e.to_rich("ab"), rich);
+    }
 }

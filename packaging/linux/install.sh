@@ -18,6 +18,8 @@ install -Dm755 target/release/magic-pdf "$PREFIX/bin/magic-pdf"
 install -Dm644 third_party/pdfium/libpdfium.so "$PREFIX/lib/magic-pdf/libpdfium.so"
 install -Dm644 third_party/pdfium/LICENSE "$PREFIX/share/licenses/magic-pdf/PDFIUM-LICENSE"
 install -Dm644 LICENSE "$PREFIX/share/licenses/magic-pdf/LICENSE"
+install -Dm644 assets/fonts/noto-sans/OFL.txt "$PREFIX/share/licenses/magic-pdf/NOTO-SANS-LICENSE"
+install -Dm644 assets/fonts/phosphor/LICENSE "$PREFIX/share/licenses/magic-pdf/PHOSPHOR-LICENSE"
 install -Dm644 packaging/linux/magic-pdf.svg "$PREFIX/share/icons/hicolor/scalable/apps/magic-pdf.svg"
 # Use an absolute path: ~/.local/bin is often not on PATH for the desktop session.
 sed "s|^Exec=magic-pdf|Exec=$PREFIX/bin/magic-pdf|" packaging/linux/magic-pdf.desktop \

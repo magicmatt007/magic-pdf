@@ -35,6 +35,11 @@ pub const TEXT_AA: &str = "\u{e6ee}";
 pub const COPY: &str = "\u{e1ca}";
 pub const TRASH: &str = "\u{e4a6}";
 pub const PRINTER: &str = "\u{e3dc}";
+pub const TEXT_B: &str = "\u{e5be}";
+pub const TEXT_ITALIC: &str = "\u{e5c0}";
+pub const ALIGN_LEFT: &str = "\u{e484}";
+pub const ALIGN_CENTER: &str = "\u{e480}";
+pub const ALIGN_RIGHT: &str = "\u{e486}";
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

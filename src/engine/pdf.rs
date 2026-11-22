@@ -9,7 +9,8 @@ use std::ptr;
 use pdfium_render::prelude::*;
 
 use super::commands::*;
-use super::textbox::{self, BoxStyle, GlyphSource};
+use super::rich::{CharStyle, RichText};
+use super::textbox::{self, BoxStyle, FontSet, GlyphSource};
 
 pub type Lib = &'static dyn PdfiumLibraryBindings;
 
@@ -824,13 +825,16 @@ impl<'d> Page<'d> {
                 modified: string("M"),
                 font_size: None,
                 text_color: None,
+                rich: None,
             });
             if kind == AnnotKind::FreeText
                 && let Some(last) = out.last_mut()
             {
-                let (size, color) = textbox::parse_default_appearance(&string("DA"));
-                last.font_size = size;
-                last.text_color = color;
+                let rich = self.read_rich(&a);
+                let first = rich.first_style(CharStyle::default());
+                last.font_size = Some(first.size);
+                last.text_color = Some(first.color);
+                last.rich = Some(rich);
             }
         }
         out
@@ -917,13 +921,12 @@ impl<'d> Page<'d> {
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Name", "Comment");
             }
             if n.kind == AnnotKind::FreeText {
-                let style = BoxStyle {
-                    font_size: n.font_size,
-                    text_color: n.text_color,
-                    border: (n.color, n.width),
-                    fill: n.interior,
+                let style = CharStyle {
+                    size: n.font_size,
+                    color: n.text_color,
+                    ..Default::default()
                 };
-                lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(&style));
+                self.write_rich(&a, &RichText::plain(&n.contents, style));
             }
         }
         if index < 0 {
@@ -946,7 +949,8 @@ impl<'d> Page<'d> {
             || change.interior.is_some()
             || change.width.is_some()
             || change.font_size.is_some()
-            || change.text_color.is_some();
+            || change.text_color.is_some()
+            || change.rich.is_some();
         unsafe {
             if restyle {
                 // PDFium refuses colour access while an appearance stream exists. Drop it;
@@ -975,22 +979,29 @@ impl<'d> Page<'d> {
                 undo.width = Some(old);
                 lib.FPDFAnnot_SetBorder(a.handle, hr, vr, w);
             }
-            if change.font_size.is_some() || change.text_color.is_some() {
-                let (size, color) = textbox::parse_default_appearance(&string("DA"));
-                let (size, color) = (size.unwrap_or(12.0), color.unwrap_or([0, 0, 0]));
-                if change.font_size.is_some() {
-                    undo.font_size = Some(size);
+            let is_box = lib.FPDFAnnot_GetSubtype(a.handle) == SUBTYPE_FREETEXT;
+            let text_change = change.rich.is_some()
+                || change.font_size.is_some()
+                || change.text_color.is_some()
+                || (is_box && change.contents.is_some());
+            if is_box && text_change {
+                // A text box's text and styles change together (and undo together).
+                let old = self.read_rich(&a);
+                let mut new = change.rich.clone().unwrap_or_else(|| match &change.contents {
+                    Some(text) => RichText::plain(text, old.first_style(CharStyle::default())),
+                    None => old.clone(),
+                });
+                // Whole-box size or colour changes apply to every character.
+                for span in &mut new.spans {
+                    if let Some(size) = change.font_size {
+                        span.style.size = size;
+                    }
+                    if let Some(color) = change.text_color {
+                        span.style.color = color;
+                    }
                 }
-                if change.text_color.is_some() {
-                    undo.text_color = Some(color);
-                }
-                let style = BoxStyle {
-                    font_size: change.font_size.unwrap_or(size),
-                    text_color: change.text_color.unwrap_or(color),
-                    border: ([0, 0, 0], 0.0),
-                    fill: None,
-                };
-                lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(&style));
+                self.write_rich(&a, &new);
+                undo.rich = Some(old);
             }
             if change.rect.is_some() || change.transform.is_some() {
                 let mut r = FS_RECTF {
@@ -1019,7 +1030,7 @@ impl<'d> Page<'d> {
                 };
                 lib.FPDFAnnot_SetRect(a.handle, &nr);
             }
-            if let Some(text) = &change.contents {
+            if let Some(text) = change.contents.as_ref().filter(|_| !is_box) {
                 undo.contents = Some(string("Contents"));
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", text);
             }
@@ -1058,15 +1069,12 @@ impl<'d> Page<'d> {
 
     /// Re-lays out a text box from its stored text and style and sets its appearance
     /// (the box grows or shrinks in height to fit the text).
-    pub fn refresh_text_box(&self, index: usize, font: &dyn GlyphSource) -> Result<(), String> {
+    pub fn refresh_text_box(&self, index: usize, fonts: &dyn FontSet) -> Result<(), String> {
         let lib = self.lib();
         let a = self.annot(index).ok_or("annotation not found")?;
         unsafe {
             // Without an appearance PDFium lets us read the colours.
             lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
-            let string = |key: &str| {
-                read_utf16(|buf, len| lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len))
-            };
             let mut r = FS_RECTF {
                 left: 0.0,
                 top: 0.0,
@@ -1076,14 +1084,12 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_GetRect(a.handle, &mut r);
             let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
             lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width);
-            let (size, color) = textbox::parse_default_appearance(&string("DA"));
             let style = BoxStyle {
-                font_size: size.unwrap_or(12.0),
-                text_color: color.unwrap_or([0, 0, 0]),
                 border: (self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]), width),
                 fill: self.annot_color(&a, COLORTYPE_INTERIOR),
             };
-            let (rect, content) = textbox::appearance(to_box(&r), &string("Contents"), &style, font);
+            let rich = self.read_rich(&a);
+            let (rect, content) = textbox::appearance(to_box(&r), &rich, &style, fonts);
             let new = FS_RECTF {
                 left: rect.left,
                 top: rect.top,
@@ -1097,6 +1103,36 @@ impl<'d> Page<'d> {
             }
         }
         Ok(())
+    }
+
+    /// A text box's styled text: from /RC if present, else /Contents with the /DA style.
+    fn read_rich(&self, a: &Annot) -> RichText {
+        let lib = self.lib();
+        let string = |key: &str| {
+            read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len) })
+        };
+        let (size, color) = textbox::parse_default_appearance(&string("DA"));
+        let default = CharStyle {
+            size: size.unwrap_or(12.0),
+            color: color.unwrap_or([0, 0, 0]),
+            ..Default::default()
+        };
+        let rc = string("RC");
+        RichText::parse_xhtml(&rc, default)
+            .filter(|r| !r.spans.is_empty() || string("Contents").is_empty())
+            .unwrap_or_else(|| RichText::plain(&string("Contents"), default))
+    }
+
+    /// Stores styled text: plain text, rich text and default styles together.
+    fn write_rich(&self, a: &Annot, rich: &RichText) {
+        let lib = self.lib();
+        let first = rich.first_style(CharStyle::default());
+        unsafe {
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", &rich.text());
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "RC", &rich.to_xhtml());
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "DS", &rich.default_style_string());
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(first.size, first.color));
+        }
     }
 
     /// Forwards a mouse event to the form-fill module. Returns true if a field handled it.
@@ -1238,6 +1274,36 @@ impl<'d> Page<'d> {
     }
 }
 
+
+/// The four faces of the text box font family.
+pub struct FontFamily {
+    regular: PdfiumFont,
+    bold: PdfiumFont,
+    italic: PdfiumFont,
+    bold_italic: PdfiumFont,
+}
+
+impl FontFamily {
+    pub fn load_noto_sans(lib: Lib) -> Result<FontFamily, String> {
+        Ok(FontFamily {
+            regular: PdfiumFont::load(lib, crate::fonts::REGULAR)?,
+            bold: PdfiumFont::load(lib, crate::fonts::BOLD)?,
+            italic: PdfiumFont::load(lib, crate::fonts::ITALIC)?,
+            bold_italic: PdfiumFont::load(lib, crate::fonts::BOLD_ITALIC)?,
+        })
+    }
+}
+
+impl FontSet for FontFamily {
+    fn font(&self, bold: bool, italic: bool) -> &dyn GlyphSource {
+        match (bold, italic) {
+            (false, false) => &self.regular,
+            (true, false) => &self.bold,
+            (false, true) => &self.italic,
+            (true, true) => &self.bold_italic,
+        }
+    }
+}
 
 /// Glyph metrics and outlines from a TrueType font loaded into a scratch document (so
 /// nothing is added to the user's documents).
@@ -1433,5 +1499,28 @@ mod appearance_tests {
         assert_eq!(appearance_colors("0.5 g 0 0 5 5 re f"), (None, Some([128, 128, 128])));
         assert_eq!(appearance_colors("0 1 1 0 K 0 0 m 1 1 l S"), (Some([255, 0, 0]), None));
         assert_eq!(appearance_colors(""), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn noto_sans_faces_cover_the_characters_people_type() {
+        let lib = super::super::worker::shared_pdfium().unwrap().bindings();
+        let fonts = FontFamily::load_noto_sans(lib).unwrap();
+        let text = "AZaz09 äöüß ÄÖÜ áéíóú ąęłśźż ÆØÅ Привет ЁЖЩ € – — „“ ‚‘ … ©";
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let font = fonts.font(bold, italic);
+            for ch in text.chars().filter(|c| !c.is_whitespace()) {
+                let mut out = String::new();
+                font.outline(ch, 12.0, 0.0, 0.0, &mut out);
+                assert!(!out.is_empty(), "{ch:?} missing (bold {bold}, italic {italic})");
+                assert!(font.advance(ch) > 0.0);
+            }
+        }
+        // Bold really is wider than regular.
+        assert!(fonts.font(true, false).advance('m') > fonts.font(false, false).advance('m'));
     }
 }

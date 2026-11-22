@@ -9,7 +9,7 @@ use eframe::egui::{
 use crate::icons;
 use crate::document::{AnnotDrag, AnnotSelection, DocTab, DragMode, Draft, LoadState, Selection, quad};
 use crate::engine::{
-    AnnotChange, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Resize, Rgb,
+    Align, AnnotChange, CharStyle, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Resize, Rgb,
     form_mods,
 };
 use crate::settings::AnnotStyle;
@@ -1305,7 +1305,7 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
         return;
     }
     if sel.editing {
-        text_box_editor(ui, tab, &annot, screen);
+        text_box_editor(ui, tab, &annot, screen, view, recent);
         return;
     }
     let width = 260.0;
@@ -1438,62 +1438,206 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
     }
 }
 
-/// Edits a text box's text in place: an editor drawn over the box, using the same
-/// font (egui's proportional font is the one the box is drawn with), size and colours.
-/// The text is saved when the editor loses focus (click elsewhere, Esc).
-fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect) {
-    let Some(sel) = tab.selected_annot.as_mut() else { return };
+/// Edits a text box's text in place: an editor drawn over the box with the same fonts,
+/// sizes and colours, and a formatting bar above it. Formatting applies to the selected
+/// text, or to what is typed next. The text is saved when editing ends (click
+/// elsewhere, Esc).
+fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, view: Rect, recent: &mut Vec<Rgb>) {
     let zoom = tab.viewport.zoom;
-    let size = annot.font_size.unwrap_or(12.0) * zoom;
     let pad = crate::engine::textbox::PADDING * zoom;
     let border = annot.width * zoom;
     let fill = annot.interior.map(rgb).unwrap_or(Color32::WHITE);
-    let text_color = rgb(annot.text_color.unwrap_or([0, 0, 0]));
+    let ctx = ui.ctx().clone();
+    let editor_id = Id::unique(("text_box_editor", tab.id));
+    let edit_id = editor_id.with("text");
+    let Some(sel) = tab.selected_annot.as_mut() else { return };
+    let Some(re) = sel.rich.as_mut() else { return };
+
+    // The selection as of the last frame (characters).
+    let range = egui::TextEdit::load_state(&ctx, edit_id)
+        .and_then(|s| s.cursor.char_range())
+        .map(|r| {
+            let (a, b) = (r.primary.index.0, r.secondary.index.0);
+            (a.min(b), a.max(b))
+        });
+    if let Some((a, b)) = range {
+        // Moving the cursor picks up the style of the text before it.
+        if a == b && re.last_cursor != Some(a) {
+            let at = if a > 0 { re.styles.get(a - 1) } else { re.styles.first() };
+            re.typing = at.copied().unwrap_or(re.typing);
+        }
+        re.last_cursor = Some(a);
+    }
+    let selected = range.filter(|(a, b)| a < b);
+    let current = selected.and_then(|(a, _)| re.styles.get(a).copied()).unwrap_or(re.typing);
+    let apply = |re: &mut crate::document::RichEdit, f: &dyn Fn(&mut CharStyle)| match selected {
+        Some((a, b)) => {
+            for s in re.styles.iter_mut().take(b).skip(a) {
+                f(s);
+            }
+        }
+        None => f(&mut re.typing),
+    };
+
+    // Keyboard shortcuts for the selection.
+    let (bold_key, italic_key, underline_key) = ctx.input_mut(|i| {
+        let mut key = |k| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k));
+        (key(egui::Key::B), key(egui::Key::I), key(egui::Key::U))
+    });
+    if bold_key {
+        apply(re, &|s| s.bold = !current.bold);
+    }
+    if italic_key {
+        apply(re, &|s| s.italic = !current.italic);
+    }
+    if underline_key {
+        apply(re, &|s| s.underline = !current.underline);
+    }
+
+    // Formatting bar above the box (below it if there is no room).
+    let bar_y = if screen.top() - 40.0 > view.top() { screen.top() - 40.0 } else { screen.bottom() + 6.0 };
+    let bar = egui::Area::new(editor_id.with("bar"))
+        .fixed_pos(pos2(screen.left(), bar_y))
+        .order(egui::Order::Foreground)
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let toggle = |ui: &mut Ui, on: bool, icon: &str, tip: &str| {
+                        ui.add(egui::Button::selectable(on, icons::text(icon))).on_hover_text(tip).clicked()
+                    };
+                    if toggle(ui, current.bold, icons::TEXT_B, "Bold (Ctrl+B)") {
+                        apply(re, &|s| s.bold = !current.bold);
+                    }
+                    if toggle(ui, current.italic, icons::TEXT_ITALIC, "Italic (Ctrl+I)") {
+                        apply(re, &|s| s.italic = !current.italic);
+                    }
+                    if toggle(ui, current.underline, icons::TEXT_UNDERLINE, "Underline (Ctrl+U)") {
+                        apply(re, &|s| s.underline = !current.underline);
+                    }
+                    if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, "Strikethrough") {
+                        apply(re, &|s| s.strike = !current.strike);
+                    }
+                    ui.separator();
+                    if let Some(Some(c)) = color_picker::color_button(ui, "box_text", Some(current.color), false, recent) {
+                        apply(re, &|s| s.color = c);
+                    }
+                    let mut size = current.size;
+                    if ui
+                        .add(egui::DragValue::new(&mut size).range(4.0..=96.0).speed(0.2).suffix(" pt"))
+                        .on_hover_text("Font size")
+                        .changed()
+                    {
+                        apply(re, &|s| s.size = size);
+                    }
+                    ui.separator();
+                    for (align, icon, tip) in [
+                        (Align::Left, icons::ALIGN_LEFT, "Align left"),
+                        (Align::Center, icons::ALIGN_CENTER, "Centre"),
+                        (Align::Right, icons::ALIGN_RIGHT, "Align right"),
+                    ] {
+                        if toggle(ui, re.align == align, icon, tip) {
+                            re.align = align;
+                        }
+                    }
+                });
+            });
+        });
+    #[cfg(test)]
+    ctx.data_mut(|d| d.insert_temp(Id::unique("test_format_bar"), bar.response.rect));
+
+    // The editor itself.
+    let styles = re.styles.clone();
+    let (typing, align) = (re.typing, re.align);
+    let mut layouter = move |ui: &Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut job = egui::text::LayoutJob::default();
+        for (i, ch) in text.as_str().chars().enumerate() {
+            let st = styles.get(i).copied().unwrap_or(typing);
+            let stroke = |on: bool| {
+                if on {
+                    Stroke::new((st.size * 0.06 * zoom).max(1.0), rgb(st.color))
+                } else {
+                    Stroke::NONE
+                }
+            };
+            job.append(
+                ch.encode_utf8(&mut [0; 4]),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(st.size * zoom, crate::fonts::family(st.bold, st.italic)),
+                    color: rgb(st.color),
+                    underline: stroke(st.underline),
+                    strikethrough: stroke(st.strike),
+                    line_height: Some(st.size * zoom * crate::engine::textbox::LINE_HEIGHT),
+                    ..Default::default()
+                },
+            );
+        }
+        job.wrap.max_width = wrap_width;
+        job.halign = match align {
+            Align::Left => egui::Align::LEFT,
+            Align::Center => egui::Align::Center,
+            Align::Right => egui::Align::RIGHT,
+        };
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let mut contents = sel.contents.clone();
     let mut lost = false;
-    egui::Area::new(Id::unique(("text_box_editor", tab.id)))
+    let width = (screen.width() - 2.0 * pad - 2.0 * border).max(20.0);
+    egui::Area::new(editor_id)
         .fixed_pos(screen.min)
         .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
+        .show(&ctx, |ui| {
             egui::Frame::new()
                 .fill(fill)
                 .stroke(Stroke::new(border, rgb(annot.color.unwrap_or([0, 0, 0]))))
                 .inner_margin(pad)
                 .show(ui, |ui| {
+                    ui.set_width(width);
                     let edit = ui.add(
                         egui::TextEdit::multiline(&mut contents)
-                            .font(egui::FontId::proportional(size))
-                            .text_color(text_color)
+                            .id(edit_id)
+                            .layouter(&mut layouter)
                             .frame(egui::Frame::NONE)
                             .margin(egui::Margin::ZERO)
                             .desired_rows(1)
-                            .desired_width((screen.width() - 2.0 * pad - 2.0 * border).max(20.0)),
+                            .desired_width(width),
                     );
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_text_box_editor"), edit.rect));
-                    if sel.focus_contents {
+                    if sel.focus_contents && !egui::Popup::is_any_open(ui.ctx()) {
                         edit.request_focus();
                         sel.focus_contents = false;
                     }
                     lost = edit.lost_focus();
                 });
         });
-    sel.contents = contents;
+    if contents != sel.contents {
+        re.styles = crate::document::sync_styles(&sel.contents, &contents, &re.styles, re.typing);
+        sel.contents = contents;
+    }
     if lost {
-        // Done editing: save the text, keep the box selected.
-        sel.editing = false;
-        if sel.contents != sel.committed {
-            sel.committed = sel.contents.clone();
-            let req = Request::UpdateAnnot {
-                doc: tab.id,
-                page: sel.page,
-                index: sel.index,
-                change: AnnotChange {
-                    contents: Some(sel.contents.clone()),
-                    ..Default::default()
-                },
-            };
-            tab.outbox.push(req);
+        let pointer_on_bar = ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| bar.response.rect.contains(p));
+        if pointer_on_bar || egui::Popup::is_any_open(&ctx) {
+            // Using the formatting bar: keep editing.
+            sel.focus_contents = true;
+        } else {
+            // Done editing: save, keep the box selected.
+            sel.editing = false;
+            let rich = re.to_rich(&sel.contents);
+            if rich != re.committed {
+                re.committed = rich.clone();
+                sel.committed = sel.contents.clone();
+                let req = Request::UpdateAnnot {
+                    doc: tab.id,
+                    page: sel.page,
+                    index: sel.index,
+                    change: AnnotChange {
+                        rich: Some(rich),
+                        ..Default::default()
+                    },
+                };
+                tab.outbox.push(req);
+            }
         }
     }
 }
@@ -1514,8 +1658,12 @@ pub fn format_pdf_date(d: &str) -> String {
 
 /// Applies an annotation selection change coming from outside the view (e.g. sidebar).
 pub fn focus_annot(tab: &mut DocTab, page: usize, index: usize, edit: bool) {
-    tab.select_annot(page, index);
     let is_text_box = tab.annot(page, index).is_some_and(|a| a.kind == AnnotKind::FreeText);
+    if edit && is_text_box {
+        // Start from the box's current text and styles.
+        tab.deselect_annot();
+    }
+    tab.select_annot(page, index);
     if let Some(AnnotSelection {
         focus_contents, editing, ..
     }) = &mut tab.selected_annot
@@ -1680,6 +1828,7 @@ mod tests {
                 modified: String::new(),
                 font_size: None,
                 text_color: None,
+                rich: None,
             }],
         );
         tab.select_annot(0, 3);
@@ -1741,6 +1890,7 @@ mod tests {
                 modified: String::new(),
                 font_size: None,
                 text_color: None,
+                rich: None,
             }],
         );
         // A big text field under where the popup appears.
@@ -1804,6 +1954,7 @@ mod tests {
                 modified: String::new(),
                 font_size: None,
                 text_color: None,
+                rich: None,
             }],
         );
         tab.select_annot(0, 5);
@@ -1867,6 +2018,7 @@ mod tests {
                 modified: String::new(),
                 font_size: Some(12.0),
                 text_color: Some([0, 0, 0]),
+                rich: None,
             }],
         );
         focus_annot(&mut tab, 0, 7, true);
@@ -1880,7 +2032,8 @@ mod tests {
         // Click elsewhere on the page (with the hand tool) to finish.
         click(&ctx, &mut tab, &mut cache, page.center_bottom() - vec2(0.0, 30.0), Tool::Hand);
         let saved = tab.outbox.iter().any(|r| {
-            matches!(r, Request::UpdateAnnot { index: 7, change, .. } if change.contents.as_deref() == Some("Hallo"))
+            matches!(r, Request::UpdateAnnot { index: 7, change, .. }
+                if change.rich.as_ref().map(|r| r.text()).as_deref() == Some("Hallo"))
         });
         assert!(saved, "typed text was not saved");
         let saves = tab.outbox.iter().filter(|r| matches!(r, Request::UpdateAnnot { .. })).count();
@@ -1905,6 +2058,7 @@ mod tests {
             modified: String::new(),
             font_size: Some(12.0),
             text_color: Some([0, 0, 0]),
+            rich: None,
         }
     }
 
@@ -1997,5 +2151,81 @@ mod tests {
         assert!(handles(screen, AnnotKind::Note.resize(), false).is_empty());
         assert_eq!(handles(screen, AnnotKind::Ink.resize(), false).len(), 8);
         assert!(!AnnotKind::Highlight.movable());
+    }
+
+    fn key(k: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        let ev = |pressed| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        vec![ev(true), ev(false)]
+    }
+
+    /// A text box being edited, with focus in the editor.
+    fn editing_box() -> (egui::Context, DocTab, TextureCache) {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::FreeText);
+        focus_annot(&mut tab, 0, 4, true);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        (ctx, tab, cache)
+    }
+
+    fn finish(ctx: &egui::Context, tab: &mut DocTab, cache: &mut TextureCache) -> crate::engine::RichText {
+        tab.outbox.clear();
+        let page = tab.viewport.rect_to_screen(tab.layout.page_rect(0).unwrap(), tab.view_rect);
+        click(ctx, tab, cache, page.center_bottom() - vec2(0.0, 30.0), Tool::Hand);
+        tab.outbox
+            .iter()
+            .find_map(|r| match r {
+                Request::UpdateAnnot { change, .. } => change.rich.clone(),
+                _ => None,
+            })
+            .expect("text saved")
+    }
+
+    #[test]
+    fn select_all_then_ctrl_b_makes_the_text_bold() {
+        let (ctx, mut tab, mut cache) = editing_box();
+        let ctrl = egui::Modifiers::COMMAND;
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("Hello".into())], Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::A, ctrl), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::B, ctrl), Tool::Hand);
+        let rich = finish(&ctx, &mut tab, &mut cache);
+        assert_eq!(rich.text(), "Hello");
+        assert!(rich.spans.iter().all(|s| s.style.bold), "{rich:?}");
+    }
+
+    #[test]
+    fn ctrl_b_without_selection_styles_what_is_typed_next() {
+        let (ctx, mut tab, mut cache) = editing_box();
+        let ctrl = egui::Modifiers::COMMAND;
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("ab".into())], Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::B, ctrl), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("CD".into())], Tool::Hand);
+        let rich = finish(&ctx, &mut tab, &mut cache);
+        assert_eq!(rich.text(), "abCD");
+        assert_eq!(rich.spans.len(), 2, "{rich:?}");
+        assert!(!rich.spans[0].style.bold && rich.spans[1].style.bold);
+        assert_eq!(rich.spans[1].text, "CD");
+    }
+
+    #[test]
+    fn clicking_the_format_bar_keeps_editing() {
+        let (ctx, mut tab, mut cache) = editing_box();
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("x".into())], Tool::Hand);
+        let bar: Rect = ctx.data(|d| d.get_temp(Id::unique("test_format_bar"))).expect("format bar shown");
+        // The first button (bold).
+        click(&ctx, &mut tab, &mut cache, pos2(bar.left() + 20.0, bar.center().y), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        assert!(tab.selected_annot.as_ref().is_some_and(|s| s.editing), "still editing");
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("y".into())], Tool::Hand);
+        let rich = finish(&ctx, &mut tab, &mut cache);
+        assert_eq!(rich.text(), "xy");
+        assert!(rich.spans.last().unwrap().style.bold, "typed after clicking B: {rich:?}");
     }
 }

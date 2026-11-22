@@ -176,6 +176,7 @@ impl App {
             log::error!("{e}");
         }
         icons::install(&ctx);
+        crate::fonts::install(&ctx);
         let settings = Settings::load();
         ctx.set_theme(if settings.dark_ui {
             egui::Theme::Dark

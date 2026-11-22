@@ -3,6 +3,7 @@
 mod app;
 mod document;
 mod engine;
+mod fonts;
 mod icons;
 mod ipc;
 mod print;

@@ -1,13 +1,15 @@
 //! Text box (FreeText) annotations. PDFium cannot generate their appearance, so we
-//! lay the text out ourselves and draw it as glyph outlines (no font is embedded in
-//! the document; any viewer can display it). The text itself stays in /Contents and
-//! the style in /DA, so other PDF editors can still edit the box.
+//! lay the (rich) text out ourselves and draw it as glyph outlines: no font is
+//! embedded in the document and any viewer can display it. The text itself stays in
+//! /Contents and /RC, and the style in /DA and /DS, so other PDF editors can still
+//! edit the box.
 
 use super::commands::{PdfBox, Rgb};
+use super::rich::{Align, CharStyle, RichText};
 
 /// Inner padding between border and text, in points.
 pub const PADDING: f32 = 4.0;
-/// Line height relative to the font size.
+/// Line height relative to the largest font size on the line.
 pub const LINE_HEIGHT: f32 = 1.25;
 /// Width of a box created with a single click.
 pub const DEFAULT_WIDTH: f32 = 200.0;
@@ -23,56 +25,128 @@ pub trait GlyphSource {
     fn outline(&self, ch: char, size: f32, x: f32, y: f32, out: &mut String);
 }
 
+/// The fonts of one family.
+pub trait FontSet {
+    fn font(&self, bold: bool, italic: bool) -> &dyn GlyphSource;
+}
+
+/// Border and background of a box (text styles are part of the rich text).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxStyle {
-    pub font_size: f32,
-    pub text_color: Rgb,
     /// Border colour and width (no border if width is 0).
     pub border: (Rgb, f32),
     pub fill: Option<Rgb>,
 }
 
-/// Splits `text` into lines no wider than `max_width` (font size `size`). Paragraphs
-/// (newlines) are kept; words wider than a line are broken by characters.
-pub fn wrap(text: &str, max_width: f32, size: f32, font: &dyn GlyphSource) -> Vec<String> {
-    let width = |s: &str| s.chars().map(|c| font.advance(c)).sum::<f32>() * size;
-    let max_width = max_width.max(size);
+/// One laid-out line: characters with their x offset from the line start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub glyphs: Vec<(char, CharStyle, f32)>,
+    /// Width without trailing spaces.
+    pub width: f32,
+    pub height: f32,
+    pub ascent: f32,
+}
+
+fn advance(fonts: &dyn FontSet, c: char, s: &CharStyle) -> f32 {
+    fonts.font(s.bold, s.italic).advance(c) * s.size
+}
+
+fn finish_line(chars: &[(char, CharStyle)], fonts: &dyn FontSet, empty_style: CharStyle) -> Line {
+    let mut x = 0.0;
+    let mut glyphs = Vec::with_capacity(chars.len());
+    let mut width = 0.0;
+    for &(c, s) in chars {
+        glyphs.push((c, s, x));
+        x += advance(fonts, c, &s);
+        if !c.is_whitespace() {
+            width = x;
+        }
+    }
+    let styles: Vec<CharStyle> = if chars.is_empty() {
+        vec![empty_style]
+    } else {
+        chars.iter().map(|c| c.1).collect()
+    };
+    let size = styles.iter().map(|s| s.size).fold(0.0, f32::max);
+    let ascent = styles
+        .iter()
+        .map(|s| fonts.font(s.bold, s.italic).ascent() * s.size)
+        .fold(0.0, f32::max);
+    Line {
+        glyphs,
+        width,
+        height: size * LINE_HEIGHT,
+        ascent,
+    }
+}
+
+/// Breaks rich text into lines no wider than `max_width`. Paragraphs (newlines) are
+/// kept; words wider than a line are broken by characters.
+pub fn layout(rich: &RichText, max_width: f32, fonts: &dyn FontSet) -> Vec<Line> {
+    let chars = rich.chars();
+    let default = rich.first_style(CharStyle::default());
     let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut line = String::new();
-        for word in paragraph.split(' ') {
-            let candidate = if line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{line} {word}")
+    let mut paragraphs: Vec<(Vec<(char, CharStyle)>, CharStyle)> = vec![(Vec::new(), default)];
+    for &(c, s) in &chars {
+        if c == '\n' {
+            paragraphs.push((Vec::new(), s));
+        } else {
+            paragraphs.last_mut().unwrap().0.push((c, s));
+        }
+    }
+    for (para, para_style) in paragraphs {
+        // Words: non-space characters followed by their spaces.
+        let mut words: Vec<Vec<(char, CharStyle)>> = Vec::new();
+        for (c, s) in para {
+            let new_word = match words.last() {
+                None => true,
+                Some(w) => !c.is_whitespace() && w.last().is_some_and(|(p, _)| p.is_whitespace()),
             };
-            if width(&candidate) <= max_width {
-                line = candidate;
+            if new_word {
+                words.push(Vec::new());
+            }
+            words.last_mut().unwrap().push((c, s));
+        }
+        let mut line: Vec<(char, CharStyle)> = Vec::new();
+        let mut line_w = 0.0;
+        for word in words {
+            let ink: f32 = word
+                .iter()
+                .filter(|(c, _)| !c.is_whitespace())
+                .map(|(c, s)| advance(fonts, *c, s))
+                .sum();
+            let full: f32 = word.iter().map(|(c, s)| advance(fonts, *c, s)).sum();
+            if line_w + ink <= max_width || line.is_empty() && ink <= max_width {
+                line.extend(word);
+                line_w += full;
                 continue;
             }
             if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
+                lines.push(finish_line(&line, fonts, para_style));
+                line.clear();
+                line_w = 0.0;
             }
-            // The word alone may still be too wide: break it.
-            for ch in word.chars() {
-                let mut next = line.clone();
-                next.push(ch);
-                if width(&next) > max_width && !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                    line.push(ch);
-                } else {
-                    line = next;
+            // Fits on a line of its own, or has to be broken by characters.
+            for (c, s) in word {
+                let w = advance(fonts, c, &s);
+                if line_w + w > max_width && !line.is_empty() && !c.is_whitespace() {
+                    lines.push(finish_line(&line, fonts, para_style));
+                    line.clear();
+                    line_w = 0.0;
                 }
+                line.push((c, s));
+                line_w += w;
             }
         }
-        lines.push(line);
+        lines.push(finish_line(&line, fonts, para_style));
     }
     lines
 }
 
-/// Height a box needs for `lines` lines of text.
-pub fn box_height(lines: usize, size: f32) -> f32 {
-    2.0 * PADDING + lines.max(1) as f32 * size * LINE_HEIGHT
+/// Height a box needs for `lines`.
+pub fn box_height(lines: &[Line]) -> f32 {
+    2.0 * PADDING + lines.iter().map(|l| l.height).sum::<f32>()
 }
 
 fn rgb(c: Rgb) -> String {
@@ -84,15 +158,13 @@ fn rgb(c: Rgb) -> String {
     )
 }
 
-/// Lays out `text` in a box whose top-left corner and width come from `rect`. Returns
-/// the box rectangle (height fitted to the text) and the appearance content stream.
-pub fn appearance(rect: PdfBox, text: &str, style: &BoxStyle, font: &dyn GlyphSource) -> (PdfBox, String) {
-    let size = style.font_size.max(1.0);
-    let inner_w = (rect.right - rect.left - 2.0 * PADDING).max(size);
-    let lines = wrap(text, inner_w, size, font);
-    let height = box_height(lines.len(), size);
+/// Lays out `rich` in a box whose top-left corner and width come from `rect`.
+/// Returns the box rectangle (height fitted to the text) and the appearance stream.
+pub fn appearance(rect: PdfBox, rich: &RichText, style: &BoxStyle, fonts: &dyn FontSet) -> (PdfBox, String) {
+    let inner_w = (rect.right - rect.left - 2.0 * PADDING).max(1.0);
+    let lines = layout(rich, inner_w, fonts);
     let r = PdfBox {
-        bottom: rect.top - height,
+        bottom: rect.top - box_height(&lines),
         ..rect
     };
     let (w, h) = (r.right - r.left, r.top - r.bottom);
@@ -111,30 +183,58 @@ pub fn appearance(rect: PdfBox, text: &str, style: &BoxStyle, font: &dyn GlyphSo
             h - bw
         );
     }
-    s += &format!("{} rg\n", rgb(style.text_color));
-    let mut baseline = r.top - PADDING - font.ascent() * size;
+    let mut top = r.top - PADDING;
     for line in &lines {
-        let mut x = r.left + PADDING;
-        for ch in line.chars() {
-            if !ch.is_whitespace() {
-                let mut glyph = String::new();
-                font.outline(ch, size, x, baseline, &mut glyph);
-                if !glyph.is_empty() {
-                    s += &glyph;
-                    s += "f\n";
+        let baseline = top - line.ascent - (line.height - line.ascent * LINE_HEIGHT).max(0.0) / 2.0;
+        let shift = match rich.align {
+            Align::Left => 0.0,
+            Align::Center => (inner_w - line.width) / 2.0,
+            Align::Right => inner_w - line.width,
+        };
+        let x0 = r.left + PADDING + shift.max(0.0);
+        let mut color: Option<Rgb> = None;
+        for &(c, cs, x) in &line.glyphs {
+            if c.is_whitespace() {
+                continue;
+            }
+            let mut glyph = String::new();
+            fonts.font(cs.bold, cs.italic).outline(c, cs.size, x0 + x, baseline, &mut glyph);
+            if glyph.is_empty() {
+                continue;
+            }
+            if color != Some(cs.color) {
+                s += &format!("{} rg\n", rgb(cs.color));
+                color = Some(cs.color);
+            }
+            s += &glyph;
+            s += "f\n";
+        }
+        // Underline and strikethrough as thin bars under/through each character.
+        for &(c, cs, x) in &line.glyphs {
+            let adv = advance(fonts, c, &cs);
+            let thickness = (cs.size * 0.06).max(0.5);
+            for (on, dy) in [(cs.underline, -cs.size * 0.12), (cs.strike, cs.size * 0.28)] {
+                if on && !(c.is_whitespace() && x >= line.width) {
+                    s += &format!(
+                        "{} rg {:.2} {:.2} {:.2} {:.2} re f\n",
+                        rgb(cs.color),
+                        x0 + x,
+                        baseline + dy - thickness / 2.0,
+                        adv,
+                        thickness
+                    );
                 }
             }
-            x += font.advance(ch) * size;
         }
-        baseline -= size * LINE_HEIGHT;
+        top -= line.height;
     }
     s += "Q\n";
     (r, s)
 }
 
 /// The /DA (default appearance) string other PDF editors use to restyle the box.
-pub fn default_appearance(style: &BoxStyle) -> String {
-    format!("/Helv {:.1} Tf {} rg", style.font_size, rgb(style.text_color))
+pub fn default_appearance(size: f32, color: Rgb) -> String {
+    format!("/Helv {size:.1} Tf {} rg", rgb(color))
 }
 
 /// Reads font size and text colour back from a /DA string.
@@ -166,12 +266,15 @@ pub fn parse_default_appearance(da: &str) -> (Option<f32>, Option<Rgb>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::rich::Span;
 
-    /// Every character is 0.5 em wide; each glyph outline is a marker.
-    struct Mono;
+    /// Regular characters are 0.5 em wide, bold ones 0.6 em; glyphs are markers.
+    struct Mono {
+        bold: bool,
+    }
     impl GlyphSource for Mono {
         fn advance(&self, _: char) -> f32 {
-            0.5
+            if self.bold { 0.6 } else { 0.5 }
         }
         fn ascent(&self) -> f32 {
             0.8
@@ -180,22 +283,72 @@ mod tests {
             out.push_str(&format!("% {ch} at {x:.1} {y:.1}\n"));
         }
     }
+    struct Fonts(Mono, Mono);
+    impl FontSet for Fonts {
+        fn font(&self, bold: bool, _italic: bool) -> &dyn GlyphSource {
+            if bold { &self.1 } else { &self.0 }
+        }
+    }
+    fn fonts() -> Fonts {
+        Fonts(Mono { bold: false }, Mono { bold: true })
+    }
+
+    fn plain(text: &str, size: f32) -> RichText {
+        RichText::plain(
+            text,
+            CharStyle {
+                size,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn line_texts(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(|l| l.glyphs.iter().map(|g| g.0).collect::<String>().trim_end().to_string()).collect()
+    }
 
     #[test]
     fn wraps_words_and_keeps_paragraphs() {
         // 10 pt text: 5 pt per character, 40 pt per line = 8 characters.
-        let lines = wrap("hello big world\nab", 40.0, 10.0, &Mono);
-        assert_eq!(lines, vec!["hello", "big", "world", "ab"]);
-        let lines = wrap("abcdefghijk", 40.0, 10.0, &Mono);
-        assert_eq!(lines, vec!["abcdefgh", "ijk"]);
-        assert_eq!(wrap("", 40.0, 10.0, &Mono), vec![""]);
+        let lines = layout(&plain("hello big world\nab", 10.0), 40.0, &fonts());
+        assert_eq!(line_texts(&lines), vec!["hello", "big", "world", "ab"]);
+        let lines = layout(&plain("abcdefghijk", 10.0), 40.0, &fonts());
+        assert_eq!(line_texts(&lines), vec!["abcdefgh", "ijk"]);
+        assert_eq!(layout(&plain("", 10.0), 40.0, &fonts()).len(), 1);
     }
 
     #[test]
-    fn appearance_fits_height_and_places_text() {
+    fn mixed_styles_measure_and_size_lines() {
+        let normal = CharStyle::default();
+        let big_bold = CharStyle {
+            bold: true,
+            size: 20.0,
+            ..Default::default()
+        };
+        let rich = RichText {
+            spans: vec![
+                Span {
+                    text: "ab ".into(),
+                    style: normal,
+                },
+                Span {
+                    text: "CD".into(),
+                    style: big_bold,
+                },
+            ],
+            align: Align::Left,
+        };
+        let lines = layout(&rich, 1000.0, &fonts());
+        assert_eq!(lines.len(), 1);
+        // 3 * 6 (12 pt regular) + 2 * 12 (20 pt bold) = 42.
+        assert!((lines[0].width - 42.0).abs() < 1e-3, "{}", lines[0].width);
+        assert_eq!(lines[0].height, 25.0, "the biggest size sets the line height");
+        assert_eq!(lines[0].glyphs[3].2, 18.0, "bold text starts after the regular text");
+    }
+
+    #[test]
+    fn appearance_fits_height_aligns_and_decorates() {
         let style = BoxStyle {
-            font_size: 10.0,
-            text_color: [0, 0, 0],
             border: ([255, 0, 0], 1.0),
             fill: Some([255, 255, 255]),
         };
@@ -205,26 +358,34 @@ mod tests {
             right: 148.0,
             top: 500.0,
         };
-        let (r, s) = appearance(rect, "hello world", &style, &Mono);
+        let (r, s) = appearance(rect, &plain("hello world", 10.0), &style, &fonts());
         // Two lines: 2 * 4 padding + 2 * 12.5 line height.
         assert_eq!(r.top, 500.0);
         assert!((r.bottom - (500.0 - 33.0)).abs() < 1e-3);
         assert!(s.contains("1.000 1.000 1.000 rg"), "fill");
         assert!(s.contains("1.000 0.000 0.000 RG 1.00 w"), "border");
-        // First glyph at the padding, baseline one ascent below the top padding.
-        assert!(s.contains("% h at 104.0 488.0"), "{s}");
-        assert!(s.contains("% w at 104.0 475.5"), "{s}");
+        // Baseline: top padding, then half the extra line spacing (12.5 - 10) / 2,
+        // then the ascent (8): 500 - 4 - 1.25 - 8.
+        assert!(s.contains("% h at 104.0 486.8"), "{s}");
+        assert!(s.contains("% w at 104.0 474.2"), "{s}");
+
+        // Centred: "ab" (10 pt wide) in a 40 pt wide inner area starts 15 pt in.
+        let mut centred = plain("ab", 10.0);
+        centred.align = Align::Center;
+        let (_, s) = appearance(rect, &centred, &style, &fonts());
+        assert!(s.contains("% a at 119.0"), "{s}");
+
+        // Underline: a bar under the characters.
+        let mut u = plain("ab", 10.0);
+        u.spans[0].style.underline = true;
+        let (_, s) = appearance(rect, &u, &style, &fonts());
+        // 1.2 pt below the baseline (486.75), 0.6 pt thick.
+        assert!(s.contains("104.00 485.25 5.00 0.60 re f"), "{s}");
     }
 
     #[test]
     fn default_appearance_round_trip() {
-        let style = BoxStyle {
-            font_size: 14.0,
-            text_color: [0, 110, 230],
-            border: ([0, 0, 0], 1.0),
-            fill: None,
-        };
-        let da = default_appearance(&style);
+        let da = default_appearance(14.0, [0, 110, 230]);
         assert_eq!(parse_default_appearance(&da), (Some(14.0), Some([0, 110, 230])));
         assert_eq!(parse_default_appearance("/Helv 0 Tf 0 g"), (None, Some([0, 0, 0])));
     }
