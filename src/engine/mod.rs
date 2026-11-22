@@ -68,6 +68,8 @@ pub fn library_search_dirs() -> Vec<PathBuf> {
         dirs.push(exe_dir.join("../../third_party/pdfium"));
         // Installed on Linux: /usr/lib/magic-pdf
         dirs.push(exe_dir.join("../lib/magic-pdf"));
+        // macOS app bundle: Contents/MacOS/magic-pdf -> Contents/Frameworks
+        dirs.push(exe_dir.join("../Frameworks"));
     }
     dirs.push(PathBuf::from("third_party/pdfium"));
     dirs
@@ -1220,5 +1222,43 @@ mod tests {
         });
         assert_eq!(r.top, 700.0);
         assert!((r.top - r.bottom - (8.0 + 15.0)).abs() < 0.01, "{r:?}");
+    }
+
+    #[test]
+    fn new_text_boxes_keep_the_chosen_text_style() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::FreeText,
+                rect: PdfBox {
+                    left: 100.0,
+                    bottom: 680.0,
+                    right: 300.0,
+                    top: 700.0,
+                },
+                color: [0, 0, 0],
+                interior: None,
+                width: 1.0,
+                contents: String::new(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+                font_size: 20.0,
+                text_color: [0, 110, 230],
+            },
+        });
+        let index = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            _ => None,
+        });
+        let list = annots(&engine, 1);
+        let tb = list.iter().find(|a| a.index == index).unwrap();
+        assert_eq!(tb.font_size, Some(20.0), "size from the tool options");
+        assert_eq!(tb.text_color, Some([0, 110, 230]), "colour from the tool options");
+        let first = tb.rich.as_ref().unwrap().first_style(CharStyle::default());
+        assert_eq!((first.size, first.color), (20.0, [0, 110, 230]), "typing starts in that style");
     }
 }

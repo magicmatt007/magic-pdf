@@ -1109,9 +1109,12 @@ impl<'d> Page<'d> {
             color: color.unwrap_or([0, 0, 0]),
             ..Default::default()
         };
+        // Rich text without any characters (a new, still empty box) carries no style;
+        // the box's default style (/DA) then decides, so typing starts in the size and
+        // colour chosen for the box.
         let rc = string("RC");
         RichText::parse_xhtml(&rc, default)
-            .filter(|r| !r.spans.is_empty() || string("Contents").is_empty())
+            .filter(|r| !r.spans.is_empty())
             .unwrap_or_else(|| RichText::plain(&string("Contents"), default))
     }
 
