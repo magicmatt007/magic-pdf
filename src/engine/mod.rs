@@ -3,6 +3,8 @@
 
 pub mod commands;
 mod pdf;
+#[cfg(windows)]
+mod print_windows;
 mod worker;
 
 use std::path::PathBuf;
@@ -10,6 +12,7 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
+pub use pdf::FIELD_TEXT;
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -71,7 +74,11 @@ mod tests {
     use std::time::Duration;
 
     fn recv(engine: &Engine) -> Response {
-        engine.rx.recv_timeout(Duration::from_secs(20)).expect("engine response")
+        let r = engine.rx.recv_timeout(Duration::from_secs(5)).expect("engine response");
+        if std::env::var_os("MAGIC_PDF_TRACE").is_some() {
+            eprintln!("<- {}", describe(&r));
+        }
+        r
     }
 
     /// Receives until `f` matches, skipping unrelated responses.
@@ -80,6 +87,17 @@ mod tests {
             if let Some(t) = f(recv(engine)) {
                 return t;
             }
+        }
+    }
+
+    fn describe(r: &Response) -> String {
+        match r {
+            Response::FormFocus { page, .. } => format!("FormFocus {page:?}"),
+            Response::PageChanged { page, .. } => format!("PageChanged {page}"),
+            Response::EditState { dirty, .. } => format!("EditState dirty={dirty}"),
+            Response::PageWidgets { widgets, .. } => format!("PageWidgets {widgets:?}"),
+            Response::Error { message, .. } => format!("Error {message}"),
+            _ => "other".into(),
         }
     }
 
@@ -370,6 +388,124 @@ mod tests {
         // Undoing after saving makes the document dirty again.
         engine.send(Request::Undo { doc: 1 });
         assert_eq!(edit_state(&engine), (true, true, true));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn widgets(engine: &Engine, doc: DocId) -> Vec<WidgetInfo> {
+        recv_until(engine, |r| match r {
+            Response::PageWidgets { doc: d, page: 0, widgets } if d == doc => Some(widgets),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn form_fill_save_and_print_export() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-form-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("filled.pdf");
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+
+        let engine = start();
+        open(&engine, 1, form);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let ws = widgets(&engine, 1);
+        assert_eq!(ws.len(), 2, "{ws:?}");
+        let text = ws.iter().find(|w| w.name == "name").unwrap().clone();
+        let check = ws.iter().find(|w| w.name == "agree").unwrap().clone();
+        assert_eq!(text.field_type, FIELD_TEXT);
+        assert!(!check.checked);
+
+        let click = |w: &WidgetInfo| {
+            let (x, y) = ((w.rect.left + w.rect.right) / 2.0, (w.rect.bottom + w.rect.top) / 2.0);
+            for event in [FormMouse::Move, FormMouse::Down, FormMouse::Up] {
+                engine.send(Request::FormMouse {
+                    doc: 1,
+                    page: 0,
+                    event,
+                    x,
+                    y,
+                    modifiers: 0,
+                });
+            }
+        };
+        let focus = |engine: &Engine| {
+            recv_until(engine, |r| match r {
+                Response::FormFocus { page, .. } => Some(page),
+                _ => None,
+            })
+        };
+
+        // Focus the text field and type.
+        click(&text);
+        let _ = focus(&engine);
+        assert_eq!(focus(&engine), Some(0));
+        for c in "Hello".chars() {
+            engine.send(Request::FormKey {
+                doc: 1,
+                key: FormKey::Char(c as u32),
+                modifiers: 0,
+            });
+        }
+        // Backspace removes the last character.
+        engine.send(Request::FormKey {
+            doc: 1,
+            key: FormKey::Char(8),
+            modifiers: 0,
+        });
+        // Typing marks the document as having unsaved changes and repaints the page.
+        recv_until(&engine, |r| match r {
+            Response::EditState { dirty: true, .. } => Some(()),
+            _ => None,
+        });
+        recv_until(&engine, |r| match r {
+            Response::PageChanged { page: 0, .. } => Some(()),
+            _ => None,
+        });
+
+        // Toggle the checkbox, which also moves focus.
+        click(&check);
+        engine.send(Request::FormKillFocus { doc: 1 });
+        recv_until(&engine, |r| match r {
+            Response::FormFocus { page: None, .. } => Some(()),
+            _ => None,
+        });
+
+        engine.send(Request::ExportForPrint {
+            doc: 1,
+            job: PrintJob {
+                printer: None,
+                copies: 1,
+                pages: None,
+                two_sided: false,
+                fit_to_page: true,
+                title: "t".into(),
+            },
+        });
+        let bytes = recv_until(&engine, |r| match r {
+            Response::PrintReady { bytes, .. } => Some(bytes),
+            _ => None,
+        });
+        assert!(bytes.starts_with(b"%PDF"));
+
+        engine.send(Request::Save {
+            doc: 1,
+            path: out.clone(),
+        });
+        recv_until(&engine, |r| match r {
+            Response::Saved { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        assert_eq!(edit_state(&engine).2, false, "saving clears the dirty flag");
+
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let ws = widgets(&engine, 2);
+        let text = ws.iter().find(|w| w.name == "name").unwrap();
+        let check = ws.iter().find(|w| w.name == "agree").unwrap();
+        assert_eq!(text.value, "Hell");
+        assert!(check.checked, "checkbox state was not saved");
 
         std::fs::remove_dir_all(&dir).ok();
     }

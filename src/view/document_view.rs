@@ -7,7 +7,9 @@ use eframe::egui::{
 };
 
 use crate::document::{AnnotSelection, DocTab, Draft, LoadState, Selection, quad};
-use crate::engine::{AnnotChange, AnnotInfo, AnnotKind, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Rgb};
+use crate::engine::{
+    AnnotChange, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Rgb, form_mods,
+};
 use crate::settings::AnnotStyle;
 use crate::view::cache::{TextureCache, width_bucket};
 use crate::view::layout::{GAP, LayoutMode, geom_box_to_local, geom_local_to_pdf, geom_pdf_to_local};
@@ -315,8 +317,12 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         }
     }
 
-    // Panning: middle button always; primary with the hand tool, unless the drag
-    // started on an annotation.
+    // Interactive form fields take mouse input with the hand and select tools.
+    if matches!(tool, Tool::Hand | Tool::SelectText) && !middle_down && form_input(ui, tab, view, pointer) {
+        return;
+    }
+
+    // Panning: middle button always; primary with the hand tool.
     let panning = response.dragged() && (middle_down || tool == Tool::Hand);
     if panning {
         tab.viewport.offset -= response.drag_delta() / tab.viewport.zoom;
@@ -477,6 +483,84 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     } else if response.clicked() {
         tab.selection = None;
     }
+}
+
+/// Routes mouse input to PDFium's form-fill module when it concerns a form field.
+/// Returns true if the input was consumed.
+fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> bool {
+    let Some(pointer) = pointer.filter(|p| view.contains(*p)) else { return false };
+    let doc_pt = tab.viewport.to_doc(pointer, view);
+    let Some(page) = tab.layout.page_at(doc_pt) else {
+        if tab.form_focus.is_some() && ui.input(|i| i.pointer.primary_pressed()) {
+            tab.outbox.push(Request::FormKillFocus { doc: tab.id });
+            tab.form_focus = None;
+        }
+        return false;
+    };
+    let Some((_, p)) = screen_to_pdf(tab, pointer, view, Some(page)) else { return false };
+    let widget = tab
+        .widgets
+        .get(&page)
+        .and_then(|ws| ws.iter().find(|w| w.rect.contains(p.x, p.y)));
+    let focused_here = tab.form_focus == Some(page);
+    let (pressed, released, double, moved, mods) = ui.input(|i| {
+        let m = &i.modifiers;
+        let mods = (if m.shift { form_mods::SHIFT } else { 0 })
+            | (if m.command || m.ctrl { form_mods::CONTROL } else { 0 })
+            | (if m.alt { form_mods::ALT } else { 0 });
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_released(),
+            i.pointer.button_double_clicked(egui::PointerButton::Primary),
+            i.pointer.delta() != Vec2::ZERO,
+            mods,
+        )
+    });
+    if widget.is_none() && !focused_here && !tab.form_pressed {
+        if pressed && tab.form_focus.is_some() {
+            // Clicking outside any field ends editing.
+            tab.outbox.push(Request::FormKillFocus { doc: tab.id });
+            tab.form_focus = None;
+        }
+        return false;
+    }
+    if let Some(w) = widget {
+        ui.ctx().set_cursor_icon(if w.field_type == crate::engine::FIELD_TEXT {
+            CursorIcon::Text
+        } else {
+            CursorIcon::PointingHand
+        });
+    }
+    let mut send = |event| {
+        tab.outbox.push(Request::FormMouse {
+            doc: tab.id,
+            page,
+            event,
+            x: p.x,
+            y: p.y,
+            modifiers: mods,
+        });
+    };
+    if moved {
+        send(FormMouse::Move);
+    }
+    if double {
+        send(FormMouse::DoubleClick);
+    } else if pressed {
+        send(FormMouse::Down);
+        tab.form_pressed = true;
+    }
+    if released && tab.form_pressed {
+        send(FormMouse::Up);
+        tab.form_pressed = false;
+    }
+    if pressed {
+        tab.selection = None;
+        tab.selected_annot = None;
+    }
+    // Hovering a field without focus only changes the cursor; other tools still work
+    // for drags that start elsewhere.
+    widget.is_some() || focused_here || tab.form_pressed || released
 }
 
 fn draw_tool_input(

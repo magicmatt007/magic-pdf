@@ -40,11 +40,34 @@ struct OpenDoc {
     /// Known colours (stroke, fill) per annotation. PDFium cannot read colours of
     /// annotations that have an appearance stream, which ours get once rendered.
     colors: HashMap<(usize, usize), (Option<Rgb>, Option<Rgb>)>,
+    /// Form field values changed since the last save (not part of undo history).
+    form_dirty: bool,
 }
 
 impl OpenDoc {
     fn dirty(&self) -> bool {
-        self.saved_at != Some(self.undo.len())
+        self.form_dirty || self.saved_at != Some(self.undo.len())
+    }
+
+    /// The document as PDF bytes with all edits applied. Deleted annotations are only
+    /// hidden in the live document (so they can be restored); they are stripped for
+    /// real from a temporary copy.
+    fn export(&self, lib: Lib) -> Result<Vec<u8>, String> {
+        let bytes = self.doc.save_to_bytes()?;
+        if self.deleted.is_empty() {
+            return Ok(bytes);
+        }
+        let copy = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not re-open saved copy")?;
+        let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &(p, i) in self.deleted.keys() {
+            by_page.entry(p).or_default().push(i);
+        }
+        for (p, indices) in by_page {
+            if let Some(page) = copy.page(p) {
+                page.remove_annots(&indices);
+            }
+        }
+        copy.save_to_bytes()
     }
 }
 
@@ -197,6 +220,76 @@ impl Worker {
             Request::Undo { doc } => self.undo_redo(doc, true),
             Request::Redo { doc } => self.undo_redo(doc, false),
             Request::Save { doc, path } => self.save(doc, &path),
+            Request::FormMouse {
+                doc,
+                page,
+                event,
+                x,
+                y,
+                modifiers,
+            } => {
+                let mut toggled = false;
+                if let Some(od) = self.docs.get(&doc)
+                    && let Some(p) = od.doc.page(page)
+                {
+                    p.form_mouse(event, x, y, modifiers);
+                    // Releasing on a checkbox, radio button or list changes its value.
+                    toggled = event == FormMouse::Up
+                        && od.doc.focused_field().is_some_and(|(_, t)| (2..=5).contains(&t));
+                }
+                self.after_form(doc, event != FormMouse::Move, toggled);
+            }
+            Request::FormKey { doc, key, modifiers } => {
+                self.with_focused_page(doc, |p| p.form_key(key, modifiers));
+                // Characters (incl. backspace/enter), Delete and Space (toggles checkboxes)
+                // edit the field; navigation keys do not.
+                let edits = matches!(key, FormKey::Char(_) | FormKey::Down(0x2E) | FormKey::Down(0x20));
+                self.after_form(doc, true, edits);
+            }
+            Request::FormCopy { doc, cut } => {
+                let mut text = String::new();
+                self.with_focused_page(doc, |p| {
+                    text = p.form_selected_text();
+                    if cut {
+                        p.form_replace_selection("");
+                    }
+                });
+                let edited = cut && !text.is_empty();
+                if !text.is_empty() {
+                    self.send(Response::Clipboard { text });
+                }
+                self.after_form(doc, true, edited);
+            }
+            Request::FormPaste { doc, text } => {
+                self.with_focused_page(doc, |p| p.form_replace_selection(&text));
+                self.after_form(doc, true, true);
+            }
+            Request::FormSelectAll { doc } => {
+                self.with_focused_page(doc, |p| p.form_select_all());
+                self.after_form(doc, true, false);
+            }
+            Request::FormUndo { doc, redo } => {
+                self.with_focused_page(doc, |p| p.form_undo(redo));
+                self.after_form(doc, true, true);
+            }
+            Request::FormKillFocus { doc } => {
+                if let Some(od) = self.docs.get(&doc) {
+                    od.doc.kill_form_focus();
+                }
+                self.after_form(doc, true, false);
+            }
+            Request::ExportForPrint { doc, job } => {
+                let Some(od) = self.docs.get(&doc) else { return };
+                match od.export(self.lib) {
+                    Ok(bytes) => self.send(Response::PrintReady { job, bytes }),
+                    Err(e) => self.error(doc, format!("Preparing the print job failed: {e}")),
+                }
+            }
+            Request::PrintNative {
+                doc,
+                title,
+                current_page,
+            } => self.print_native(doc, &title, current_page),
         }
     }
 
@@ -251,6 +344,7 @@ impl Worker {
                         saved_at: Some(0),
                         deleted: HashMap::new(),
                         colors: HashMap::new(),
+                        form_dirty: false,
                     },
                 );
                 self.send(Response::Opened { doc: id, info });
@@ -290,7 +384,6 @@ impl Worker {
             geom: page.geom(),
             text: page.text(),
         };
-        drop(page);
         self.send(resp);
     }
 
@@ -312,7 +405,6 @@ impl Worker {
         let Some(page) = od.doc.page(page_index) else { return };
         let hits = page.search(&job.query, MAX_SEARCH_HITS_PER_PAGE);
         let geom = page.geom();
-        drop(page);
         if !hits.is_empty() {
             self.send(Response::SearchResults {
                 doc,
@@ -354,13 +446,79 @@ impl Worker {
             }
         }
         let geom = page.geom();
-        drop(page);
         self.send(Response::PageAnnots {
             doc,
             page: page_index,
             geom,
             annots,
         });
+        self.send_widgets(doc, page_index);
+    }
+
+    fn with_focused_page(&self, doc: DocId, f: impl FnOnce(&super::pdf::Page)) {
+        let Some(od) = self.docs.get(&doc) else { return };
+        if let Some((page, _)) = od.doc.focused_field()
+            && let Some(p) = od.doc.page(page)
+        {
+            f(&p);
+        }
+    }
+
+    /// Reports repaints, value changes and focus after a form interaction. `edited`
+    /// marks interactions known to change a field value (PDFium's own change
+    /// notification only fires when an edit is committed).
+    fn after_form(&mut self, doc: DocId, report_focus: bool, edited: bool) {
+        let Some(od) = self.docs.get_mut(&doc) else { return };
+        let mut events = od.doc.take_form_events();
+        events.changed |= edited && !events.invalidated_pages.is_empty();
+        let focus = od.doc.focused_field();
+        let was_dirty = od.dirty();
+        if events.changed {
+            od.form_dirty = true;
+        }
+        let now_dirty = od.dirty();
+        for page in &events.invalidated_pages {
+            self.send(Response::PageChanged { doc, page: *page });
+        }
+        if events.changed {
+            for page in &events.invalidated_pages {
+                self.send_widgets(doc, *page);
+            }
+        }
+        if was_dirty != now_dirty {
+            self.send_edit_state(doc);
+        }
+        if report_focus {
+            self.send(Response::FormFocus {
+                doc,
+                page: focus.map(|f| f.0),
+            });
+        }
+    }
+
+    fn send_widgets(&self, doc: DocId, page_index: usize) {
+        let Some(od) = self.docs.get(&doc) else { return };
+        let Some(page) = od.doc.page(page_index) else { return };
+        let widgets = page.widgets();
+        self.send(Response::PageWidgets {
+            doc,
+            page: page_index,
+            widgets,
+        });
+    }
+
+    #[cfg(windows)]
+    fn print_native(&mut self, doc: DocId, title: &str, current_page: usize) {
+        let Some(od) = self.docs.get(&doc) else { return };
+        match super::print_windows::print(&od.doc, title, current_page) {
+            Ok(pages) => self.send(Response::Printed { pages }),
+            Err(e) => self.error(doc, format!("Printing failed: {e}")),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn print_native(&mut self, doc: DocId, _title: &str, _current_page: usize) {
+        self.error(doc, "Native printing is only available on Windows");
     }
 
     fn after_edit(&self, doc: DocId, page: usize) {
@@ -495,28 +653,13 @@ impl Worker {
 
     fn save(&mut self, doc: DocId, path: &Path) {
         let Some(od) = self.docs.get_mut(&doc) else { return };
-        let result = (|| -> Result<(), String> {
-            let mut bytes = od.doc.save_to_bytes()?;
-            if !od.deleted.is_empty() {
-                // Deleted annotations are only hidden in the live document (so they can
-                // be restored); strip them for real from a temporary copy.
-                let copy = Doc::open_bytes(self.lib, bytes, None).map_err(|_| "could not re-open saved copy")?;
-                let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
-                for &(p, i) in od.deleted.keys() {
-                    by_page.entry(p).or_default().push(i);
-                }
-                for (p, indices) in by_page {
-                    if let Some(page) = copy.page(p) {
-                        page.remove_annots(&indices);
-                    }
-                }
-                bytes = copy.save_to_bytes()?;
-            }
-            write_atomically(path, &bytes).map_err(|e| e.to_string())
-        })();
+        let result = od
+            .export(self.lib)
+            .and_then(|bytes| write_atomically(path, &bytes).map_err(|e| e.to_string()));
         match result {
             Ok(()) => {
                 od.saved_at = Some(od.undo.len());
+                od.form_dirty = false;
                 self.send(Response::Saved {
                     doc,
                     path: path.to_path_buf(),

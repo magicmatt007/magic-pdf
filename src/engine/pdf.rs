@@ -3,6 +3,7 @@
 
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_ulong};
+use std::cell::{Cell, RefCell};
 use std::ptr;
 
 use pdfium_render::prelude::*;
@@ -47,18 +48,52 @@ pub enum OpenError {
     Other(String),
 }
 
+/// Form-fill environment handed to PDFium. `info` must be the first field: PDFium
+/// passes a pointer to it back into the callbacks, which we cast to `FormEnv`.
+#[repr(C)]
+struct FormEnv {
+    info: FPDF_FORMFILLINFO,
+    /// Pages PDFium asked to repaint since the last `take_events`.
+    invalidated: RefCell<Vec<FPDF_PAGE>>,
+    /// A form field value changed.
+    changed: Cell<bool>,
+}
+
+unsafe extern "C" fn ffi_invalidate(this: *mut FPDF_FORMFILLINFO, page: FPDF_PAGE, _l: f64, _t: f64, _r: f64, _b: f64) {
+    // SAFETY: `this` points at the `info` field of a live, boxed FormEnv (repr(C)).
+    let env = unsafe { &*(this as *const FormEnv) };
+    let mut v = env.invalidated.borrow_mut();
+    if !v.contains(&page) {
+        v.push(page);
+    }
+}
+
+unsafe extern "C" fn ffi_on_change(this: *mut FPDF_FORMFILLINFO) {
+    let env = unsafe { &*(this as *const FormEnv) };
+    env.changed.set(true);
+}
+
+/// Pages kept loaded. Form editing needs the page to stay loaded while a field has
+/// focus, and reusing loaded pages also saves re-parsing.
+const PAGE_CACHE: usize = 8;
+
 pub struct Doc {
     lib: Lib,
     handle: FPDF_DOCUMENT,
     form: FPDF_FORMHANDLE,
+    /// Loaded pages, least recently used first.
+    pages: RefCell<Vec<(usize, FPDF_PAGE)>>,
     // Must outlive the form handle and the document respectively.
-    _form_info: Box<FPDF_FORMFILLINFO>,
+    env: Box<FormEnv>,
     _data: Vec<u8>,
 }
 
 impl Drop for Doc {
     fn drop(&mut self) {
         unsafe {
+            for (_, page) in self.pages.borrow_mut().drain(..) {
+                self.close_page(page);
+            }
             if !self.form.is_null() {
                 self.lib.FPDFDOC_ExitFormFillEnvironment(self.form);
             }
@@ -67,22 +102,21 @@ impl Drop for Doc {
     }
 }
 
-/// A loaded page; closed on drop.
+/// A loaded page, owned by the document's page cache.
 pub struct Page<'d> {
     doc: &'d Doc,
     pub handle: FPDF_PAGE,
 }
 
-impl Drop for Page<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.doc.form.is_null() {
-                self.doc.lib.FORM_OnBeforeClosePage(self.handle, self.doc.form);
-            }
-            self.doc.lib.FPDF_ClosePage(self.handle);
-        }
-    }
+/// Form events collected from PDFium callbacks.
+#[derive(Default)]
+pub struct FormEvents {
+    pub invalidated_pages: Vec<usize>,
+    pub changed: bool,
 }
+
+/// Field types reported by FPDFAnnot_GetFormFieldType.
+pub const FIELD_TEXT: i32 = 6;
 
 struct TextPage<'p> {
     lib: Lib,
@@ -193,15 +227,32 @@ impl Doc {
                 })
             });
         }
-        // SAFETY: FPDF_FORMFILLINFO is a plain C struct of ints and optional fn pointers.
-        let mut form_info: Box<FPDF_FORMFILLINFO> = Box::new(unsafe { std::mem::zeroed() });
-        form_info.version = 2;
-        let form = unsafe { lib.FPDFDOC_InitFormFillEnvironment(handle, form_info.as_mut()) };
+        // SAFETY: FPDF_FORMFILLINFO is a plain C struct of ints, pointers and optional fn
+        // pointers, for which all-zero is valid. No JavaScript platform is provided, so
+        // document scripts never run.
+        let mut info: FPDF_FORMFILLINFO = unsafe { std::mem::zeroed() };
+        info.version = 1;
+        info.FFI_Invalidate = Some(ffi_invalidate);
+        info.FFI_OnChange = Some(ffi_on_change);
+        let mut env = Box::new(FormEnv {
+            info,
+            invalidated: RefCell::new(Vec::new()),
+            changed: Cell::new(false),
+        });
+        let form = unsafe { lib.FPDFDOC_InitFormFillEnvironment(handle, &mut env.info) };
+        if !form.is_null() {
+            unsafe {
+                // Light blue backgrounds make fields easy to spot (like browsers do).
+                lib.FPDF_SetFormFieldHighlightColor(form, 0, 0x00FF_E4DD);
+                lib.FPDF_SetFormFieldHighlightAlpha(form, 90);
+            }
+        }
         Ok(Doc {
             lib,
             handle,
             form,
-            _form_info: form_info,
+            pages: RefCell::new(Vec::new()),
+            env,
             _data: data,
         })
     }
@@ -223,6 +274,15 @@ impl Doc {
     }
 
     pub fn page(&self, index: usize) -> Option<Page<'_>> {
+        let mut pages = self.pages.borrow_mut();
+        if let Some(pos) = pages.iter().position(|(i, _)| *i == index) {
+            let entry = pages.remove(pos);
+            pages.push(entry);
+            return Some(Page {
+                doc: self,
+                handle: entry.1,
+            });
+        }
         let handle = unsafe { self.lib.FPDF_LoadPage(self.handle, index as c_int) };
         if handle.is_null() {
             return None;
@@ -230,7 +290,60 @@ impl Doc {
         if !self.form.is_null() {
             unsafe { self.lib.FORM_OnAfterLoadPage(handle, self.form) };
         }
+        pages.push((index, handle));
+        if pages.len() > PAGE_CACHE {
+            // Evict the least recently used page, but never the one holding form focus.
+            let focused = self.focused_field().map(|(p, _)| p);
+            if let Some(pos) = pages.iter().position(|(i, _)| Some(*i) != focused) {
+                let (_, old) = pages.remove(pos);
+                unsafe { self.close_page(old) };
+            }
+        }
         Some(Page { doc: self, handle })
+    }
+
+    unsafe fn close_page(&self, page: FPDF_PAGE) {
+        unsafe {
+            if !self.form.is_null() {
+                self.lib.FORM_OnBeforeClosePage(page, self.form);
+            }
+            self.lib.FPDF_ClosePage(page);
+        }
+    }
+
+    /// Returns and clears events reported by PDFium's form callbacks.
+    pub fn take_form_events(&self) -> FormEvents {
+        let pages = self.pages.borrow();
+        let invalidated = std::mem::take(&mut *self.env.invalidated.borrow_mut());
+        FormEvents {
+            invalidated_pages: invalidated
+                .iter()
+                .filter_map(|h| pages.iter().find(|(_, p)| p == h).map(|(i, _)| *i))
+                .collect(),
+            changed: self.env.changed.replace(false),
+        }
+    }
+
+    /// (page index, field type) of the focused form field.
+    pub fn focused_field(&self) -> Option<(usize, i32)> {
+        if self.form.is_null() {
+            return None;
+        }
+        let mut page: c_int = -1;
+        let mut annot: FPDF_ANNOTATION = ptr::null_mut();
+        let ok = unsafe { self.lib.FORM_GetFocusedAnnot(self.form, &mut page, &mut annot) };
+        if !self.lib.is_true(ok) || annot.is_null() {
+            return None;
+        }
+        let kind = unsafe { self.lib.FPDFAnnot_GetFormFieldType(self.form, annot) };
+        unsafe { self.lib.FPDFPage_CloseAnnot(annot) };
+        (page >= 0).then_some((page as usize, kind))
+    }
+
+    pub fn kill_form_focus(&self) {
+        if !self.form.is_null() {
+            unsafe { self.lib.FORM_ForceToKillFocus(self.form) };
+        }
     }
 
     pub fn title(&self) -> Option<String> {
@@ -325,8 +438,20 @@ impl<'d> Page<'d> {
     }
 
     /// Renders into an RGBA buffer `width` x `height` pixels (already rotated by
-    /// `rotation`), including annotations and form fields.
+    /// `rotation`), including annotations and interactive form fields.
     pub fn render(&self, width: usize, height: usize, rotation: Rotation) -> Option<Vec<u8>> {
+        self.render_bitmap(width, height, rotation, true, false)
+    }
+
+    /// Renders for printing: BGRA byte order (as GDI expects) or RGBA, with print
+    /// appearances and without form field highlights.
+    #[allow(dead_code)]
+    pub fn render_for_print(&self, width: usize, height: usize, rgba: bool) -> Option<Vec<u8>> {
+        self.render_bitmap(width, height, Rotation::R0, rgba, true)
+    }
+
+    fn render_bitmap(&self, width: usize, height: usize, rotation: Rotation, rgba: bool, printing: bool) -> Option<Vec<u8>> {
+        const FPDF_PRINTING: c_int = 0x800;
         let lib = self.lib();
         unsafe {
             let bitmap = lib.FPDFBitmap_CreateEx(width as c_int, height as c_int, FPDF_BITMAP_BGRA, ptr::null_mut(), 0);
@@ -335,9 +460,15 @@ impl<'d> Page<'d> {
             }
             lib.FPDFBitmap_FillRect(bitmap, 0, 0, width as c_int, height as c_int, 0xFFFF_FFFF);
             let rot = rotation.quarter_turns();
-            let flags = FPDF_ANNOT | FPDF_REVERSE_BYTE_ORDER;
+            let mut flags = FPDF_ANNOT;
+            if rgba {
+                flags |= FPDF_REVERSE_BYTE_ORDER;
+            }
+            if printing {
+                flags |= FPDF_PRINTING;
+            }
             lib.FPDF_RenderPageBitmap(bitmap, self.handle, 0, 0, width as c_int, height as c_int, rot, flags);
-            if !self.doc.form.is_null() {
+            if !printing && !self.doc.form.is_null() {
                 lib.FPDF_FFLDraw(self.doc.form, bitmap, self.handle, 0, 0, width as c_int, height as c_int, rot, flags);
             }
             let stride = lib.FPDFBitmap_GetStride(bitmap) as usize;
@@ -699,6 +830,120 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "M", &pdf_date_now());
         }
         Ok(undo)
+    }
+
+    /// Forwards a mouse event to the form-fill module. Returns true if a field handled it.
+    pub fn form_mouse(&self, event: FormMouse, x: f32, y: f32, modifiers: i32) -> bool {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if form.is_null() {
+            return false;
+        }
+        let (x, y) = (x as f64, y as f64);
+        let ok = unsafe {
+            match event {
+                FormMouse::Move => lib.FORM_OnMouseMove(form, self.handle, modifiers, x, y),
+                FormMouse::Down => lib.FORM_OnLButtonDown(form, self.handle, modifiers, x, y),
+                FormMouse::Up => lib.FORM_OnLButtonUp(form, self.handle, modifiers, x, y),
+                FormMouse::DoubleClick => lib.FORM_OnLButtonDoubleClick(form, self.handle, modifiers, x, y),
+            }
+        };
+        lib.is_true(ok)
+    }
+
+    pub fn form_key(&self, key: FormKey, modifiers: i32) {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if form.is_null() {
+            return;
+        }
+        unsafe {
+            match key {
+                FormKey::Down(code) => {
+                    lib.FORM_OnKeyDown(form, self.handle, code as c_int, modifiers);
+                }
+                FormKey::Char(c) => {
+                    let mut buf = [0u16; 2];
+                    if let Some(ch) = char::from_u32(c) {
+                        for unit in ch.encode_utf16(&mut buf) {
+                            lib.FORM_OnChar(form, self.handle, *unit as c_int, modifiers);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn form_selected_text(&self) -> String {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if form.is_null() {
+            return String::new();
+        }
+        read_utf16(|buf, len| unsafe { lib.FORM_GetSelectedText(form, self.handle, buf, len) })
+    }
+
+    pub fn form_replace_selection(&self, text: &str) {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if !form.is_null() {
+            let w = wide(text);
+            unsafe { lib.FORM_ReplaceSelection(form, self.handle, w.as_ptr()) };
+        }
+    }
+
+    pub fn form_select_all(&self) {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if !form.is_null() {
+            unsafe { lib.FORM_SelectAllText(form, self.handle) };
+        }
+    }
+
+    pub fn form_undo(&self, redo: bool) {
+        let (lib, form) = (self.lib(), self.doc.form);
+        if !form.is_null() {
+            unsafe {
+                if redo {
+                    lib.FORM_Redo(form, self.handle);
+                } else {
+                    lib.FORM_Undo(form, self.handle);
+                }
+            }
+        }
+    }
+
+    /// Form field widgets on this page.
+    pub fn widgets(&self) -> Vec<WidgetInfo> {
+        let (lib, form) = (self.lib(), self.doc.form);
+        let mut out = Vec::new();
+        if form.is_null() {
+            return out;
+        }
+        for index in 0..self.annot_count() {
+            let Some(a) = self.annot(index) else { continue };
+            if unsafe { lib.FPDFAnnot_GetSubtype(a.handle) } != SUBTYPE_WIDGET {
+                continue;
+            }
+            let mut r = FS_RECTF {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            };
+            unsafe { lib.FPDFAnnot_GetRect(a.handle, &mut r) };
+            let field_type = unsafe { lib.FPDFAnnot_GetFormFieldType(form, a.handle) };
+            let name = read_utf16(|buf, len| unsafe {
+                lib.FPDFAnnot_GetFormFieldName(form, a.handle, buf as *mut FPDF_WCHAR, len)
+            });
+            let value = read_utf16(|buf, len| unsafe {
+                lib.FPDFAnnot_GetFormFieldValue(form, a.handle, buf as *mut FPDF_WCHAR, len)
+            });
+            let checked = lib.is_true(unsafe { lib.FPDFAnnot_IsChecked(form, a.handle) });
+            out.push(WidgetInfo {
+                rect: to_box(&r),
+                field_type,
+                name,
+                value,
+                checked,
+            });
+        }
+        out
     }
 
     /// Permanently removes annotations (and their popups) by index.

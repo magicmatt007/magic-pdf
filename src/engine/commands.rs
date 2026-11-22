@@ -260,6 +260,53 @@ pub struct AnnotChange {
     pub contents: Option<String>,
 }
 
+/// A form field widget (interactive AcroForm field).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WidgetInfo {
+    pub rect: PdfBox,
+    /// PDFium field type: 1 push button, 2 checkbox, 3 radio, 4 combo box, 5 list box,
+    /// 6 text field, 7 signature.
+    pub field_type: i32,
+    pub name: String,
+    pub value: String,
+    pub checked: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormMouse {
+    Move,
+    Down,
+    Up,
+    DoubleClick,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormKey {
+    /// Windows virtual-key code (PDFium uses these on all platforms).
+    Down(u32),
+    /// A character (Unicode scalar value); sent after `Down` for text input.
+    Char(u32),
+}
+
+/// Modifier flags for form events (PDFium's FWL_EVENTFLAG values).
+pub mod form_mods {
+    pub const SHIFT: i32 = 1 << 0;
+    pub const CONTROL: i32 = 1 << 1;
+    pub const ALT: i32 = 1 << 2;
+}
+
+/// Print settings for the CUPS (`lp`) path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrintJob {
+    pub printer: Option<String>,
+    pub copies: u32,
+    /// CUPS page ranges like "1-3,5"; None prints all pages.
+    pub pages: Option<String>,
+    pub two_sided: bool,
+    pub fit_to_page: bool,
+    pub title: String,
+}
+
 pub enum Request {
     Open {
         doc: DocId,
@@ -321,6 +368,50 @@ pub enum Request {
     Save {
         doc: DocId,
         path: PathBuf,
+    },
+    FormMouse {
+        doc: DocId,
+        page: usize,
+        event: FormMouse,
+        x: f32,
+        y: f32,
+        modifiers: i32,
+    },
+    FormKey {
+        doc: DocId,
+        key: FormKey,
+        modifiers: i32,
+    },
+    /// Copy (or cut) the selection in the focused field; answered with `Clipboard`.
+    FormCopy {
+        doc: DocId,
+        cut: bool,
+    },
+    FormPaste {
+        doc: DocId,
+        text: String,
+    },
+    FormSelectAll {
+        doc: DocId,
+    },
+    FormUndo {
+        doc: DocId,
+        redo: bool,
+    },
+    FormKillFocus {
+        doc: DocId,
+    },
+    /// Produce the document as PDF bytes (with edits) for printing via CUPS.
+    ExportForPrint {
+        doc: DocId,
+        job: PrintJob,
+    },
+    /// Show the native print dialog and print (Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    PrintNative {
+        doc: DocId,
+        title: String,
+        current_page: usize,
     },
 }
 
@@ -393,5 +484,28 @@ pub enum Response {
     Error {
         doc: DocId,
         message: String,
+    },
+    /// Form widgets of a page (sent with `PageAnnots` and after field edits).
+    PageWidgets {
+        doc: DocId,
+        page: usize,
+        widgets: Vec<WidgetInfo>,
+    },
+    /// Which page holds the focused form field, if any.
+    FormFocus {
+        doc: DocId,
+        page: Option<usize>,
+    },
+    Clipboard {
+        text: String,
+    },
+    PrintReady {
+        job: PrintJob,
+        bytes: Vec<u8>,
+    },
+    /// Native printing finished (`None`: cancelled).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Printed {
+        pages: Option<usize>,
     },
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::engine::{AnnotInfo, DocId, DocInfo, PageGeom, PageText, PdfBox, RenderKey, Request, Rotation};
+use crate::engine::{AnnotInfo, DocId, DocInfo, PageGeom, PageText, PdfBox, RenderKey, Request, Rotation, WidgetInfo};
 use crate::settings::FileState;
 use crate::view::layout::{self, Layout, LayoutMode, LayoutParams};
 use crate::view::viewport::{FitMode, Viewport};
@@ -112,6 +112,12 @@ pub struct DocTab {
     pub can_undo: bool,
     pub can_redo: bool,
     pub dirty: bool,
+    /// Form field widgets per page.
+    pub widgets: HashMap<usize, Vec<WidgetInfo>>,
+    /// Page whose form field has keyboard focus.
+    pub form_focus: Option<usize>,
+    /// A mouse press was forwarded to a form field (so the release goes there too).
+    pub form_pressed: bool,
     /// Requests produced by the UI this frame; sent by the app.
     pub outbox: Vec<Request>,
 
@@ -160,6 +166,9 @@ impl DocTab {
             can_undo: false,
             can_redo: false,
             dirty: false,
+            widgets: HashMap::new(),
+            form_focus: None,
+            form_pressed: false,
             outbox: Vec::new(),
             wanted: Vec::new(),
             requested: HashSet::new(),

@@ -2,11 +2,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Ui};
 
 use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
-use crate::engine::{DocId, Engine, Request, Response, SearchQuery};
+use crate::engine::{DocId, Engine, FormKey, PrintJob, Request, Response, SearchQuery, form_mods};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
 use crate::view::document_view::{self, PALETTE, Tool, ViewContext, color_swatch};
@@ -27,6 +28,26 @@ struct CloseIntent {
     awaiting_save: HashSet<DocId>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageChoice {
+    All,
+    Current,
+    Range,
+}
+
+/// State of the CUPS print dialog.
+struct PrintDialog {
+    doc: DocId,
+    printers: Vec<String>,
+    printer: Option<String>,
+    copies: u32,
+    pages: PageChoice,
+    range: String,
+    two_sided: bool,
+    fit_to_page: bool,
+    error: Option<String>,
+}
+
 pub struct App {
     engine: Result<Engine, String>,
     ctx: egui::Context,
@@ -44,7 +65,13 @@ pub struct App {
     /// Quit has been confirmed; let the next close request through.
     allow_quit: bool,
     error: Option<String>,
+    print_dialog: Option<PrintDialog>,
+    /// Short status message and when it was shown.
+    notice: Option<(String, f64)>,
+    print_results: (Sender<PrintResult>, Receiver<PrintResult>),
 }
+
+type PrintResult = Result<String, String>;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
@@ -78,6 +105,9 @@ impl App {
             close_intent: None,
             allow_quit: false,
             error: None,
+            print_dialog: None,
+            notice: None,
+            print_results: std::sync::mpsc::channel(),
         };
         for f in files {
             app.open(&f);
@@ -366,6 +396,35 @@ impl App {
                     self.finish_close(&intent.docs, intent.quit);
                 }
             }
+            Response::PageWidgets { doc, page, widgets } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    if widgets.is_empty() {
+                        tab.widgets.remove(&page);
+                    } else {
+                        tab.widgets.insert(page, widgets);
+                    }
+                }
+            }
+            Response::FormFocus { doc, page, .. } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.form_focus = page;
+                }
+            }
+            Response::Clipboard { text } => self.ctx.copy_text(text),
+            Response::PrintReady { job, bytes, .. } => {
+                let tx = self.print_results.0.clone();
+                let ctx = self.ctx.clone();
+                self.notice("Sending to the printer…");
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::print::submit(&job, &bytes));
+                    ctx.request_repaint();
+                });
+            }
+            Response::Printed { pages } => {
+                if let Some(n) = pages {
+                    self.notice(&format!("Sent {n} page(s) to the printer"));
+                }
+            }
             Response::Error { doc, message } => {
                 log::warn!("doc {doc}: {message}");
                 if self
@@ -378,6 +437,240 @@ impl App {
                 }
                 self.error = Some(message);
             }
+        }
+    }
+
+    fn notice(&mut self, text: &str) {
+        let now = self.ctx.input(|i| i.time);
+        self.notice = Some((text.to_string(), now));
+    }
+
+    /// Opens the print dialog (CUPS) or the native one (Windows).
+    fn print(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.info().is_none() {
+            return;
+        }
+        if cfg!(windows) {
+            let req = Request::PrintNative {
+                doc: tab.id,
+                title: tab.name.clone(),
+                current_page: tab.current_page,
+            };
+            self.send(req);
+            return;
+        }
+        let doc = tab.id;
+        match crate::print::list_printers() {
+            Ok(p) if p.names.is_empty() => self.error = Some("No printers are set up.".into()),
+            Ok(p) => {
+                let printer = p.default.clone().or_else(|| p.names.first().cloned());
+                self.print_dialog = Some(PrintDialog {
+                    doc,
+                    printers: p.names,
+                    printer,
+                    copies: 1,
+                    pages: PageChoice::All,
+                    range: String::new(),
+                    two_sided: false,
+                    fit_to_page: true,
+                    error: None,
+                });
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn print_dialog_ui(&mut self, ctx: &egui::Context) {
+        while let Ok(result) = self.print_results.1.try_recv() {
+            match result {
+                Ok(msg) if msg.is_empty() => self.notice("Sent to the printer"),
+                Ok(msg) => self.notice(&format!("Sent to the printer ({msg})")),
+                Err(e) => self.error = Some(format!("Printing failed: {e}")),
+            }
+        }
+        let Some(dlg) = &mut self.print_dialog else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == dlg.doc) else {
+            self.print_dialog = None;
+            return;
+        };
+        let (count, current, title) = (tab.page_count(), tab.current_page, tab.name.clone());
+        let mut submit = None;
+        let mut close = false;
+        egui::Window::new("Print")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Grid::new("print_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Printer");
+                    egui::ComboBox::from_id_salt("printer")
+                        .selected_text(dlg.printer.clone().unwrap_or_default())
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for p in &dlg.printers {
+                                ui.selectable_value(&mut dlg.printer, Some(p.clone()), p);
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Copies");
+                    ui.add(egui::DragValue::new(&mut dlg.copies).range(1..=99));
+                    ui.end_row();
+                    ui.label("Pages");
+                    ui.vertical(|ui| {
+                        ui.radio_value(&mut dlg.pages, PageChoice::All, format!("All ({count})"));
+                        ui.radio_value(&mut dlg.pages, PageChoice::Current, format!("Current page ({})", current + 1));
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut dlg.pages, PageChoice::Range, "Pages:");
+                            let r = ui.add(
+                                egui::TextEdit::singleline(&mut dlg.range)
+                                    .hint_text("e.g. 1-3, 5")
+                                    .desired_width(110.0),
+                            );
+                            if r.changed() {
+                                dlg.pages = PageChoice::Range;
+                            }
+                        });
+                    });
+                    ui.end_row();
+                    ui.label("Options");
+                    ui.vertical(|ui| {
+                        ui.checkbox(&mut dlg.two_sided, "Print on both sides");
+                        ui.checkbox(&mut dlg.fit_to_page, "Fit to paper");
+                    });
+                    ui.end_row();
+                });
+                if let Some(e) = &dlg.error {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Print").clicked() {
+                        let pages = match dlg.pages {
+                            PageChoice::All => Ok(None),
+                            PageChoice::Current => Ok(Some((current + 1).to_string())),
+                            PageChoice::Range => crate::print::normalize_ranges(&dlg.range, count).map(Some),
+                        };
+                        match pages {
+                            Ok(pages) => {
+                                submit = Some(PrintJob {
+                                    printer: dlg.printer.clone(),
+                                    copies: dlg.copies,
+                                    pages,
+                                    two_sided: dlg.two_sided,
+                                    fit_to_page: dlg.fit_to_page,
+                                    title: title.clone(),
+                                })
+                            }
+                            Err(e) => dlg.error = Some(e),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(job) = submit {
+            let doc = dlg.doc;
+            self.print_dialog = None;
+            self.send(Request::ExportForPrint { doc, job });
+        } else if close {
+            self.print_dialog = None;
+        }
+    }
+
+    /// Sends keyboard input to the focused form field. Returns early (leaving events in
+    /// place) when no field has focus or an egui widget is being typed into.
+    fn route_form_keys(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.form_focus.is_none() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let doc = tab.id;
+        let mut reqs = Vec::new();
+        let mut kill_focus = false;
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                match e {
+                    egui::Event::Text(t) => {
+                        for c in t.chars() {
+                            reqs.push(Request::FormKey {
+                                doc,
+                                key: FormKey::Char(c as u32),
+                                modifiers: 0,
+                            });
+                        }
+                        false
+                    }
+                    egui::Event::Paste(text) => {
+                        reqs.push(Request::FormPaste { doc, text: text.clone() });
+                        false
+                    }
+                    egui::Event::Copy => {
+                        reqs.push(Request::FormCopy { doc, cut: false });
+                        false
+                    }
+                    egui::Event::Cut => {
+                        reqs.push(Request::FormCopy { doc, cut: true });
+                        false
+                    }
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => {
+                        let ctrl = modifiers.command || modifiers.ctrl;
+                        if ctrl {
+                            match key {
+                                Key::A => reqs.push(Request::FormSelectAll { doc }),
+                                Key::Z if modifiers.shift => reqs.push(Request::FormUndo { doc, redo: true }),
+                                Key::Z => reqs.push(Request::FormUndo { doc, redo: false }),
+                                Key::Y => reqs.push(Request::FormUndo { doc, redo: true }),
+                                // Other shortcuts (save, print, …) keep working.
+                                _ => return true,
+                            }
+                            return false;
+                        }
+                        if *key == Key::Escape {
+                            kill_focus = true;
+                            return false;
+                        }
+                        let Some(vk) = virtual_key(*key) else { return true };
+                        let mods = (if modifiers.shift { form_mods::SHIFT } else { 0 })
+                            | (if modifiers.alt { form_mods::ALT } else { 0 });
+                        reqs.push(Request::FormKey {
+                            doc,
+                            key: FormKey::Down(vk),
+                            modifiers: mods,
+                        });
+                        // Keys that produce characters PDFium expects as WM_CHAR-style input.
+                        let ch = match key {
+                            Key::Backspace => Some(8),
+                            Key::Enter => Some(13),
+                            _ => None,
+                        };
+                        if let Some(c) = ch {
+                            reqs.push(Request::FormKey {
+                                doc,
+                                key: FormKey::Char(c),
+                                modifiers: mods,
+                            });
+                        }
+                        false
+                    }
+                    _ => true,
+                }
+            });
+        });
+        if kill_focus {
+            reqs.push(Request::FormKillFocus { doc });
+            if let Some(t) = self.tabs.get_mut(self.active) {
+                t.form_focus = None;
+            }
+        }
+        for r in reqs {
+            self.send(r);
         }
     }
 
@@ -490,6 +783,9 @@ impl App {
 
         if shortcut(cmd, Key::O) {
             self.open_dialog();
+        }
+        if shortcut(cmd, Key::P) {
+            self.print();
         }
         if shortcut(cmd | Modifiers::SHIFT, Key::S) {
             self.save_active(true);
@@ -668,6 +964,9 @@ impl App {
                     .clicked()
                 {
                     self.save_active(true);
+                }
+                if ui.add_enabled(has_tab, egui::Button::new("Print…\tCtrl+P")).clicked() {
+                    self.print();
                 }
                 ui.separator();
                 if ui
@@ -1165,6 +1464,8 @@ impl App {
                 egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
                     for (k, v) in [
                         ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open, save, save as"),
+                        ("Ctrl+P", "Print"),
+                        ("Tab / Esc in a form field", "Next field / stop editing"),
                         ("Ctrl+W / Ctrl+Tab", "Close / switch tab"),
                         ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
                         ("Wheel", "Scroll (horizontally in horizontal layout)"),
@@ -1259,6 +1560,7 @@ impl eframe::App for App {
         self.process_responses();
         self.handle_close_request(&ctx);
         self.handle_dropped_files(&ctx);
+        self.route_form_keys(&ctx);
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
@@ -1282,11 +1584,25 @@ impl eframe::App for App {
                 LoadState::NeedsPassword { .. } => "Password required".into(),
                 LoadState::Failed(_) => "Failed to open".into(),
             };
+            let now = ctx.input(|i| i.time);
+            let notice = self
+                .notice
+                .as_ref()
+                .filter(|(_, t)| now - t < 6.0)
+                .map(|(n, _)| n.clone());
+            if notice.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             egui::Panel::bottom("status").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.weak(status);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(tab.path.display().to_string());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match notice {
+                        Some(n) => {
+                            ui.strong(n);
+                        }
+                        None => {
+                            ui.weak(tab.path.display().to_string());
+                        }
                     });
                 });
             });
@@ -1322,6 +1638,7 @@ impl eframe::App for App {
 
         self.password_dialog(&ctx);
         self.unsaved_dialog(&ctx);
+        self.print_dialog_ui(&ctx);
         self.error_dialog(&ctx);
         self.info_windows(&ctx);
         self.flush_requests();
@@ -1342,4 +1659,25 @@ impl eframe::App for App {
         }
         self.settings.save();
     }
+}
+
+/// Windows virtual-key codes, which PDFium's form module uses on every platform.
+fn virtual_key(key: Key) -> Option<u32> {
+    Some(match key {
+        Key::Backspace => 0x08,
+        Key::Tab => 0x09,
+        Key::Enter => 0x0D,
+        Key::Space => 0x20,
+        Key::PageUp => 0x21,
+        Key::PageDown => 0x22,
+        Key::End => 0x23,
+        Key::Home => 0x24,
+        Key::ArrowLeft => 0x25,
+        Key::ArrowUp => 0x26,
+        Key::ArrowRight => 0x27,
+        Key::ArrowDown => 0x28,
+        Key::Insert => 0x2D,
+        Key::Delete => 0x2E,
+        _ => return None,
+    })
 }

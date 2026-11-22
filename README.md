@@ -19,7 +19,12 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   rectangles and ellipses; colours, line widths, comments, a Comments sidebar,
   undo/redo, Save / Save As (deleted annotations are removed from the file)
 
-Form filling, printing and page editing are planned for later phases.
+- Form filling: text fields, checkboxes, radio buttons, combo and list boxes
+  (typing, Tab between fields, copy/paste, field undo); filled values are saved
+- Printing: a print dialog backed by CUPS on Linux/macOS (printer, copies, page
+  range, two-sided, fit to paper) and the native print dialog on Windows
+
+Page editing is planned for a later phase. Document JavaScript is never executed.
 
 ## Building
 
@@ -46,6 +51,7 @@ This adds magic-pdf to the application menu and to "Open with" for PDF files. Us
 
 ```bash
 python3 tests/fixtures/make_sample.py   # regenerates tests/fixtures/sample.pdf
+python3 tests/fixtures/make_form.py     # regenerates tests/fixtures/form.pdf
 cargo test                               # layout/viewport unit tests + PDFium engine test
 ```
 
@@ -62,6 +68,7 @@ cargo test                               # layout/viewport unit tests + PDFium e
 | U / N / D / R / E | Highlight, note, draw, rectangle, ellipse |
 | Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
+| Ctrl+P | Print |
 | Ctrl+F, Enter, F3 | Search |
 | F9 | Sidebar |
 
