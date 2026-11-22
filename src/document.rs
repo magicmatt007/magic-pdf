@@ -233,6 +233,8 @@ pub struct DocTab {
     pub requested: HashSet<RenderKey>,
     pub last_wanted: HashSet<RenderKey>,
     pub thumbs_follow_page: Option<usize>,
+    /// Pages (partly) on screen in the document view, for the thumbnails.
+    pub visible_pages: Vec<usize>,
 }
 
 impl DocTab {
@@ -290,6 +292,7 @@ impl DocTab {
             requested: HashSet::new(),
             last_wanted: HashSet::new(),
             thumbs_follow_page: None,
+            visible_pages: Vec::new(),
         };
         if let Some(s) = saved {
             tab.mode = s.mode;

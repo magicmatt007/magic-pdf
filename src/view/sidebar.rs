@@ -272,6 +272,9 @@ fn thumbnails(
             }
             let stroke = if current {
                 Stroke::new(3.0, strong)
+            } else if tab.visible_pages.contains(&page) {
+                // Also on screen (e.g. several pages side by side).
+                Stroke::new(2.0, accent)
             } else if response.hovered() {
                 Stroke::new(1.0, ui.visuals().widgets.hovered.fg_stroke.color)
             } else {

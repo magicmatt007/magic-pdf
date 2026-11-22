@@ -93,6 +93,13 @@ pub struct Settings {
     pub skipped_version: Option<String>,
     /// Colours picked most recently (shown in the colour picker).
     pub recent_colors: Vec<Rgb>,
+    /// Reopen the files of the last window closed when magic-pdf starts without files.
+    pub restore_session: bool,
+    /// Files open when the last window was closed, and the active one.
+    pub session: Vec<PathBuf>,
+    pub session_active: usize,
+    /// Recent files kept at the top of the list (never pushed out).
+    pub pinned: Vec<PathBuf>,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -112,6 +119,10 @@ impl Default for Settings {
             last_update_check: 0,
             skipped_version: None,
             recent_colors: Vec::new(),
+            restore_session: true,
+            session: Vec::new(),
+            session_active: 0,
+            pinned: Vec::new(),
             files: HashMap::new(),
         }
     }
@@ -164,7 +175,27 @@ impl Settings {
         }
     }
 
+    /// Pins a recent file to the top of the list, or unpins it.
+    pub fn toggle_pin(&mut self, path: &Path) {
+        if let Some(i) = self.pinned.iter().position(|p| p == path) {
+            self.pinned.remove(i);
+            self.add_recent(path);
+        } else {
+            self.pinned.push(path.to_path_buf());
+            self.recent.retain(|p| p != path);
+        }
+    }
+
+    /// Removes a file from the recent and pinned lists.
+    pub fn forget_recent(&mut self, path: &Path) {
+        self.recent.retain(|p| p != path);
+        self.pinned.retain(|p| p != path);
+    }
+
     pub fn add_recent(&mut self, path: &Path) {
+        if self.pinned.iter().any(|p| p == path) {
+            return;
+        }
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(MAX_RECENT);
@@ -198,4 +229,42 @@ fn key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_files_stay_at_the_top_and_out_of_the_recent_list() {
+        let mut s = Settings::default();
+        let (a, b, c) = (Path::new("/a.pdf"), Path::new("/b.pdf"), Path::new("/c.pdf"));
+        s.add_recent(a);
+        s.add_recent(b);
+        s.toggle_pin(a);
+        assert_eq!(s.pinned, vec![a.to_path_buf()]);
+        assert_eq!(s.recent, vec![b.to_path_buf()]);
+        // Opening a pinned file does not add it to the recent list.
+        s.add_recent(a);
+        assert_eq!(s.recent, vec![b.to_path_buf()]);
+        for i in 0..MAX_RECENT + 3 {
+            s.add_recent(Path::new(&format!("/{i}.pdf")));
+        }
+        assert_eq!(s.pinned, vec![a.to_path_buf()], "never pushed out");
+        // Unpinning puts it back at the top of the recent files.
+        s.toggle_pin(a);
+        assert!(s.pinned.is_empty());
+        assert_eq!(s.recent[0], a);
+        s.add_recent(c);
+        s.forget_recent(c);
+        assert!(!s.recent.iter().any(|p| p == c));
+    }
+
+    #[test]
+    fn old_settings_files_get_the_new_defaults() {
+        let s: Settings = toml::from_str("show_sidebar = false\n").unwrap();
+        assert!(!s.show_sidebar);
+        assert!(s.restore_session);
+        assert!(s.session.is_empty() && s.pinned.is_empty());
+    }
 }

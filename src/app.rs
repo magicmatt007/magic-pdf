@@ -64,6 +64,7 @@ pub struct App {
     focus_search: bool,
     show_shortcuts: bool,
     show_about: bool,
+    show_settings: bool,
     close_intent: Option<CloseIntent>,
     /// Quit has been confirmed; let the next close request through.
     allow_quit: bool,
@@ -202,6 +203,7 @@ impl App {
             focus_search: false,
             show_shortcuts: false,
             show_about: false,
+            show_settings: false,
             close_intent: None,
             allow_quit: false,
             error: None,
@@ -228,6 +230,7 @@ impl App {
             if let Some(t) = Tool::ANNOTATION_TOOLS.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted)) {
                 app.tool = *t;
             }
+            app.show_settings = wanted == "settings";
         }
         let day = 24 * 60 * 60;
         if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
@@ -242,6 +245,21 @@ impl App {
         match crate::ipc::Server::start(move || wake.request_repaint()) {
             Ok(server) => app.ipc = Some(server),
             Err(e) => log::warn!("other windows cannot reach this one: {e}"),
+        }
+        let restore = app.settings.restore_session
+            && args.files.is_empty()
+            && args.take.is_none()
+            && !args.new_window
+            && app.screenshot_to.is_none()
+            && app.selftest_to.is_none()
+            // Another window already shows them.
+            && crate::ipc::peers().is_empty();
+        if restore {
+            let (files, active) = (app.settings.session.clone(), app.settings.session_active);
+            for f in files.iter().filter(|f| f.exists()) {
+                app.open(f);
+            }
+            app.active = active.min(app.tabs.len().saturating_sub(1));
         }
         for f in args.files {
             app.open(&f);
@@ -593,6 +611,12 @@ impl App {
     }
 
     fn finish_close(&mut self, docs: &[DocId], quit: bool) {
+        if quit && self.screenshot_to.is_none() && self.selftest_to.is_none() {
+            // Reopened at the next start (the last window closed wins).
+            self.settings.session = self.tabs.iter().map(|t| t.path.clone()).collect();
+            self.settings.session_active = self.active;
+            self.settings.save();
+        }
         for doc in docs {
             if let Some(i) = self.tabs.iter().position(|t| t.id == *doc) {
                 self.close_tab_now(i);
@@ -1301,6 +1325,9 @@ impl App {
         if shortcut(cmd, Key::F) {
             self.focus_search = true;
         }
+        if shortcut(cmd, Key::Comma) {
+            self.show_settings = true;
+        }
         if shortcut(Modifiers::NONE, Key::F9) {
             self.settings.show_sidebar = !self.settings.show_sidebar;
         }
@@ -1469,13 +1496,12 @@ impl App {
                 if ui.button(kb("Open…\tCtrl+O")).clicked() {
                     self.open_dialog();
                 }
-                let recent = self.settings.recent.clone();
-                ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                let any_recent = !self.settings.recent.is_empty() || !self.settings.pinned.is_empty();
+                ui.add_enabled_ui(any_recent, |ui| {
                     ui.menu_button("Open recent", |ui| {
-                        for path in recent {
-                            if ui.button(path.display().to_string()).clicked() {
-                                self.open(&path);
-                            }
+                        if let Some(a) = recent_list(ui, &self.settings, true) {
+                            self.recent_action(a);
+                            ui.close();
                         }
                     });
                 });
@@ -1524,15 +1550,9 @@ impl App {
                     self.delete_selected_annot();
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Author name");
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut self.settings.author).desired_width(140.0))
-                        .lost_focus()
-                    {
-                        self.settings.save();
-                    }
-                });
+                if ui.button(kb("Settings…\tCtrl+,")).clicked() {
+                    self.show_settings = true;
+                }
             });
             ui.menu_button("Pages", |ui| {
                 let (n, total) = self
@@ -1566,18 +1586,6 @@ impl App {
                         t.set_mode(mode);
                     }
                 }
-                ui.separator();
-                ui.menu_button("Default layout for new files", |ui| {
-                    for mode in LayoutMode::ALL {
-                        if ui
-                            .selectable_label(self.settings.default_mode == mode, mode.label())
-                            .clicked()
-                        {
-                            self.settings.default_mode = mode;
-                            self.settings.save();
-                        }
-                    }
-                });
                 ui.separator();
                 for fit in [FitMode::Width, FitMode::Height, FitMode::Page] {
                     if ui.add_enabled(has_tab, egui::Button::new(fit.label())).clicked()
@@ -1626,12 +1634,6 @@ impl App {
                 if ui.button("Check for updates…").clicked() {
                     self.check_for_updates(true);
                     ui.close();
-                }
-                if ui
-                    .checkbox(&mut self.settings.check_updates, "Check for updates automatically")
-                    .changed()
-                {
-                    self.settings.save();
                 }
                 ui.separator();
                 if ui.button("Keyboard shortcuts").clicked() {
@@ -2139,6 +2141,7 @@ impl App {
     }
 
     fn info_windows(&mut self, ctx: &egui::Context) {
+        self.settings_window(ctx);
         egui::Window::new("Keyboard shortcuts")
             .open(&mut self.show_shortcuts)
             .resizable(false)
@@ -2166,6 +2169,7 @@ impl App {
                         ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
                         ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
                         ("F9", "Toggle sidebar"),
+                        ("Ctrl+,", "Settings"),
                         ("Middle-drag", "Pan with any tool"),
                     ] {
                         ui.strong(kb(k));
@@ -2278,7 +2282,111 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    fn recent_action(&mut self, action: RecentAction) {
+        match action {
+            RecentAction::Open(path) => {
+                if path.exists() {
+                    self.open(&path);
+                } else {
+                    self.error = Some(format!("{} no longer exists.", path.display()));
+                    self.settings.forget_recent(&path);
+                }
+            }
+            RecentAction::TogglePin(path) => self.settings.toggle_pin(&path),
+            RecentAction::Forget(path) => self.settings.forget_recent(&path),
+        }
+        self.settings.save();
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        let s = &mut self.settings;
+        let (mut dark, mut night) = (s.dark_ui, s.night_mode);
+        let mut changed = false;
+        let mut check_now = false;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("settings").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label("Author name");
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut s.author).desired_width(200.0))
+                        .on_hover_text("Stored with new annotations and comments")
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Layout for new files");
+                    egui::ComboBox::from_id_salt("default_layout")
+                        .selected_text(s.default_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in LayoutMode::ALL {
+                                changed |= ui.selectable_value(&mut s.default_mode, mode, mode.label()).changed();
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Appearance");
+                    ui.vertical(|ui| {
+                        ui.checkbox(&mut dark, "Dark interface");
+                        ui.checkbox(&mut night, "Night mode (invert pages)");
+                        changed |= ui.checkbox(&mut s.show_sidebar, kb("Show the sidebar (F9)")).changed();
+                    });
+                    ui.end_row();
+
+                    ui.label("Thumbnail size");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut s.thumb_width, 60.0..=600.0).logarithmic(true).suffix(" pt"))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Starting");
+                    changed |= ui
+                        .checkbox(&mut s.restore_session, "Reopen the files from last time")
+                        .on_hover_text("When magic-pdf starts without a file, it opens the tabs of the last window you closed")
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Updates");
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(&mut s.check_updates, "Check daily").changed();
+                        check_now = ui.button("Check now").clicked();
+                    });
+                    ui.end_row();
+
+                    ui.label("Recent files");
+                    ui.horizontal(|ui| {
+                        let n = s.recent.len() + s.pinned.len();
+                        ui.weak(format!("{n} in the list ({} pinned)", s.pinned.len()));
+                        if ui.add_enabled(!s.recent.is_empty(), egui::Button::new("Clear")).on_hover_text("Pinned files stay").clicked() {
+                            s.recent.clear();
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+            });
+        self.show_settings = open;
+        if dark != self.settings.dark_ui {
+            self.settings.dark_ui = dark;
+            ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
+            changed = true;
+        }
+        if night != self.settings.night_mode {
+            self.set_night_mode(night);
+        }
+        if changed {
+            self.settings.save();
+        }
+        if check_now {
+            self.check_for_updates(true);
+        }
+    }
+
     fn welcome(&mut self, ui: &mut Ui) {
+        // The central panel has no frame (pages draw their own background).
+        ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
             ui.heading("magic-pdf");
@@ -2291,14 +2399,16 @@ impl App {
                 self.open_dialog();
             }
             ui.weak("or drop files here");
-            if !self.settings.recent.is_empty() {
+            if !self.settings.recent.is_empty() || !self.settings.pinned.is_empty() {
                 ui.add_space(16.0);
                 ui.strong("Recent files");
-                for path in self.settings.recent.clone() {
-                    if ui.link(path.display().to_string()).clicked() {
-                        self.open(&path);
+                ui.add_space(4.0);
+                let width = 520.0_f32.min(ui.available_width());
+                ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
+                    if let Some(a) = recent_list(ui, &self.settings, false) {
+                        self.recent_action(a);
                     }
-                }
+                });
             }
         });
     }
@@ -2561,6 +2671,69 @@ fn virtual_key(key: Key) -> Option<u32> {
         Key::Delete => 0x2E,
         _ => return None,
     })
+}
+
+/// What was clicked in a recent-files list.
+enum RecentAction {
+    Open(PathBuf),
+    TogglePin(PathBuf),
+    Forget(PathBuf),
+}
+
+/// Pinned files first, then recent ones: file name with its folder; a pin button
+/// and a context menu to pin or remove an entry. `menu` is the compact form for
+/// the File menu.
+fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) -> Option<RecentAction> {
+    let mut action = None;
+    let entries = settings
+        .pinned
+        .iter()
+        .map(|p| (p, true))
+        .chain(settings.recent.iter().map(|p| (p, false)));
+    let mut was_pinned = !settings.pinned.is_empty();
+    for (path, pinned) in entries {
+        if was_pinned && !pinned {
+            ui.separator();
+        }
+        was_pinned = pinned;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            let pin = icons::text(icons::PUSH_PIN).size(14.0);
+            let pin = if pinned { pin.color(ui.visuals().selection.stroke.color) } else { pin.weak() };
+            if ui
+                .add(egui::Button::new(pin).frame(false))
+                .on_hover_text(if pinned { "Unpin" } else { "Pin to the top of the list" })
+                .clicked()
+            {
+                action = Some(RecentAction::TogglePin(path.clone()));
+            }
+            let mut text = egui::text::LayoutJob::default();
+            text.append(&name, 0.0, egui::TextFormat::simple(egui::FontId::proportional(14.0), ui.visuals().strong_text_color()));
+            text.append(
+                &format!("   {folder}"),
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(12.0), ui.visuals().weak_text_color()),
+            );
+            let button = egui::Button::new(text).frame(menu);
+            let button = if menu { button } else { button.frame(false) };
+            let response = ui.add(button).on_hover_text(path.display().to_string());
+            if response.clicked() {
+                action = Some(RecentAction::Open(path.clone()));
+            }
+            response.context_menu(|ui| {
+                if ui.button(if pinned { "Unpin" } else { "Pin" }).clicked() {
+                    action = Some(RecentAction::TogglePin(path.clone()));
+                    ui.close();
+                }
+                if ui.button("Remove from list").clicked() {
+                    action = Some(RecentAction::Forget(path.clone()));
+                    ui.close();
+                }
+            });
+        });
+    }
+    action
 }
 
 #[cfg(test)]

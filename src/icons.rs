@@ -41,6 +41,7 @@ pub const ALIGN_LEFT: &str = "\u{e484}";
 pub const ALIGN_CENTER: &str = "\u{e480}";
 pub const ALIGN_RIGHT: &str = "\u{e486}";
 pub const SIDEBAR: &str = "\u{ec24}";
+pub const PUSH_PIN: &str = "\u{e3e2}";
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

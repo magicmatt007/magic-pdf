@@ -802,10 +802,12 @@ fn apply_pending_navigation(tab: &mut DocTab, view: Rect) {
 }
 
 fn update_current_page(tab: &mut DocTab, view: Rect) {
+    let visible = tab.viewport.visible_doc_rect(view);
+    tab.visible_pages = tab.layout.pages_in(visible);
     if tab.mode == LayoutMode::SinglePage {
+        tab.visible_pages = vec![tab.current_page];
         return;
     }
-    let visible = tab.viewport.visible_doc_rect(view);
     let best = tab
         .layout
         .pages_in(visible)
