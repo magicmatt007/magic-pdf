@@ -3,6 +3,7 @@
 mod app;
 mod document;
 mod engine;
+mod icons;
 mod print;
 mod settings;
 mod view;

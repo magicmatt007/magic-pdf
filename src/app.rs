@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Ui};
 
 use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
+use crate::icons;
 use crate::engine::{DocId, Engine, FormKey, PrintJob, Request, Response, SearchQuery, form_mods};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
@@ -69,6 +70,10 @@ pub struct App {
     /// Short status message and when it was shown.
     notice: Option<(String, f64)>,
     print_results: (Sender<PrintResult>, Receiver<PrintResult>),
+    /// Debug aid: with MAGIC_PDF_SCREENSHOT=<file.ppm> the app captures its own window
+    /// once pages have rendered, saves it and quits.
+    screenshot_to: Option<PathBuf>,
+    screenshot_requested: bool,
 }
 
 type PrintResult = Result<String, String>;
@@ -81,6 +86,7 @@ impl App {
         if let Err(e) = &engine {
             log::error!("{e}");
         }
+        icons::install(&ctx);
         let settings = Settings::load();
         ctx.set_theme(if settings.dark_ui {
             egui::Theme::Dark
@@ -108,6 +114,8 @@ impl App {
             print_dialog: None,
             notice: None,
             print_results: std::sync::mpsc::channel(),
+            screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
+            screenshot_requested: false,
         };
         for f in files {
             app.open(&f);
@@ -1016,7 +1024,7 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button("📂").on_hover_text("Open a PDF (Ctrl+O)").clicked() {
+            if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text("Open a PDF (Ctrl+O)").clicked() {
                 self.open_dialog();
             }
             let (has_doc, dirty, can_undo, can_redo) = self
@@ -1025,21 +1033,28 @@ impl App {
                 .map(|t| (t.info().is_some(), t.dirty, t.can_undo, t.can_redo))
                 .unwrap_or_default();
             if ui
-                .add_enabled(has_doc && dirty, egui::Button::new("💾"))
+                .add_enabled(has_doc && dirty, egui::Button::new(icons::text(icons::FLOPPY_DISK)))
                 .on_hover_text("Save (Ctrl+S)")
                 .clicked()
             {
                 self.save_active(false);
             }
             if ui
-                .add_enabled(can_undo, egui::Button::new("↶"))
+                .add_enabled(has_doc, egui::Button::new(icons::text(icons::PRINTER)))
+                .on_hover_text("Print (Ctrl+P)")
+                .clicked()
+            {
+                self.print();
+            }
+            if ui
+                .add_enabled(can_undo, egui::Button::new(icons::text(icons::UNDO)))
                 .on_hover_text("Undo (Ctrl+Z)")
                 .clicked()
             {
                 self.undo(false);
             }
             if ui
-                .add_enabled(can_redo, egui::Button::new("↷"))
+                .add_enabled(can_redo, egui::Button::new(icons::text(icons::REDO)))
                 .on_hover_text("Redo (Ctrl+Y)")
                 .clicked()
             {
@@ -1062,7 +1077,7 @@ impl App {
             let ready = tab.info().is_some();
             ui.add_enabled_ui(ready, |ui| {
                 let n = tab.page_count();
-                if ui.button("◀").on_hover_text("Previous page (PgUp)").clicked() {
+                if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text("Previous page (PgUp)").clicked() {
                     tab.step_page(false);
                 }
                 let resp = ui.add(
@@ -1079,12 +1094,12 @@ impl App {
                     tab.page_input = (tab.current_page + 1).to_string();
                 }
                 ui.label(format!("/ {n}"));
-                if ui.button("▶").on_hover_text("Next page (PgDn)").clicked() {
+                if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text("Next page (PgDn)").clicked() {
                     tab.step_page(true);
                 }
                 ui.separator();
 
-                if ui.button("➖").on_hover_text("Zoom out (Ctrl+-)").clicked() {
+                if ui.button(icons::text(icons::ZOOM_OUT)).on_hover_text("Zoom out (Ctrl+-)").clicked() {
                     tab.zoom_step(false);
                 }
                 let label = match tab.viewport.fit {
@@ -1107,15 +1122,21 @@ impl App {
                             }
                         }
                     });
-                if ui.button("➕").on_hover_text("Zoom in (Ctrl++)").clicked() {
+                if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text("Zoom in (Ctrl++)").clicked() {
                     tab.zoom_step(true);
                 }
                 ui.separator();
 
-                for (mode, icon) in LayoutMode::ALL.into_iter().zip(["⬌", "⬍", "▯", "▯▯", "▦"]) {
+                for (mode, icon) in LayoutMode::ALL.into_iter().zip([
+                    icons::COLUMNS,
+                    icons::ROWS,
+                    icons::FILE,
+                    icons::BOOK_OPEN,
+                    icons::SQUARES_FOUR,
+                ]) {
                     if ui
-                        .selectable_label(tab.mode == mode, icon)
-                        .on_hover_text(mode.label())
+                        .selectable_label(tab.mode == mode, icons::text(icon))
+                        .on_hover_text(format!("{} layout", mode.label()))
                         .clicked()
                     {
                         tab.set_mode(mode);
@@ -1128,16 +1149,18 @@ impl App {
             let mut clear = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(tab) = self.tabs.get_mut(self.active) else { return };
-                if ui.button("▼").on_hover_text("Next match (F3)").clicked() {
+                if ui.button(icons::text(icons::CARET_DOWN)).on_hover_text("Next match (F3)").clicked() {
                     tab.search_step(true);
                 }
-                if ui.button("▲").on_hover_text("Previous match (Shift+F3)").clicked() {
+                if ui.button(icons::text(icons::CARET_UP)).on_hover_text("Previous match (Shift+F3)").clicked() {
                     tab.search_step(false);
                 }
                 let s = &mut tab.search;
                 let before = (s.match_case, s.whole_word);
-                ui.toggle_value(&mut s.whole_word, "W").on_hover_text("Whole words");
-                ui.toggle_value(&mut s.match_case, "Aa").on_hover_text("Match case");
+                ui.toggle_value(&mut s.whole_word, egui::RichText::new("ab").strong().underline())
+                    .on_hover_text("Whole words");
+                ui.toggle_value(&mut s.match_case, icons::text(icons::TEXT_AA))
+                    .on_hover_text("Match case");
                 if before != (s.match_case, s.whole_word) && s.submitted.is_some() {
                     submit = true;
                 }
@@ -1154,9 +1177,10 @@ impl App {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut s.query)
                         .id(id)
-                        .hint_text("🔍 Search (Ctrl+F)")
+                        .hint_text("Search (Ctrl+F)")
                         .desired_width(160.0),
                 );
+                ui.label(icons::text(icons::MAGNIFYING_GLASS));
                 if self.focus_search {
                     resp.request_focus();
                     self.focus_search = false;
@@ -1249,7 +1273,7 @@ impl App {
                     if resp.middle_clicked() {
                         close = Some(tab.id);
                     }
-                    if ui.small_button("×").on_hover_text("Close (Ctrl+W)").clicked() {
+                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text("Close (Ctrl+W)").clicked() {
                         close = Some(tab.id);
                     }
                     ui.add_space(6.0);
@@ -1453,6 +1477,32 @@ impl App {
         }
     }
 
+    fn self_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.screenshot_to.clone() else { return };
+        if self.screenshot_requested {
+            return;
+        }
+        if ctx.input(|i| i.time) < 3.0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        self.screenshot_requested = true;
+        let close_ctx = ctx.clone();
+        let callback = egui::ScreenshotCallback::new(move |image| {
+            // Binary PPM: trivial to write, readable by most image tools.
+            let mut out = format!("P6\n{} {}\n255\n", image.size[0], image.size[1]).into_bytes();
+            for px in &image.pixels {
+                out.extend_from_slice(&[px.r(), px.g(), px.b()]);
+            }
+            if let Err(e) = std::fs::write(&path, out) {
+                log::error!("screenshot: {e}");
+            }
+            close_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            close_ctx.request_repaint();
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
+    }
+
     fn welcome(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
@@ -1574,6 +1624,7 @@ impl eframe::App for App {
             None => "magic-pdf".into(),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        self.self_screenshot(&ctx);
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

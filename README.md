@@ -47,6 +47,11 @@ packaging/linux/uninstall.sh    # removes it again
 This adds magic-pdf to the application menu and to "Open with" for PDF files. Use
 `sudo PREFIX=/usr/local packaging/linux/install.sh` for a system-wide install.
 
+## Debugging
+
+`MAGIC_PDF_SCREENSHOT=out.ppm magic-pdf file.pdf` opens the file, saves a screenshot
+of the app's own window after three seconds and quits.
+
 ## Tests
 
 ```bash
@@ -83,6 +88,9 @@ either version 3 of the License, or (at your option) any later version.
 This program is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the [GNU Affero General Public License](LICENSE) for details.
+
+Toolbar icons are from [Phosphor Icons](https://phosphoricons.com) (MIT license,
+see `assets/fonts/phosphor/LICENSE`).
 
 PDFium is distributed under its own BSD-style license; `scripts/fetch-pdfium.*` places a
 copy in `third_party/pdfium/LICENSE`, which must ship alongside the library.

@@ -6,6 +6,7 @@ use eframe::egui::{
     Ui, Vec2, pos2, vec2,
 };
 
+use crate::icons;
 use crate::document::{AnnotSelection, DocTab, Draft, LoadState, Selection, quad};
 use crate::engine::{
     AnnotChange, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Rgb, form_mods,
@@ -50,35 +51,30 @@ impl Tool {
     }
 
     pub fn icon(self) -> egui::RichText {
-        let text = egui::RichText::new(match self {
-            Tool::Hand => "✋",
-            Tool::SelectText => "𝐈",
-            Tool::Highlight => "🖍",
-            Tool::Underline => "U",
-            Tool::StrikeOut => "S",
-            Tool::Note => "🗨",
-            Tool::Ink => "✏",
-            Tool::Rect => "⬜",
-            Tool::Ellipse => "⭕",
-        });
-        match self {
-            Tool::Underline => text.underline().strong(),
-            Tool::StrikeOut => text.strikethrough().strong(),
-            _ => text,
-        }
+        icons::text(match self {
+            Tool::Hand => icons::HAND,
+            Tool::SelectText => icons::CURSOR_TEXT,
+            Tool::Highlight => icons::HIGHLIGHTER,
+            Tool::Underline => icons::TEXT_UNDERLINE,
+            Tool::StrikeOut => icons::TEXT_STRIKETHROUGH,
+            Tool::Note => icons::NOTE_PENCIL,
+            Tool::Ink => icons::SCRIBBLE,
+            Tool::Rect => icons::RECTANGLE,
+            Tool::Ellipse => icons::CIRCLE,
+        })
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Tool::Hand => "Hand (H)",
             Tool::SelectText => "Select text (S)",
-            Tool::Highlight => "Highlight text",
+            Tool::Highlight => "Highlight text (U)",
             Tool::Underline => "Underline text",
             Tool::StrikeOut => "Strike out text",
-            Tool::Note => "Sticky note",
-            Tool::Ink => "Freehand drawing",
-            Tool::Rect => "Rectangle",
-            Tool::Ellipse => "Ellipse",
+            Tool::Note => "Sticky note (N)",
+            Tool::Ink => "Freehand drawing (D)",
+            Tool::Rect => "Rectangle (R)",
+            Tool::Ellipse => "Ellipse (E)",
         }
     }
 
@@ -947,11 +943,15 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("📋 Copy").clicked() {
+                    if ui.button(icons::text(icons::COPY)).on_hover_text("Copy (Ctrl+C)").clicked() {
                         action = Some(None);
                     }
-                    for kind in [AnnotKind::Highlight, AnnotKind::Underline, AnnotKind::StrikeOut] {
-                        if ui.button(kind.label()).clicked() {
+                    for (kind, tool) in [
+                        (AnnotKind::Highlight, Tool::Highlight),
+                        (AnnotKind::Underline, Tool::Underline),
+                        (AnnotKind::StrikeOut, Tool::StrikeOut),
+                    ] {
+                        if ui.button(tool.icon()).on_hover_text(kind.label()).clicked() {
                             action = Some(Some(kind));
                         }
                     }
@@ -1003,7 +1003,11 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
                 ui.horizontal(|ui| {
                     ui.strong(annot.kind.label());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗑").on_hover_text("Delete (Del)").clicked() {
+                        if ui
+                            .small_button(icons::sized(icons::TRASH, 14.0))
+                            .on_hover_text("Delete (Del)")
+                            .clicked()
+                        {
                             delete = true;
                         }
                     });
