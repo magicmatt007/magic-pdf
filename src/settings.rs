@@ -101,7 +101,7 @@ impl Default for Settings {
         Self {
             default_mode: LayoutMode::Horizontal,
             show_sidebar: true,
-            sidebar_width: 220.0,
+            sidebar_width: 280.0,
             thumb_width: 150.0,
             night_mode: false,
             dark_ui: true,

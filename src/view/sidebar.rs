@@ -21,7 +21,7 @@ pub enum SidebarTab {
 }
 
 /// Narrowest sidebar.
-pub const MIN_WIDTH: f32 = 120.0;
+pub const MIN_WIDTH: f32 = 90.0;
 /// Range of the preferred thumbnail width.
 const THUMB_MIN: f32 = 60.0;
 const THUMB_MAX: f32 = 600.0;
@@ -42,7 +42,8 @@ pub fn show(
     actions: &mut Vec<PageAction>,
     thumb_width: &mut f32,
 ) {
-    ui.horizontal(|ui| {
+    // Wraps onto several lines in a narrow sidebar instead of keeping it wide.
+    ui.horizontal_wrapped(|ui| {
         ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
         ui.selectable_value(sidebar, SidebarTab::Outline, "Outline");
         let n: usize = tab.annots.values().map(Vec::len).sum();
@@ -725,6 +726,30 @@ mod tests {
         let events = vec![egui::Event::PointerMoved(at), egui::Event::Zoom(1.5)];
         frame_with(&ctx, &mut tab, events, egui::Modifiers::CTRL, &mut w);
         assert!((w - 225.0).abs() < 0.1, "{w}");
+    }
+
+    #[test]
+    fn sidebar_can_be_narrow() {
+        let ctx = egui::Context::default();
+        let mut tab = tab(3);
+        let mut width = 0.0;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let (mut cache, mut actions, mut side) = (TextureCache::new(usize::MAX), Vec::new(), SidebarTab::Pages);
+                let panel = egui::Panel::left("sidebar")
+                    .resizable(true)
+                    .default_size(MIN_WIDTH)
+                    .size_range(MIN_WIDTH..=900.0)
+                    .show(ui, |ui| show(ui, &mut tab, &mut side, &mut cache, &mut actions, &mut 150.0));
+                width = panel.response.rect.width();
+            });
+            out.textures_delta.clear();
+        }
+        assert!(width < MIN_WIDTH + 20.0, "content keeps the sidebar {width} wide");
     }
 
     #[test]

@@ -1646,6 +1646,9 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            ui.toggle_value(&mut self.settings.show_sidebar, icons::text(icons::SIDEBAR))
+                .on_hover_text("Show or hide the sidebar (F9)");
+            ui.separator();
             if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text(kb("Open a PDF (Ctrl+O)")).clicked() {
                 self.open_dialog();
             }
