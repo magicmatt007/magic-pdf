@@ -50,16 +50,15 @@ cargo test                               # layout/viewport unit tests + PDFium e
 
 ## License
 
-Licensed under either of
+Copyright (C) 2026 The magic-pdf contributors
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+This program is free software: you can redistribute it and/or modify it under the terms
+of the GNU Affero General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
 
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this work, as defined in the Apache-2.0 license, shall be dual licensed as
-above, without any additional terms or conditions.
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the [GNU Affero General Public License](LICENSE) for details.
 
 PDFium is distributed under its own BSD-style license; `scripts/fetch-pdfium.*` places a
 copy in `third_party/pdfium/LICENSE`, which must ship alongside the library.
