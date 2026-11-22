@@ -171,11 +171,13 @@ mod tests {
     fn parses_github_release_and_picks_installer() {
         let json = r#"{"tag_name":"v0.2.0","name":"magic-pdf 0.2.0","body":"Notes","html_url":"https://x/r",
             "assets":[{"name":"magic-pdf-0.2.0-windows-portable.zip","browser_download_url":"https://x/z","size":2,"digest":"sha256:ab"},
-                      {"name":"magic-pdf-0.2.0-setup.exe","browser_download_url":"https://x/s","size":1,"digest":null}],
+                      {"name":"magic-pdf-0.2.0-setup.exe","browser_download_url":"https://x/s","size":1,"digest":null},
+                      {"name":"magic-pdf-0.2.0-macos.dmg","browser_download_url":"https://x/m","size":3,"digest":null}],
             "extra":"ignored"}"#;
         let r: Release = serde_json::from_str(json).unwrap();
         assert_eq!(r.version(), "0.2.0");
-        assert_eq!(r.installer().unwrap().browser_download_url, "https://x/s");
+        let expected = if cfg!(target_os = "macos") { "https://x/m" } else { "https://x/s" };
+        assert_eq!(r.installer().unwrap().browser_download_url, expected);
         assert_eq!(r.installer().unwrap().digest, None);
     }
 
