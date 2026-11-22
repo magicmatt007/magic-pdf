@@ -31,6 +31,22 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 
 Document JavaScript is never executed.
 
+## Installing
+
+**Windows:** download `magic-pdf-<version>-setup.exe` from the
+[latest release](https://github.com/magicmatt007/magic-pdf/releases/latest) and run it.
+No administrator rights are needed. It adds a Start menu entry and registers magic-pdf
+for PDF files; tick the last option at the end to open Windows Settings and make it your
+default PDF viewer (also available later under Help). The installer is not code-signed,
+so Windows SmartScreen may ask for confirmation: *More info* → *Run anyway*. A portable
+zip is available too.
+
+**Linux:** build from source and install for your user (see below):
+
+```bash
+packaging/linux/install.sh
+```
+
 ## Building
 
 ```bash
@@ -42,7 +58,7 @@ On Windows run `scripts\fetch-pdfium.ps1` instead. PDFium is loaded at runtime f
 order) `$MAGIC_PDF_PDFIUM_DIR`, the executable's directory, `third_party/pdfium` and the
 system library path, so a distribution is just the executable plus one shared library.
 
-## Installing on Linux
+## Installing on Linux from source
 
 ```bash
 packaging/linux/install.sh      # builds and installs into ~/.local
@@ -51,6 +67,16 @@ packaging/linux/uninstall.sh    # removes it again
 
 This adds magic-pdf to the application menu and to "Open with" for PDF files. Use
 `sudo PREFIX=/usr/local packaging/linux/install.sh` for a system-wide install.
+
+## Releasing
+
+1. Set the new `version` in `Cargo.toml` and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The *Release* workflow then builds the Windows installer and portable zip and publishes
+them as a GitHub release. Running the workflow by hand (Actions → Release → Run
+workflow) builds the same files as a downloadable artifact without publishing anything.
+CI runs clippy and the tests on Linux and Windows for every push.
 
 ## Debugging
 

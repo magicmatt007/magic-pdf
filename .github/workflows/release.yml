@@ -1,0 +1,96 @@
+# Builds the Windows installer and a portable zip. A pushed version tag (v1.2.3)
+# publishes them as a GitHub release; a manual run ("Run workflow") only builds
+# them and keeps them as a workflow artifact for testing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  PDFIUM_VERSION: "8165"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine version
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+            if ($version -ne $cargo) { throw "Tag v$version does not match Cargo.toml version $cargo" }
+          } else {
+            $version = $cargo
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Fetch PDFium
+        shell: pwsh
+        run: ./scripts/fetch-pdfium.ps1
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=$env:VERSION packaging\windows\magic-pdf.iss
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $dir = "dist\magic-pdf-$env:VERSION-portable"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item target\release\magic-pdf.exe, third_party\pdfium\pdfium.dll $dir
+          Copy-Item LICENSE "$dir\LICENSE.txt"
+          Copy-Item third_party\pdfium\LICENSE "$dir\PDFIUM-LICENSE.txt"
+          Copy-Item assets\fonts\phosphor\LICENSE "$dir\PHOSPHOR-LICENSE.txt"
+          Compress-Archive -Path "$dir\*" -DestinationPath "dist\magic-pdf-$env:VERSION-windows-portable.zip"
+
+      - name: Keep the build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magic-pdf-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          ## Windows
+
+          Download **magic-pdf-$env:VERSION-setup.exe** and run it. It installs for your user only
+          (no administrator rights needed) and adds magic-pdf to the Start menu and to "Open with"
+          for PDF files. At the end it can open Windows Settings to make magic-pdf your default
+          PDF viewer.
+
+          Windows may warn that the installer is from an unknown publisher, because it is not
+          code-signed. Choose **More info**, then **Run anyway**.
+
+          No installer wanted? Unzip **magic-pdf-$env:VERSION-windows-portable.zip** anywhere and run
+          ``magic-pdf.exe``.
+          "@
+          gh release create "${{ github.ref_name }}" `
+            "dist\magic-pdf-$env:VERSION-setup.exe" `
+            "dist\magic-pdf-$env:VERSION-windows-portable.zip" `
+            --title "magic-pdf $env:VERSION" --notes $notes

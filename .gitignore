@@ -1,3 +1,4 @@
 /target
 /third_party/pdfium/*
 !/third_party/pdfium/.gitkeep
+/dist

@@ -21,7 +21,12 @@ fn main() -> eframe::Result {
             .with_app_id("magic-pdf")
             .with_inner_size([1600.0, 900.0])
             .with_min_inner_size([480.0, 320.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(eframe::egui::IconData {
+                rgba: include_bytes!("../assets/icons/magic-pdf-64.rgba").to_vec(),
+                width: 64,
+                height: 64,
+            }),
         ..Default::default()
     };
     eframe::run_native(

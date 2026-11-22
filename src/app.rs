@@ -133,7 +133,7 @@ impl App {
     }
 
     pub fn open(&mut self, path: &Path) {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = simplify_path(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
         if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
             self.active = i;
             return;
@@ -571,6 +571,30 @@ impl App {
             if let Some(dir) = dialog.pick_folder() {
                 self.split_every = None;
                 self.send(Request::SplitDocument { doc, every, dir, stem });
+            }
+        }
+    }
+
+    /// Windows: opens the Default apps page for magic-pdf (Windows does not let apps
+    /// change defaults themselves). Linux: sets the default via xdg-mime.
+    fn make_default_viewer(&mut self) {
+        if cfg!(windows) {
+            if let Err(e) = open::that_detached("ms-settings:defaultapps?registeredAppUser=magic-pdf") {
+                self.error = Some(format!("Could not open Windows Settings: {e}"));
+            }
+            return;
+        }
+        let result = std::process::Command::new("xdg-mime")
+            .args(["default", "magic-pdf.desktop", "application/pdf"])
+            .status();
+        match result {
+            Ok(s) if s.success() => self.notice("magic-pdf is now the default PDF viewer"),
+            Ok(_) | Err(_) => {
+                self.error = Some(
+                    "Could not set the default PDF viewer. Install magic-pdf with \
+                     packaging/linux/install.sh first."
+                        .into(),
+                )
             }
         }
     }
@@ -1165,6 +1189,9 @@ impl App {
                 }
             });
             ui.menu_button("Help", |ui| {
+                if cfg!(any(windows, target_os = "linux")) && ui.button("Make magic-pdf the default PDF viewer…").clicked() {
+                    self.make_default_viewer();
+                }
                 if ui.button("Keyboard shortcuts").clicked() {
                     self.show_shortcuts = true;
                 }
@@ -1811,6 +1838,18 @@ impl eframe::App for App {
     }
 }
 
+/// On Windows, `canonicalize` returns `\\?\C:\…` paths; show and store the
+/// familiar `C:\…` form instead (network paths keep their prefix).
+fn simplify_path(path: PathBuf) -> PathBuf {
+    if cfg!(windows)
+        && let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+        && !rest.starts_with("UNC\\")
+    {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
 /// Removes the keyboard input meant for a focused form field from `events` and turns it
 /// into engine requests. Returns the requests and whether Esc asked to leave the field.
 ///
@@ -1943,6 +1982,17 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn simplify_path_only_touches_windows_verbatim_paths() {
+        let p = PathBuf::from("/home/u/a.pdf");
+        assert_eq!(simplify_path(p.clone()), p);
+        if cfg!(windows) {
+            assert_eq!(simplify_path(PathBuf::from(r"\\?\C:\x\a.pdf")), PathBuf::from(r"C:\x\a.pdf"));
+            let unc = PathBuf::from(r"\\?\UNC\server\share\a.pdf");
+            assert_eq!(simplify_path(unc.clone()), unc);
+        }
     }
 
     #[test]

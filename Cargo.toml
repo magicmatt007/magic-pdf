@@ -17,6 +17,10 @@ open = "5"
 log = "0.4"
 env_logger = "0.11"
 
+[build-dependencies]
+# Embeds the icon into Windows builds; unused elsewhere.
+winresource = "0.1"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
