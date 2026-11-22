@@ -7,7 +7,7 @@ window height, and the mouse wheel scrolls left and right through the document.
 Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 [PDFium](https://pdfium.googlesource.com/pdfium/) (via `pdfium-render`).
 
-## Features (Phase 1)
+## Features
 
 - Layouts: horizontal, vertical, single page, facing (cover + pairs), grid; per-file memory
 - Fit width / height / page, zoom presets, Ctrl+wheel zoom around the cursor, rotation
@@ -15,7 +15,11 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Text selection and copy, internal and external links
 - Tabs, recent files, drag & drop, password-protected files, night mode
 
-Annotations, form filling, printing and page editing are planned for later phases.
+- Annotations: highlight, underline, strikeout, sticky notes, freehand drawing,
+  rectangles and ellipses; colours, line widths, comments, a Comments sidebar,
+  undo/redo, Save / Save As (deleted annotations are removed from the file)
+
+Form filling, printing and page editing are planned for later phases.
 
 ## Building
 
@@ -55,6 +59,9 @@ cargo test                               # layout/viewport unit tests + PDFium e
 | Ctrl+1…5 | Horizontal, vertical, single, facing, grid |
 | Ctrl+R / Ctrl+Shift+R | Rotate |
 | H / S | Hand / text-select tool |
+| U / N / D / R / E | Highlight, note, draw, rectangle, ellipse |
+| Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |
+| Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+F, Enter, F3 | Search |
 | F9 | Sidebar |
 

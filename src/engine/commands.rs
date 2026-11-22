@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub type DocId = u64;
 
-/// Clockwise view rotation applied to every page of a document.
+/// Clockwise rotation (view rotation, or a page's intrinsic /Rotate).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Rotation {
     #[default]
@@ -34,6 +34,29 @@ impl Rotation {
     pub fn swaps_axes(self) -> bool {
         matches!(self, Self::R90 | Self::R270)
     }
+
+    pub fn quarter_turns(self) -> i32 {
+        match self {
+            Self::R0 => 0,
+            Self::R90 => 1,
+            Self::R180 => 2,
+            Self::R270 => 3,
+        }
+    }
+
+    pub fn from_quarter_turns(n: i32) -> Self {
+        match n.rem_euclid(4) {
+            0 => Self::R0,
+            1 => Self::R90,
+            2 => Self::R180,
+            _ => Self::R270,
+        }
+    }
+
+    /// `self` followed by `other`.
+    pub fn then(self, other: Rotation) -> Rotation {
+        Self::from_quarter_turns(self.quarter_turns() + other.quarter_turns())
+    }
 }
 
 /// Rectangle in PDF page space (points, origin bottom-left).
@@ -45,6 +68,41 @@ pub struct PdfBox {
     pub top: f32,
 }
 
+impl PdfBox {
+    pub fn union(self, o: PdfBox) -> PdfBox {
+        PdfBox {
+            left: self.left.min(o.left),
+            bottom: self.bottom.min(o.bottom),
+            right: self.right.max(o.right),
+            top: self.top.max(o.top),
+        }
+    }
+
+    pub fn expand(self, d: f32) -> PdfBox {
+        PdfBox {
+            left: self.left - d,
+            bottom: self.bottom - d,
+            right: self.right + d,
+            top: self.top + d,
+        }
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x <= self.right && y >= self.bottom && y <= self.top
+    }
+}
+
+/// How a page's PDF coordinates map onto its displayed (unrotated-by-view) area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageGeom {
+    /// Crop box size before the page's own rotation.
+    pub size: (f32, f32),
+    /// Lower-left corner of the crop box.
+    pub origin: (f32, f32),
+    /// The page's intrinsic /Rotate.
+    pub rotation: Rotation,
+}
+
 /// Identifies one rendered bitmap of a page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RenderKey {
@@ -53,6 +111,8 @@ pub struct RenderKey {
     /// Output width in physical pixels (after rotation).
     pub width_px: u32,
     pub rotation: Rotation,
+    /// Bumped whenever the page content changes (annotation edits).
+    pub version: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +124,7 @@ pub struct OutlineItem {
 
 #[derive(Clone, Debug)]
 pub struct DocInfo {
-    /// Unrotated page sizes in points (width, height).
+    /// Displayed page sizes in points (width, height), including each page's own rotation.
     pub page_sizes: Vec<(f32, f32)>,
     pub outline: Vec<OutlineItem>,
     pub title: Option<String>,
@@ -102,6 +162,104 @@ pub struct SearchQuery {
     pub whole_word: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AnnotKind {
+    Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+    Note,
+    Ink,
+    Square,
+    Circle,
+    FreeText,
+    Line,
+    Stamp,
+    Other,
+}
+
+impl AnnotKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AnnotKind::Highlight => "Highlight",
+            AnnotKind::Underline => "Underline",
+            AnnotKind::StrikeOut => "Strikeout",
+            AnnotKind::Squiggly => "Squiggly",
+            AnnotKind::Note => "Note",
+            AnnotKind::Ink => "Ink",
+            AnnotKind::Square => "Rectangle",
+            AnnotKind::Circle => "Ellipse",
+            AnnotKind::FreeText => "Text box",
+            AnnotKind::Line => "Line",
+            AnnotKind::Stamp => "Stamp",
+            AnnotKind::Other => "Annotation",
+        }
+    }
+
+    /// Kinds whose appearance PDFium can regenerate after a style change.
+    pub fn style_editable(self) -> bool {
+        matches!(
+            self,
+            AnnotKind::Highlight
+                | AnnotKind::Underline
+                | AnnotKind::StrikeOut
+                | AnnotKind::Squiggly
+                | AnnotKind::Note
+                | AnnotKind::Ink
+                | AnnotKind::Square
+                | AnnotKind::Circle
+        )
+    }
+
+    pub fn has_border_width(self) -> bool {
+        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle)
+    }
+
+    pub fn has_interior(self) -> bool {
+        matches!(self, AnnotKind::Square | AnnotKind::Circle)
+    }
+}
+
+pub type Rgb = [u8; 3];
+
+/// A new annotation to create. Coordinates are in PDF page space.
+#[derive(Clone, Debug)]
+pub struct NewAnnot {
+    pub kind: AnnotKind,
+    pub rect: PdfBox,
+    pub color: Rgb,
+    pub interior: Option<Rgb>,
+    pub width: f32,
+    pub contents: String,
+    pub author: String,
+    /// Text markup quads: x1,y1 (top-left), x2,y2 (top-right), x3,y3 (bottom-left), x4,y4.
+    pub quads: Vec<[f32; 8]>,
+    pub ink: Vec<Vec<(f32, f32)>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnnotInfo {
+    /// Index within the page; stable while the document is open (deletions are soft).
+    pub index: usize,
+    pub kind: AnnotKind,
+    pub rect: PdfBox,
+    pub color: Option<Rgb>,
+    pub interior: Option<Rgb>,
+    pub width: f32,
+    pub contents: String,
+    pub author: String,
+    pub modified: String,
+}
+
+/// Property changes; `None` leaves a property untouched.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnnotChange {
+    pub color: Option<Rgb>,
+    pub interior: Option<Option<Rgb>>,
+    pub width: Option<f32>,
+    pub contents: Option<String>,
+}
+
 pub enum Request {
     Open {
         doc: DocId,
@@ -134,6 +292,36 @@ pub enum Request {
     CancelSearch {
         doc: DocId,
     },
+    /// List annotations of every page (answered with one `PageAnnots` per page).
+    ScanAnnots {
+        doc: DocId,
+    },
+    AddAnnot {
+        doc: DocId,
+        page: usize,
+        annot: NewAnnot,
+    },
+    UpdateAnnot {
+        doc: DocId,
+        page: usize,
+        index: usize,
+        change: AnnotChange,
+    },
+    DeleteAnnot {
+        doc: DocId,
+        page: usize,
+        index: usize,
+    },
+    Undo {
+        doc: DocId,
+    },
+    Redo {
+        doc: DocId,
+    },
+    Save {
+        doc: DocId,
+        path: PathBuf,
+    },
 }
 
 pub enum Response {
@@ -157,17 +345,53 @@ pub enum Response {
     PageText {
         doc: DocId,
         page: usize,
+        geom: PageGeom,
         text: PageText,
     },
     SearchResults {
         doc: DocId,
         generation: u64,
         page: usize,
+        geom: PageGeom,
         /// Each hit may span several rectangles (e.g. across line breaks).
         hits: Vec<Vec<PdfBox>>,
     },
     SearchDone {
         doc: DocId,
         generation: u64,
+    },
+    PageAnnots {
+        doc: DocId,
+        page: usize,
+        geom: PageGeom,
+        annots: Vec<AnnotInfo>,
+    },
+    AnnotScanDone {
+        doc: DocId,
+    },
+    /// Page content changed; cached renders are stale.
+    PageChanged {
+        doc: DocId,
+        page: usize,
+    },
+    /// The newly created annotation (so the UI can select it).
+    AnnotAdded {
+        doc: DocId,
+        page: usize,
+        index: usize,
+    },
+    EditState {
+        doc: DocId,
+        can_undo: bool,
+        can_redo: bool,
+        dirty: bool,
+    },
+    Saved {
+        doc: DocId,
+        path: PathBuf,
+    },
+    Error {
+        doc: DocId,
+        message: String,
     },
 }

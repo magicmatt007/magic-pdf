@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use eframe::egui::{Rect, Vec2};
+use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::engine::{DocId, DocInfo, PageText, PdfBox, RenderKey, Rotation};
+use crate::engine::{AnnotInfo, DocId, DocInfo, PageGeom, PageText, PdfBox, RenderKey, Request, Rotation};
 use crate::settings::FileState;
 use crate::view::layout::{self, Layout, LayoutMode, LayoutParams};
 use crate::view::viewport::{FitMode, Viewport};
@@ -57,6 +57,22 @@ impl Selection {
     }
 }
 
+/// An annotation being drawn with the mouse (PDF page coordinates).
+#[derive(Clone, Debug)]
+pub enum Draft {
+    Ink { page: usize, points: Vec<Pos2> },
+    Shape { page: usize, start: Pos2, end: Pos2 },
+}
+
+/// The currently selected annotation and its comment being edited.
+#[derive(Clone, Debug)]
+pub struct AnnotSelection {
+    pub page: usize,
+    pub index: usize,
+    pub contents: String,
+    pub focus_contents: bool,
+}
+
 pub struct DocTab {
     pub id: DocId,
     pub path: PathBuf,
@@ -83,6 +99,21 @@ pub struct DocTab {
     pub search: SearchState,
     pub texts: HashMap<usize, Option<PageText>>,
     pub selection: Option<Selection>,
+
+    /// Page geometry, known once text or annotations of a page were loaded.
+    pub geoms: HashMap<usize, PageGeom>,
+    /// Annotations per page (filled by a background scan after opening).
+    pub annots: HashMap<usize, Vec<AnnotInfo>>,
+    pub annots_scanned: bool,
+    pub selected_annot: Option<AnnotSelection>,
+    pub draft: Option<Draft>,
+    /// Bumped per page when its content changes, so stale renders are replaced.
+    pub page_versions: HashMap<usize, u32>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub dirty: bool,
+    /// Requests produced by the UI this frame; sent by the app.
+    pub outbox: Vec<Request>,
 
     /// Renders requested this frame with their priority (rebuilt every frame).
     pub wanted: Vec<(RenderKey, f32)>,
@@ -120,6 +151,16 @@ impl DocTab {
             search: SearchState::default(),
             texts: HashMap::new(),
             selection: None,
+            geoms: HashMap::new(),
+            annots: HashMap::new(),
+            annots_scanned: false,
+            selected_annot: None,
+            draft: None,
+            page_versions: HashMap::new(),
+            can_undo: false,
+            can_redo: false,
+            dirty: false,
+            outbox: Vec::new(),
             wanted: Vec::new(),
             requested: HashSet::new(),
             last_wanted: HashSet::new(),
@@ -146,10 +187,39 @@ impl DocTab {
         self.info().map_or(0, |i| i.page_sizes.len())
     }
 
-    pub fn page_size(&self, page: usize) -> (f32, f32) {
-        self.info()
-            .and_then(|i| i.page_sizes.get(page).copied())
-            .unwrap_or((612.0, 792.0))
+    pub fn page_version(&self, page: usize) -> u32 {
+        self.page_versions.get(&page).copied().unwrap_or(0)
+    }
+
+    pub fn request_text(&mut self, page: usize) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.texts.entry(page) {
+            e.insert(None);
+            self.outbox.push(Request::PageText { doc: self.id, page });
+        }
+    }
+
+    pub fn annot(&self, page: usize, index: usize) -> Option<&AnnotInfo> {
+        self.annots.get(&page)?.iter().find(|a| a.index == index)
+    }
+
+    pub fn select_annot(&mut self, page: usize, index: usize) {
+        let contents = self.annot(page, index).map(|a| a.contents.clone()).unwrap_or_default();
+        self.selected_annot = Some(AnnotSelection {
+            page,
+            index,
+            contents,
+            focus_contents: false,
+        });
+        self.selection = None;
+    }
+
+    /// Display name with an unsaved-changes marker.
+    pub fn title(&self) -> String {
+        if self.dirty {
+            format!("● {}", self.name)
+        } else {
+            self.name.clone()
+        }
     }
 
     pub fn file_state(&self) -> FileState {
@@ -282,6 +352,21 @@ impl DocTab {
         Some(s.replace("\r\n", "\n").replace('\r', "\n"))
     }
 
+    /// Line boxes of the text selection in PDF space, merged per line.
+    pub fn selection_line_boxes(&self) -> Option<(usize, Vec<PdfBox>)> {
+        let sel = self.selection?;
+        let text = self.texts.get(&sel.page)?.as_ref()?;
+        let mut lines: Vec<PdfBox> = Vec::new();
+        for c in text.chars.get(sel.range())? {
+            let Some(r) = c.rect else { continue };
+            match lines.last_mut() {
+                Some(last) if same_line(last, &r) => *last = last.union(r),
+                _ => lines.push(r),
+            }
+        }
+        (!lines.is_empty()).then_some((sel.page, lines))
+    }
+
     pub fn select_all_on_page(&mut self) {
         let page = self.current_page;
         if let Some(Some(text)) = self.texts.get(&page)
@@ -295,16 +380,20 @@ impl DocTab {
         }
     }
 
+    /// Scrolls so that `rect` (PDF space) on `page` is visible.
+    pub fn reveal(&mut self, page: usize, rect: PdfBox) {
+        if self.mode == LayoutMode::SinglePage {
+            self.set_current_page(page);
+        }
+        self.pending_reveal = Some((page, rect));
+    }
+
     /// Selects search hit `index` and scrolls to it.
     pub fn show_search_hit(&mut self, index: usize) {
         if let Some(hit) = self.search.hits.get(index) {
             self.search.current = Some(index);
-            let page = hit.page;
-            let rect = hit.rects[0];
-            if self.mode == LayoutMode::SinglePage {
-                self.set_current_page(page);
-            }
-            self.pending_reveal = Some((page, rect));
+            let (page, rect) = (hit.page, hit.rects[0]);
+            self.reveal(page, rect);
         }
     }
 
@@ -329,4 +418,16 @@ pub fn default_fit(mode: LayoutMode) -> FitMode {
         LayoutMode::SinglePage => FitMode::Page,
         LayoutMode::Grid => FitMode::None,
     }
+}
+
+/// Whether two character boxes sit on the same text line (assumes horizontal text).
+pub fn same_line(a: &PdfBox, b: &PdfBox) -> bool {
+    let overlap = a.top.min(b.top) - a.bottom.max(b.bottom);
+    let h = (a.top - a.bottom).min(b.top - b.bottom).max(0.1);
+    overlap > h * 0.5 && b.left >= a.left - h
+}
+
+/// Quad points (TL, TR, BL, BR) for a line box, as used by text markup annotations.
+pub fn quad(b: &PdfBox) -> [f32; 8] {
+    [b.left, b.top, b.right, b.top, b.left, b.bottom, b.right, b.bottom]
 }

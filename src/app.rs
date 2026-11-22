@@ -9,7 +9,7 @@ use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
 use crate::engine::{DocId, Engine, Request, Response, SearchQuery};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
-use crate::view::document_view::{self, Tool, ViewContext};
+use crate::view::document_view::{self, PALETTE, Tool, ViewContext, color_swatch};
 use crate::view::layout::LayoutMode;
 use crate::view::sidebar::{self, SidebarTab};
 use crate::view::viewport::FitMode;
@@ -17,8 +17,19 @@ use crate::view::viewport::FitMode;
 const TEXTURE_BUDGET: usize = 768 * 1024 * 1024;
 const SEARCH_ID: &str = "search_field";
 
+/// What to do once unsaved documents have been dealt with.
+#[derive(Clone, Debug)]
+struct CloseIntent {
+    /// Tabs (by id) to close.
+    docs: Vec<DocId>,
+    quit: bool,
+    /// Saves still outstanding before the close can proceed.
+    awaiting_save: HashSet<DocId>,
+}
+
 pub struct App {
     engine: Result<Engine, String>,
+    ctx: egui::Context,
     tabs: Vec<DocTab>,
     active: usize,
     next_id: DocId,
@@ -29,17 +40,22 @@ pub struct App {
     focus_search: bool,
     show_shortcuts: bool,
     show_about: bool,
+    close_intent: Option<CloseIntent>,
+    /// Quit has been confirmed; let the next close request through.
+    allow_quit: bool,
+    error: Option<String>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let engine = Engine::start(move || ctx.request_repaint());
+        let wake_ctx = ctx.clone();
+        let engine = Engine::start(move || wake_ctx.request_repaint());
         if let Err(e) = &engine {
             log::error!("{e}");
         }
         let settings = Settings::load();
-        cc.egui_ctx.set_theme(if settings.dark_ui {
+        ctx.set_theme(if settings.dark_ui {
             egui::Theme::Dark
         } else {
             egui::Theme::Light
@@ -48,6 +64,7 @@ impl App {
         cache.invert = settings.night_mode;
         let mut app = Self {
             engine,
+            ctx,
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
@@ -58,6 +75,9 @@ impl App {
             focus_search: false,
             show_shortcuts: false,
             show_about: false,
+            close_intent: None,
+            allow_quit: false,
+            error: None,
         };
         for f in files {
             app.open(&f);
@@ -79,12 +99,7 @@ impl App {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let tab = DocTab::new(
-            id,
-            path.clone(),
-            self.settings.default_mode,
-            self.settings.file_state(&path),
-        );
+        let tab = DocTab::new(id, path.clone(), self.settings.default_mode, self.settings.file_state(&path));
         self.send(Request::Open {
             doc: id,
             path: path.clone(),
@@ -98,12 +113,7 @@ impl App {
 
     fn open_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
-        if let Some(dir) = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.path.parent())
-            .or_else(|| self.settings.recent.first().and_then(|p| p.parent()))
-        {
+        if let Some(dir) = self.current_dir() {
             dialog = dialog.set_directory(dir);
         }
         if let Some(files) = dialog.pick_files() {
@@ -113,7 +123,63 @@ impl App {
         }
     }
 
-    fn close_tab(&mut self, index: usize) {
+    fn current_dir(&self) -> Option<PathBuf> {
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.path.parent())
+            .or_else(|| self.settings.recent.first().and_then(|p| p.parent()))
+            .map(Path::to_path_buf)
+    }
+
+    fn save_active(&mut self, save_as: bool) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.info().is_none() {
+            return;
+        }
+        let path = if save_as {
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter("PDF documents", &["pdf"])
+                .set_file_name(&tab.name);
+            if let Some(dir) = tab.path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            match dialog.save_file() {
+                Some(p) => p,
+                None => return,
+            }
+        } else {
+            tab.path.clone()
+        };
+        self.send(Request::Save { doc: tab.id, path });
+    }
+
+    /// Closes tabs, asking first if any has unsaved changes.
+    fn request_close(&mut self, docs: Vec<DocId>, quit: bool) {
+        let dirty = docs.iter().any(|d| self.tabs.iter().any(|t| t.id == *d && t.dirty));
+        if dirty {
+            self.close_intent = Some(CloseIntent {
+                docs,
+                quit,
+                awaiting_save: HashSet::new(),
+            });
+        } else {
+            self.finish_close(&docs, quit);
+        }
+    }
+
+    fn finish_close(&mut self, docs: &[DocId], quit: bool) {
+        for doc in docs {
+            if let Some(i) = self.tabs.iter().position(|t| t.id == *doc) {
+                self.close_tab_now(i);
+            }
+        }
+        if quit {
+            self.allow_quit = true;
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
@@ -139,7 +205,7 @@ impl App {
         self.tabs.get_mut(self.active)
     }
 
-    fn process_responses(&mut self, ctx: &egui::Context) {
+    fn process_responses(&mut self) {
         let mut responses = Vec::new();
         if let Ok(engine) = &self.engine {
             while let Some(r) = engine.try_recv() {
@@ -147,77 +213,170 @@ impl App {
             }
         }
         for resp in responses {
-            match resp {
-                Response::Opened { doc, info } => {
-                    if let Some(tab) = self.tab_mut(doc) {
-                        if let Some(title) = &info.title {
-                            log::info!("opened “{title}” ({} pages)", info.page_sizes.len());
+            self.process_response(resp);
+        }
+    }
+
+    fn process_response(&mut self, resp: Response) {
+        match resp {
+            Response::Opened { doc, info } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    log::info!(
+                        "opened “{}” ({} pages)",
+                        info.title.as_deref().unwrap_or(&tab.name),
+                        info.page_sizes.len()
+                    );
+                    tab.state = LoadState::Ready(info);
+                    let page = tab.pending_goto.unwrap_or(0);
+                    tab.goto_page(page);
+                    self.send(Request::ScanAnnots { doc });
+                }
+            }
+            Response::OpenFailed {
+                doc,
+                error,
+                password_required,
+            } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.state = if password_required {
+                        let wrong = matches!(tab.state, LoadState::NeedsPassword { .. });
+                        LoadState::NeedsPassword {
+                            input: String::new(),
+                            wrong,
                         }
-                        tab.state = LoadState::Ready(info);
-                        let page = tab.pending_goto.unwrap_or(0);
-                        tab.goto_page(page);
+                    } else {
+                        LoadState::Failed(error)
+                    };
+                }
+            }
+            Response::Rendered { key, size, rgba } => {
+                let ctx = self.ctx.clone();
+                if let Some(tab) = self.tab_mut(key.doc) {
+                    tab.requested.remove(&key);
+                    self.cache.insert(&ctx, key, size, rgba);
+                }
+            }
+            Response::RenderFailed { key } => {
+                // Left in `requested` so it is not retried every frame.
+                log::debug!("render failed for {key:?}");
+            }
+            Response::PageText { doc, page, geom, text } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.geoms.insert(page, geom);
+                    tab.texts.insert(page, Some(text));
+                }
+            }
+            Response::SearchResults {
+                doc,
+                generation,
+                page,
+                geom,
+                hits,
+            } => {
+                if let Some(tab) = self.tab_mut(doc)
+                    && tab.search.generation == generation
+                {
+                    tab.geoms.insert(page, geom);
+                    let first = tab.search.hits.is_empty();
+                    tab.search
+                        .hits
+                        .extend(hits.into_iter().map(|rects| SearchHit { page, rects }));
+                    if first {
+                        // Jump to the first hit at or after the current page.
+                        let start = tab.current_page;
+                        let idx = tab.search.hits.iter().position(|h| h.page >= start).unwrap_or(0);
+                        tab.show_search_hit(idx);
                     }
                 }
-                Response::OpenFailed {
-                    doc,
-                    error,
-                    password_required,
-                } => {
-                    if let Some(tab) = self.tab_mut(doc) {
-                        tab.state = if password_required {
-                            let wrong = matches!(tab.state, LoadState::NeedsPassword { .. });
-                            LoadState::NeedsPassword {
-                                input: String::new(),
-                                wrong,
-                            }
-                        } else {
-                            LoadState::Failed(error)
-                        };
+            }
+            Response::SearchDone { doc, generation } => {
+                if let Some(tab) = self.tab_mut(doc)
+                    && tab.search.generation == generation
+                {
+                    tab.search.running = false;
+                }
+            }
+            Response::PageAnnots {
+                doc,
+                page,
+                geom,
+                annots,
+            } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.geoms.insert(page, geom);
+                    if annots.is_empty() {
+                        tab.annots.remove(&page);
+                    } else {
+                        tab.annots.insert(page, annots);
                     }
                 }
-                Response::Rendered { key, size, rgba } => {
-                    if let Some(tab) = self.tab_mut(key.doc) {
-                        tab.requested.remove(&key);
-                        self.cache.insert(ctx, key, size, rgba);
-                    }
+            }
+            Response::AnnotScanDone { doc } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.annots_scanned = true;
                 }
-                Response::RenderFailed { key } => {
-                    // Leave it in `requested` so it is not retried every frame.
-                    log::debug!("render failed for {key:?}");
+            }
+            Response::PageChanged { doc, page } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    *tab.page_versions.entry(page).or_insert(0) += 1;
                 }
-                Response::PageText { doc, page, text } => {
-                    if let Some(tab) = self.tab_mut(doc) {
-                        tab.texts.insert(page, Some(text));
-                    }
+            }
+            Response::AnnotAdded { doc, page, index } => {
+                let tool = self.tool;
+                if let Some(tab) = self.tab_mut(doc)
+                    && tool == Tool::Note
+                {
+                    // Let the user type the note right away.
+                    document_view::focus_annot(tab, page, index, true);
                 }
-                Response::SearchResults {
-                    doc,
-                    generation,
-                    page,
-                    hits,
-                } => {
-                    if let Some(tab) = self.tab_mut(doc)
-                        && tab.search.generation == generation
-                    {
-                        let first = tab.search.hits.is_empty();
-                        tab.search
-                            .hits
-                            .extend(hits.into_iter().map(|rects| SearchHit { page, rects }));
-                        if first {
-                            // Jump to the first hit at or after the current page once known.
-                            let start = tab.current_page;
-                            let idx = tab.search.hits.iter().position(|h| h.page >= start).unwrap_or(0);
-                            tab.show_search_hit(idx);
-                        }
-                    }
+            }
+            Response::EditState {
+                doc,
+                can_undo,
+                can_redo,
+                dirty,
+            } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.can_undo = can_undo;
+                    tab.can_redo = can_redo;
+                    tab.dirty = dirty;
                 }
-                Response::SearchDone { doc, generation } => {
-                    if let Some(tab) = self.tab_mut(doc)
-                        && tab.search.generation == generation
-                    {
-                        tab.search.running = false;
-                    }
+            }
+            Response::Saved { doc, path } => {
+                let mut renamed = None;
+                if let Some(tab) = self.tab_mut(doc)
+                    && tab.path != path
+                {
+                    tab.path = path.clone();
+                    tab.name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    renamed = Some(path);
                 }
+                if let Some(path) = renamed {
+                    self.settings.add_recent(&path);
+                    self.settings.save();
+                }
+                if let Some(intent) = &mut self.close_intent
+                    && intent.awaiting_save.remove(&doc)
+                    && intent.awaiting_save.is_empty()
+                {
+                    let intent = self.close_intent.take().unwrap();
+                    self.finish_close(&intent.docs, intent.quit);
+                }
+            }
+            Response::Error { doc, message } => {
+                log::warn!("doc {doc}: {message}");
+                if self
+                    .close_intent
+                    .as_ref()
+                    .is_some_and(|i| i.awaiting_save.contains(&doc))
+                {
+                    // A save we were waiting for failed: abort closing.
+                    self.close_intent = None;
+                }
+                self.error = Some(message);
             }
         }
     }
@@ -261,10 +420,14 @@ impl App {
         }
     }
 
-    /// Sends render requests for what the views asked for this frame and cancels the rest.
-    fn sync_renders(&mut self) {
+    /// Sends requests the views produced, render requests for what they asked for this
+    /// frame, and cancels renders nobody wants any more.
+    fn flush_requests(&mut self) {
         let Ok(engine) = &self.engine else { return };
         for (i, tab) in self.tabs.iter_mut().enumerate() {
+            for req in tab.outbox.drain(..) {
+                engine.send(req);
+            }
             if i != self.active {
                 tab.wanted.clear();
             }
@@ -300,6 +463,27 @@ impl App {
         self.settings.save();
     }
 
+    fn undo(&mut self, redo: bool) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let doc = tab.id;
+            tab.selected_annot = None;
+            self.send(if redo { Request::Redo { doc } } else { Request::Undo { doc } });
+        }
+    }
+
+    fn delete_selected_annot(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(sel) = tab.selected_annot.take()
+        {
+            let req = Request::DeleteAnnot {
+                doc: tab.id,
+                page: sel.page,
+                index: sel.index,
+            };
+            self.send(req);
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cmd = Modifiers::COMMAND;
         let shortcut = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
@@ -307,8 +491,15 @@ impl App {
         if shortcut(cmd, Key::O) {
             self.open_dialog();
         }
-        if shortcut(cmd, Key::W) {
-            self.close_tab(self.active);
+        if shortcut(cmd | Modifiers::SHIFT, Key::S) {
+            self.save_active(true);
+        } else if shortcut(cmd, Key::S) {
+            self.save_active(false);
+        }
+        if shortcut(cmd, Key::W)
+            && let Some(t) = self.tabs.get(self.active)
+        {
+            self.request_close(vec![t.id], false);
         }
         if shortcut(cmd, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -337,19 +528,35 @@ impl App {
         }
 
         let typing = ctx.egui_wants_keyboard_input();
-        let tool_hand = !typing && shortcut(Modifiers::NONE, Key::H);
-        let tool_select = !typing && shortcut(Modifiers::NONE, Key::S);
-        if tool_hand {
-            self.tool = Tool::Hand;
-        }
-        if tool_select {
-            self.tool = Tool::SelectText;
+        if !typing {
+            if shortcut(cmd | Modifiers::SHIFT, Key::Z) || shortcut(cmd, Key::Y) {
+                self.undo(true);
+            } else if shortcut(cmd, Key::Z) {
+                self.undo(false);
+            }
+            if shortcut(Modifiers::NONE, Key::Delete) || shortcut(Modifiers::NONE, Key::Backspace) {
+                self.delete_selected_annot();
+            }
+            for (key, tool) in [
+                (Key::H, Tool::Hand),
+                (Key::S, Tool::SelectText),
+                (Key::U, Tool::Highlight),
+                (Key::N, Tool::Note),
+                (Key::D, Tool::Ink),
+                (Key::R, Tool::Rect),
+                (Key::E, Tool::Ellipse),
+            ] {
+                if shortcut(Modifiers::NONE, key) {
+                    self.tool = tool;
+                }
+            }
         }
 
         let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
 
-        if !typing && copy
+        if !typing
+            && copy
             && let Some(text) = tab.selected_text()
         {
             ctx.copy_text(text);
@@ -384,6 +591,8 @@ impl App {
         }
         if shortcut(Modifiers::NONE, Key::Escape) {
             tab.selection = None;
+            tab.selected_annot = None;
+            tab.draft = None;
         }
         let horizontal = tab.mode.is_horizontal();
         let single = tab.mode == LayoutMode::SinglePage;
@@ -403,11 +612,12 @@ impl App {
                 tab.goto_page(usize::MAX);
             }
             let screen = if horizontal { view.width() } else { view.height() } * 0.9;
+            let along = |d: f32| if horizontal { egui::vec2(d, 0.0) } else { egui::vec2(0.0, d) };
             if i.consume_key(Modifiers::SHIFT, Key::Space) {
-                tab.pending_scroll += if horizontal { egui::vec2(screen, 0.0) } else { egui::vec2(0.0, screen) };
+                tab.pending_scroll += along(screen);
             }
             if i.consume_key(Modifiers::NONE, Key::Space) {
-                tab.pending_scroll -= if horizontal { egui::vec2(screen, 0.0) } else { egui::vec2(0.0, screen) };
+                tab.pending_scroll -= along(screen);
             }
             if i.consume_key(Modifiers::NONE, Key::ArrowLeft) {
                 if single {
@@ -434,6 +644,7 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
+            let has_tab = self.tabs.get(self.active).is_some_and(|t| t.info().is_some());
             ui.menu_button("File", |ui| {
                 if ui.button("Open…\tCtrl+O").clicked() {
                     self.open_dialog();
@@ -449,18 +660,58 @@ impl App {
                     });
                 });
                 ui.separator();
+                if ui.add_enabled(has_tab, egui::Button::new("Save\tCtrl+S")).clicked() {
+                    self.save_active(false);
+                }
+                if ui
+                    .add_enabled(has_tab, egui::Button::new("Save as…\tCtrl+Shift+S"))
+                    .clicked()
+                {
+                    self.save_active(true);
+                }
+                ui.separator();
                 if ui
                     .add_enabled(!self.tabs.is_empty(), egui::Button::new("Close tab\tCtrl+W"))
                     .clicked()
+                    && let Some(t) = self.tabs.get(self.active)
                 {
-                    self.close_tab(self.active);
+                    self.request_close(vec![t.id], false);
                 }
                 if ui.button("Quit\tCtrl+Q").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            ui.menu_button("Edit", |ui| {
+                let (can_undo, can_redo, has_sel) = self
+                    .tabs
+                    .get(self.active)
+                    .map(|t| (t.can_undo, t.can_redo, t.selected_annot.is_some()))
+                    .unwrap_or_default();
+                if ui.add_enabled(can_undo, egui::Button::new("Undo\tCtrl+Z")).clicked() {
+                    self.undo(false);
+                }
+                if ui.add_enabled(can_redo, egui::Button::new("Redo\tCtrl+Y")).clicked() {
+                    self.undo(true);
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Delete annotation\tDel"))
+                    .clicked()
+                {
+                    self.delete_selected_annot();
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Author name");
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut self.settings.author).desired_width(140.0))
+                        .lost_focus()
+                    {
+                        self.settings.save();
+                    }
+                });
+            });
             ui.menu_button("View", |ui| {
-                let has_tab = !self.tabs.is_empty();
                 for (i, mode) in LayoutMode::ALL.into_iter().enumerate() {
                     let selected = self.tabs.get(self.active).is_some_and(|t| t.mode == mode);
                     if ui
@@ -500,7 +751,9 @@ impl App {
                     t.set_zoom(ACTUAL_SIZE);
                 }
                 ui.separator();
-                if ui.add_enabled(has_tab, egui::Button::new("Rotate clockwise\tCtrl+R")).clicked()
+                if ui
+                    .add_enabled(has_tab, egui::Button::new("Rotate clockwise\tCtrl+R"))
+                    .clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(true);
@@ -538,29 +791,58 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button("📂 Open").on_hover_text("Open a PDF (Ctrl+O)").clicked() {
+            if ui.button("📂").on_hover_text("Open a PDF (Ctrl+O)").clicked() {
                 self.open_dialog();
             }
+            let (has_doc, dirty, can_undo, can_redo) = self
+                .tabs
+                .get(self.active)
+                .map(|t| (t.info().is_some(), t.dirty, t.can_undo, t.can_redo))
+                .unwrap_or_default();
+            if ui
+                .add_enabled(has_doc && dirty, egui::Button::new("💾"))
+                .on_hover_text("Save (Ctrl+S)")
+                .clicked()
+            {
+                self.save_active(false);
+            }
+            if ui
+                .add_enabled(can_undo, egui::Button::new("↶"))
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
+                self.undo(false);
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("↷"))
+                .on_hover_text("Redo (Ctrl+Y)")
+                .clicked()
+            {
+                self.undo(true);
+            }
             ui.separator();
-            ui.selectable_value(&mut self.tool, Tool::Hand, "✋ Hand")
-                .on_hover_text("Pan by dragging (H)");
-            ui.selectable_value(&mut self.tool, Tool::SelectText, "𝐈 Select")
-                .on_hover_text("Select and copy text (S)");
+            for tool in [Tool::Hand, Tool::SelectText] {
+                ui.selectable_value(&mut self.tool, tool, tool.icon())
+                    .on_hover_text(tool.label());
+            }
+            ui.separator();
+            for tool in Tool::ANNOTATION_TOOLS {
+                ui.selectable_value(&mut self.tool, tool, tool.icon())
+                    .on_hover_text(tool.label());
+            }
+            self.tool_style(ui);
             ui.separator();
 
             let Some(tab) = self.tabs.get_mut(self.active) else { return };
             let ready = tab.info().is_some();
             ui.add_enabled_ui(ready, |ui| {
                 let n = tab.page_count();
-                if ui.button("⏮").on_hover_text("First page (Home)").clicked() {
-                    tab.goto_page(0);
-                }
                 if ui.button("◀").on_hover_text("Previous page (PgUp)").clicked() {
                     tab.step_page(false);
                 }
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut tab.page_input)
-                        .desired_width(44.0)
+                        .desired_width(40.0)
                         .align(egui::Align2::CENTER_CENTER),
                 );
                 if resp.lost_focus() {
@@ -575,9 +857,6 @@ impl App {
                 if ui.button("▶").on_hover_text("Next page (PgDn)").clicked() {
                     tab.step_page(true);
                 }
-                if ui.button("⏭").on_hover_text("Last page (End)").clicked() {
-                    tab.goto_page(usize::MAX);
-                }
                 ui.separator();
 
                 if ui.button("➖").on_hover_text("Zoom out (Ctrl+-)").clicked() {
@@ -589,7 +868,7 @@ impl App {
                 };
                 egui::ComboBox::from_id_salt("zoom")
                     .selected_text(label)
-                    .width(140.0)
+                    .width(130.0)
                     .show_ui(ui, |ui| {
                         for fit in [FitMode::Width, FitMode::Height, FitMode::Page] {
                             if ui.selectable_label(tab.viewport.fit == fit, fit.label()).clicked() {
@@ -617,17 +896,10 @@ impl App {
                         tab.set_mode(mode);
                     }
                 }
-                ui.separator();
-                if ui.button("⟲").on_hover_text("Rotate counter-clockwise (Ctrl+Shift+R)").clicked() {
-                    tab.rotate(false);
-                }
-                if ui.button("⟳").on_hover_text("Rotate clockwise (Ctrl+R)").clicked() {
-                    tab.rotate(true);
-                }
             });
 
             // Search, right-aligned.
-            let mut submit = None;
+            let mut submit = false;
             let mut clear = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -642,7 +914,7 @@ impl App {
                 ui.toggle_value(&mut s.whole_word, "W").on_hover_text("Whole words");
                 ui.toggle_value(&mut s.match_case, "Aa").on_hover_text("Match case");
                 if before != (s.match_case, s.whole_word) && s.submitted.is_some() {
-                    submit = Some(true);
+                    submit = true;
                 }
                 if s.submitted.is_some() {
                     let status = match (s.current, s.hits.len()) {
@@ -658,7 +930,7 @@ impl App {
                     egui::TextEdit::singleline(&mut s.query)
                         .id(id)
                         .hint_text("🔍 Search (Ctrl+F)")
-                        .desired_width(180.0),
+                        .desired_width(160.0),
                 );
                 if self.focus_search {
                     resp.request_focus();
@@ -667,10 +939,9 @@ impl App {
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     let shift = ui.input(|i| i.modifiers.shift);
                     if s.submitted.as_deref() == Some(s.query.trim()) {
-                        let forward = !shift;
-                        tab.search_step(forward);
+                        tab.search_step(!shift);
                     } else {
-                        submit = Some(true);
+                        submit = true;
                     }
                     resp.request_focus();
                 }
@@ -679,7 +950,7 @@ impl App {
                     resp.surrender_focus();
                 }
             });
-            if submit.is_some() {
+            if submit {
                 self.start_search();
             }
             if clear {
@@ -688,31 +959,80 @@ impl App {
         });
     }
 
+    /// Colour (and width) picker for the active annotation tool.
+    fn tool_style(&mut self, ui: &mut Ui) {
+        let tool = self.tool;
+        let style = &mut self.settings.annot_style;
+        let Some(color) = tool.color(style).copied() else { return };
+        let mut changed = false;
+        let resp = color_swatch(ui, color, false).on_hover_text("Colour for new annotations");
+        egui::Popup::from_toggle_button_response(&resp).show(|ui| {
+            ui.horizontal(|ui| {
+                for c in PALETTE {
+                    if color_swatch(ui, c, c == color).clicked()
+                        && let Some(slot) = tool.color(style)
+                    {
+                        *slot = c;
+                        changed = true;
+                    }
+                }
+            });
+            if let Some(slot) = tool.color(style) {
+                changed |= ui.color_edit_button_srgb(slot).changed();
+            }
+            match tool {
+                Tool::Ink => {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut style.ink_width, 0.5..=12.0).text("Width"))
+                        .changed();
+                }
+                Tool::Rect | Tool::Ellipse => {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut style.shape_width, 0.5..=12.0).text("Width"))
+                        .changed();
+                    let mut fill = style.shape_fill.is_some();
+                    if ui.checkbox(&mut fill, "Fill").changed() {
+                        style.shape_fill = fill.then_some(style.shape);
+                        changed = true;
+                    }
+                    if let Some(f) = &mut style.shape_fill {
+                        ui.horizontal(|ui| {
+                            ui.label("Fill colour");
+                            changed |= ui.color_edit_button_srgb(f).changed();
+                        });
+                    }
+                }
+                _ => {}
+            }
+        });
+        if changed {
+            self.settings.save();
+        }
+    }
+
     fn tab_bar(&mut self, ui: &mut Ui) {
         let mut close = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("tabbar")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (i, tab) in self.tabs.iter().enumerate() {
-                        let resp = ui
-                            .selectable_label(i == self.active, &tab.name)
-                            .on_hover_text(tab.path.display().to_string());
-                        if resp.clicked() {
-                            self.active = i;
-                        }
-                        if resp.middle_clicked() {
-                            close = Some(i);
-                        }
-                        if ui.small_button("×").on_hover_text("Close (Ctrl+W)").clicked() {
-                            close = Some(i);
-                        }
-                        ui.add_space(6.0);
+        egui::ScrollArea::horizontal().id_salt("tabbar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, tab) in self.tabs.iter().enumerate() {
+                    let resp = ui
+                        .selectable_label(i == self.active, tab.title())
+                        .on_hover_text(tab.path.display().to_string());
+                    if resp.clicked() {
+                        self.active = i;
                     }
-                });
+                    if resp.middle_clicked() {
+                        close = Some(tab.id);
+                    }
+                    if ui.small_button("×").on_hover_text("Close (Ctrl+W)").clicked() {
+                        close = Some(tab.id);
+                    }
+                    ui.add_space(6.0);
+                }
             });
-        if let Some(i) = close {
-            self.close_tab(i);
+        });
+        if let Some(id) = close {
+            self.request_close(vec![id], false);
         }
     }
 
@@ -748,7 +1068,92 @@ impl App {
             };
             self.send(req);
         } else if cancel {
-            self.close_tab(self.active);
+            self.close_tab_now(self.active);
+        }
+    }
+
+    /// "Save changes?" dialog for a pending close or quit.
+    fn unsaved_dialog(&mut self, ctx: &egui::Context) {
+        let Some(intent) = self.close_intent.clone() else { return };
+        let dirty: Vec<(DocId, String)> = intent
+            .docs
+            .iter()
+            .filter_map(|d| self.tabs.iter().find(|t| t.id == *d && t.dirty))
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+        let waiting = !intent.awaiting_save.is_empty();
+        let mut choice = None;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                if dirty.len() == 1 {
+                    ui.label(format!("Save changes to “{}” before closing?", dirty[0].1));
+                } else {
+                    ui.label("These documents have unsaved changes:");
+                    for (_, name) in &dirty {
+                        ui.label(format!("  • {name}"));
+                    }
+                }
+                ui.add_space(8.0);
+                if waiting {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Saving…");
+                    });
+                    return;
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(0);
+                    }
+                    if ui.button("Don't save").clicked() {
+                        choice = Some(1);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(2);
+                    }
+                });
+            });
+        match choice {
+            Some(0) => {
+                let mut awaiting = HashSet::new();
+                for (doc, _) in &dirty {
+                    if let Some(t) = self.tabs.iter().find(|t| t.id == *doc) {
+                        awaiting.insert(*doc);
+                        self.send(Request::Save {
+                            doc: *doc,
+                            path: t.path.clone(),
+                        });
+                    }
+                }
+                if let Some(i) = &mut self.close_intent {
+                    i.awaiting_save = awaiting;
+                }
+            }
+            Some(1) => {
+                self.close_intent = None;
+                self.finish_close(&intent.docs, intent.quit);
+            }
+            Some(2) => self.close_intent = None,
+            _ => {}
+        }
+    }
+
+    fn error_dialog(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.error.clone() else { return };
+        let mut ok = false;
+        egui::Window::new("Error")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(message);
+                ok = ui.button("OK").clicked();
+            });
+        if ok {
+            self.error = None;
         }
     }
 
@@ -759,8 +1164,9 @@ impl App {
             .show(ctx, |ui| {
                 egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
                     for (k, v) in [
-                        ("Ctrl+O", "Open file"),
+                        ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open, save, save as"),
                         ("Ctrl+W / Ctrl+Tab", "Close / switch tab"),
+                        ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
                         ("Wheel", "Scroll (horizontally in horizontal layout)"),
                         ("Shift+Wheel", "Scroll along the other axis"),
                         ("Ctrl+Wheel, Ctrl+± , Ctrl+0", "Zoom, actual size"),
@@ -769,6 +1175,8 @@ impl App {
                         ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
+                        ("U / N / D / R / E", "Highlight, note, draw, rectangle, ellipse"),
+                        ("Del", "Delete the selected annotation"),
                         ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
                         ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
                         ("F9", "Toggle sidebar"),
@@ -786,14 +1194,35 @@ impl App {
             .show(ctx, |ui| {
                 ui.heading(format!("magic-pdf {}", env!("CARGO_PKG_VERSION")));
                 ui.label("A lightweight PDF viewer built for wide screens.");
-                ui.label("Rendering by PDFium; UI by egui.");
+                ui.label("Rendering by PDFium; UI by egui. Licensed under the AGPL-3.0.");
             });
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        });
         for path in dropped {
             self.open(&path);
+        }
+    }
+
+    /// Intercepts window close when there are unsaved documents.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.allow_quit {
+            return;
+        }
+        if self.tabs.iter().any(|t| t.dirty) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.close_intent.is_none() {
+                let docs = self.tabs.iter().map(|t| t.id).collect();
+                self.request_close(docs, true);
+            }
         }
     }
 
@@ -827,7 +1256,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.cache.begin_frame();
-        self.process_responses(&ctx);
+        self.process_responses();
+        self.handle_close_request(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
 
@@ -840,12 +1270,13 @@ impl eframe::App for App {
         if let Some(tab) = self.tabs.get(self.active) {
             let status = match &tab.state {
                 LoadState::Ready(info) => format!(
-                    "Page {} of {}   ·   {}   ·   {:.0}%{}",
+                    "Page {} of {}   ·   {}   ·   {:.0}%{}{}",
                     tab.current_page + 1,
                     info.page_sizes.len(),
                     tab.mode.label(),
                     tab.zoom_percent(),
-                    info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default()
+                    info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default(),
+                    if tab.dirty { "   ·   unsaved changes" } else { "" }
                 ),
                 LoadState::Loading => "Loading…".into(),
                 LoadState::NeedsPassword { .. } => "Password required".into(),
@@ -865,12 +1296,11 @@ impl eframe::App for App {
             let tab = &mut self.tabs[self.active];
             egui::Panel::left("sidebar")
                 .resizable(true)
-                .default_size(170.0)
+                .default_size(190.0)
                 .size_range(120.0..=500.0)
                 .show(ui, |ui| sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache));
         }
 
-        let mut text_requests = Vec::new();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if self.tabs.is_empty() {
                 self.welcome(ui);
@@ -884,32 +1314,21 @@ impl eframe::App for App {
                     cache: &mut self.cache,
                     tool: self.tool,
                     night: self.settings.night_mode,
-                    text_requests: &mut text_requests,
+                    style: &self.settings.annot_style,
+                    author: &self.settings.author,
                 },
             );
         });
 
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            let doc = tab.id;
-            let mut reqs = Vec::new();
-            for page in text_requests {
-                if let std::collections::hash_map::Entry::Vacant(e) = tab.texts.entry(page) {
-                    e.insert(None);
-                    reqs.push(Request::PageText { doc, page });
-                }
-            }
-            for r in reqs {
-                self.send(r);
-            }
-        }
-
         self.password_dialog(&ctx);
+        self.unsaved_dialog(&ctx);
+        self.error_dialog(&ctx);
         self.info_windows(&ctx);
-        self.sync_renders();
+        self.flush_requests();
         self.cache.evict();
 
         let title = match self.tabs.get(self.active) {
-            Some(t) => format!("{} — magic-pdf", t.name),
+            Some(t) => format!("{} — magic-pdf", t.title()),
             None => "magic-pdf".into(),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));

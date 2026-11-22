@@ -4,6 +4,7 @@ use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind,
 
 use crate::document::DocTab;
 use crate::engine::{OutlineItem, RenderKey};
+use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
 use crate::view::cache::{TextureCache, width_bucket};
 use crate::view::layout::rotated_size;
 
@@ -12,6 +13,7 @@ pub enum SidebarTab {
     #[default]
     Pages,
     Outline,
+    Comments,
     Search,
 }
 
@@ -21,6 +23,9 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, sidebar: &mut SidebarTab, cache: &mut
     ui.horizontal(|ui| {
         ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
         ui.selectable_value(sidebar, SidebarTab::Outline, "Outline");
+        let n: usize = tab.annots.values().map(Vec::len).sum();
+        let label = if n == 0 { "Comments".to_string() } else { format!("Comments ({n})") };
+        ui.selectable_value(sidebar, SidebarTab::Comments, label);
         let label = if tab.search.hits.is_empty() {
             "Search".to_string()
         } else {
@@ -32,6 +37,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, sidebar: &mut SidebarTab, cache: &mut
     match sidebar {
         SidebarTab::Pages => thumbnails(ui, tab, cache),
         SidebarTab::Outline => outline(ui, tab),
+        SidebarTab::Comments => comments(ui, tab),
         SidebarTab::Search => search_results(ui, tab),
     }
 }
@@ -79,14 +85,16 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache) {
             let painter = ui.painter();
             painter.rect_filled(thumb, CornerRadius::ZERO, Color32::WHITE);
             let want = width_bucket(thumb.width() * ppp, s.y / s.x.max(1.0));
+            let version = tab.page_version(page);
             let key = RenderKey {
                 doc: tab.id,
                 page,
                 width_px: want,
                 rotation: tab.rotation,
+                version,
             };
             tab.wanted.push((key, 10.0 + (page as f32 - tab.current_page as f32).abs() / 1000.0));
-            if let Some(tex) = cache.best(tab.id, page, tab.rotation, want) {
+            if let Some((tex, _)) = cache.best(tab.id, page, tab.rotation, want, version) {
                 painter.image(
                     tex.id(),
                     thumb,
@@ -163,6 +171,71 @@ fn outline_item(ui: &mut Ui, item: &OutlineItem, goto: &mut Option<usize>, index
                     outline_item(ui, child, goto, i, depth + 1);
                 }
             });
+    }
+}
+
+fn comments(ui: &mut Ui, tab: &mut DocTab) {
+    let mut pages: Vec<usize> = tab.annots.iter().filter(|(_, v)| !v.is_empty()).map(|(p, _)| *p).collect();
+    pages.sort_unstable();
+    if pages.is_empty() {
+        if tab.annots_scanned {
+            ui.weak("No annotations yet. Pick a tool from the toolbar to add one.");
+        } else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Looking for annotations…");
+            });
+        }
+        return;
+    }
+    let mut clicked = None;
+    egui::ScrollArea::vertical()
+        .id_salt(("comments", tab.id))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for page in pages {
+                ui.add_space(4.0);
+                ui.weak(format!("Page {}", page + 1));
+                for a in &tab.annots[&page] {
+                    let selected = tab
+                        .selected_annot
+                        .as_ref()
+                        .is_some_and(|s| s.page == page && s.index == a.index);
+                    let frame = egui::Frame::group(ui.style()).fill(if selected {
+                        ui.visuals().selection.bg_fill.gamma_multiply(0.4)
+                    } else {
+                        Color32::TRANSPARENT
+                    });
+                    let resp = frame
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                                ui.painter().rect_filled(
+                                    r,
+                                    CornerRadius::same(2),
+                                    a.color.map(rgb).unwrap_or(Color32::GRAY),
+                                );
+                                ui.strong(a.kind.label());
+                                ui.weak(format_pdf_date(&a.modified));
+                            });
+                            if !a.author.is_empty() {
+                                ui.weak(&a.author);
+                            }
+                            if !a.contents.is_empty() {
+                                ui.label(&a.contents);
+                            }
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if resp.clicked() {
+                        clicked = Some((page, a.index));
+                    }
+                }
+            }
+        });
+    if let Some((page, index)) = clicked {
+        focus_annot(tab, page, index, false);
     }
 }
 

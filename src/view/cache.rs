@@ -64,7 +64,7 @@ impl TextureCache {
             }
         }
         let image = ColorImage::from_rgba_unmultiplied(size, &rgba);
-        let name = format!("page-{}-{}-{}", key.doc, key.page, key.width_px);
+        let name = format!("page-{}-{}-{}-v{}", key.doc, key.page, key.width_px, key.version);
         let texture = ctx.load_texture(name, image, TextureOptions::LINEAR);
         let bytes = size[0] * size[1] * 4;
         if let Some(old) = self.entries.insert(
@@ -80,31 +80,42 @@ impl TextureCache {
         self.total_bytes += bytes;
     }
 
-    /// Best available texture for a page: the smallest one at least `want_width` wide,
-    /// otherwise the largest one available (shown scaled until the crisp one arrives).
-    pub fn best(&mut self, doc: DocId, page: usize, rotation: Rotation, want_width: u32) -> Option<TextureHandle> {
-        let mut best: Option<(&RenderKey, u32)> = None;
+    /// Best available texture for a page: prefers the current content `version`, then
+    /// the smallest render at least `want_width` wide, otherwise the largest available
+    /// (shown scaled until the crisp one arrives). Stale versions are used as
+    /// placeholders to avoid flicker after edits.
+    pub fn best(
+        &mut self,
+        doc: DocId,
+        page: usize,
+        rotation: Rotation,
+        want_width: u32,
+        version: u32,
+    ) -> Option<(TextureHandle, RenderKey)> {
+        let mut best: Option<RenderKey> = None;
         for key in self.entries.keys() {
             if key.doc != doc || key.page != page || key.rotation != rotation {
                 continue;
             }
-            let w = key.width_px;
             best = match best {
-                None => Some((key, w)),
-                Some((bk, bw)) => {
-                    let better = if bw >= want_width {
-                        w >= want_width && w < bw
+                None => Some(*key),
+                Some(b) => {
+                    let (kv, bv) = (key.version == version, b.version == version);
+                    let better = if kv != bv {
+                        kv
+                    } else if b.width_px >= want_width {
+                        key.width_px >= want_width && key.width_px < b.width_px
                     } else {
-                        w > bw
+                        key.width_px > b.width_px
                     };
-                    if better { Some((key, w)) } else { Some((bk, bw)) }
+                    Some(if better { *key } else { b })
                 }
             };
         }
-        let key = *best?.0;
+        let key = best?;
         let entry = self.entries.get_mut(&key)?;
         entry.last_used = self.frame;
-        Some(entry.texture.clone())
+        Some((entry.texture.clone(), key))
     }
 
     pub fn touch(&mut self, key: &RenderKey) {

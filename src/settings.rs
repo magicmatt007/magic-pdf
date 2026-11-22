@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::Rotation;
+use crate::engine::{Rgb, Rotation};
 use crate::view::layout::LayoutMode;
 use crate::view::viewport::FitMode;
 
@@ -29,6 +29,37 @@ struct StoredFileState {
     last_used: u64,
 }
 
+/// Default colours and widths for new annotations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnnotStyle {
+    pub highlight: Rgb,
+    pub underline: Rgb,
+    pub strikeout: Rgb,
+    pub note: Rgb,
+    pub ink: Rgb,
+    pub ink_width: f32,
+    pub shape: Rgb,
+    pub shape_width: f32,
+    pub shape_fill: Option<Rgb>,
+}
+
+impl Default for AnnotStyle {
+    fn default() -> Self {
+        Self {
+            highlight: [255, 230, 0],
+            underline: [0, 110, 230],
+            strikeout: [220, 30, 30],
+            note: [255, 210, 0],
+            ink: [220, 30, 30],
+            ink_width: 2.0,
+            shape: [220, 30, 30],
+            shape_width: 2.0,
+            shape_fill: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -37,6 +68,9 @@ pub struct Settings {
     pub night_mode: bool,
     pub dark_ui: bool,
     pub recent: Vec<PathBuf>,
+    /// Stored as the author (/T) of new annotations.
+    pub author: String,
+    pub annot_style: AnnotStyle,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -48,6 +82,8 @@ impl Default for Settings {
             night_mode: false,
             dark_ui: true,
             recent: Vec::new(),
+            author: default_author(),
+            annot_style: AnnotStyle::default(),
             files: HashMap::new(),
         }
     }
@@ -55,6 +91,12 @@ impl Default for Settings {
 
 fn config_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "magic-pdf").map(|d| d.config_dir().join("settings.toml"))
+}
+
+fn default_author() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
 }
 
 fn now() -> u64 {

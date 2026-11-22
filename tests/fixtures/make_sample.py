@@ -45,8 +45,9 @@ def build():
             f"<< /Type /Annot /Subtype /Link /Rect [160 74 290 94] /Border [0 0 0] "
             f"/A << /S /URI /URI (https://example.com/) >> >>]"
         ).encode()
+        rotate = " /Rotate 90" if i == 5 else ""  # page 6 tests intrinsic page rotation
         objs[page_num(i)] = (
-            f"<< /Type /Page /Parent {pages_root} 0 R /MediaBox [0 0 {w} {h}] "
+            f"<< /Type /Page /Parent {pages_root} 0 R /MediaBox [0 0 {w} {h}]{rotate} "
             f"/Resources << /Font << /F1 {font} 0 R >> >> /Contents {content_num(i)} 0 R "
             f"/Annots {annot_num(i)} 0 R >>"
         ).encode()

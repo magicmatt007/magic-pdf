@@ -4,7 +4,7 @@
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{PdfBox, Rotation};
+use crate::engine::{PageGeom, PdfBox, Rotation};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutMode {
@@ -200,14 +200,6 @@ pub fn compute(page_sizes: &[(f32, f32)], p: &LayoutParams) -> Layout {
     Layout { pages, rows, size }
 }
 
-/// Converts a rectangle in PDF page space into page-local view space (points, origin at
-/// the top-left of the rotated page).
-pub fn pdf_box_to_local(b: &PdfBox, page_size: (f32, f32), rotation: Rotation) -> Rect {
-    let a = pdf_point_to_local(pos2(b.left, b.top), page_size, rotation);
-    let c = pdf_point_to_local(pos2(b.right, b.bottom), page_size, rotation);
-    Rect::from_two_pos(a, c)
-}
-
 /// PDF page space (origin bottom-left) -> rotated page-local space (origin top-left).
 pub fn pdf_point_to_local(p: Pos2, (w, h): (f32, f32), rotation: Rotation) -> Pos2 {
     let (x, y) = (p.x, h - p.y);
@@ -228,6 +220,26 @@ pub fn local_point_to_pdf(v: Pos2, (w, h): (f32, f32), rotation: Rotation) -> Po
         Rotation::R270 => (w - v.y, v.x),
     };
     pos2(x, h - y)
+}
+
+/// PDF page space -> page-local view space, honouring the page's crop box origin, its
+/// own /Rotate and the view rotation.
+pub fn geom_pdf_to_local(p: Pos2, geom: &PageGeom, view: Rotation) -> Pos2 {
+    let q = pos2(p.x - geom.origin.0, p.y - geom.origin.1);
+    pdf_point_to_local(q, geom.size, geom.rotation.then(view))
+}
+
+/// Inverse of [`geom_pdf_to_local`].
+pub fn geom_local_to_pdf(v: Pos2, geom: &PageGeom, view: Rotation) -> Pos2 {
+    let q = local_point_to_pdf(v, geom.size, geom.rotation.then(view));
+    pos2(q.x + geom.origin.0, q.y + geom.origin.1)
+}
+
+pub fn geom_box_to_local(b: &PdfBox, geom: &PageGeom, view: Rotation) -> Rect {
+    Rect::from_two_pos(
+        geom_pdf_to_local(pos2(b.left, b.top), geom, view),
+        geom_pdf_to_local(pos2(b.right, b.bottom), geom, view),
+    )
 }
 
 #[cfg(test)]
@@ -325,6 +337,25 @@ mod tests {
         assert_eq!(pdf_point_to_local(pos2(0.0, 842.0), A4, Rotation::R0), pos2(0.0, 0.0));
         // Rotated 90° clockwise, the top-left corner ends up top-right.
         assert_eq!(pdf_point_to_local(pos2(0.0, 842.0), A4, Rotation::R90), pos2(842.0, 0.0));
+    }
+
+    #[test]
+    fn geom_transform_handles_origin_and_page_rotation() {
+        // A page with a crop box starting at (10, 20) and /Rotate 90.
+        let geom = PageGeom {
+            size: (595.0, 842.0),
+            origin: (10.0, 20.0),
+            rotation: Rotation::R90,
+        };
+        // Top-left of the unrotated crop box ends up at the top-right of the display.
+        let p = geom_pdf_to_local(pos2(10.0, 862.0), &geom, Rotation::R0);
+        assert_eq!(p, pos2(842.0, 0.0));
+        // Page rotation 90 + view rotation 270 = upright again.
+        let p = geom_pdf_to_local(pos2(10.0, 862.0), &geom, Rotation::R270);
+        assert_eq!(p, pos2(0.0, 0.0));
+        let back = geom_local_to_pdf(pos2(100.0, 200.0), &geom, Rotation::R180);
+        let again = geom_pdf_to_local(back, &geom, Rotation::R180);
+        assert!((again - pos2(100.0, 200.0)).length() < 1e-3);
     }
 
     #[test]
