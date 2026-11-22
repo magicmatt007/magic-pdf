@@ -246,6 +246,9 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         )
     });
     let hovered = response.hovered() || response.contains_pointer();
+    if !ui.input(|i| i.pointer.primary_down()) {
+        tab.selecting = false;
+    }
 
     // Zoom (Ctrl+wheel, pinch).
     if hovered && zoom_delta != 1.0 {
@@ -443,6 +446,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
                 anchor: i,
                 head: i,
             });
+            tab.selecting = true;
             tab.selected_annot = None;
         }
     } else if response.dragged_by(egui::PointerButton::Primary) && primary_down {
@@ -928,7 +932,9 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
 
 /// Small floating toolbar next to a text selection made with the select tool.
 fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>) {
-    if cx.tool != Tool::SelectText || ui.input(|i| i.pointer.primary_down()) {
+    // Hidden while the user is still dragging out the selection. (Not merely while the
+    // mouse button is down: pressing one of the toolbar's own buttons must work.)
+    if cx.tool != Tool::SelectText || tab.selecting {
         return;
     }
     let Some((page, lines)) = tab.selection_line_boxes() else { return };
@@ -951,7 +957,10 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
                         (AnnotKind::Underline, Tool::Underline),
                         (AnnotKind::StrikeOut, Tool::StrikeOut),
                     ] {
-                        if ui.button(tool.icon()).on_hover_text(kind.label()).clicked() {
+                        let resp = ui.button(tool.icon()).on_hover_text(kind.label());
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(Id::unique(("test_button", kind.label())), resp.rect));
+                        if resp.clicked() {
                             action = Some(Some(kind));
                         }
                     }
@@ -1116,5 +1125,116 @@ pub fn focus_annot(tab: &mut DocTab, page: usize, index: usize, edit: bool) {
     }
     if let Some(rect) = tab.annot(page, index).map(|a| a.rect) {
         tab.reveal(page, rect);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{DocInfo, PageGeom, PageText, Rotation, TextChar};
+    use std::path::PathBuf;
+
+    /// A one-page document with the word "test" selected, shown with the select tool.
+    fn tab_with_selection() -> DocTab {
+        let mut tab = DocTab::new(1, PathBuf::from("t.pdf"), LayoutMode::SinglePage, None);
+        tab.state = LoadState::Ready(DocInfo {
+            page_sizes: vec![(595.0, 842.0)],
+            outline: Vec::new(),
+            title: None,
+        });
+        let chars = "test"
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| TextChar {
+                ch,
+                rect: Some(PdfBox {
+                    left: 100.0 + i as f32 * 10.0,
+                    bottom: 700.0,
+                    right: 110.0 + i as f32 * 10.0,
+                    top: 715.0,
+                }),
+            })
+            .collect();
+        tab.texts.insert(0, Some(PageText { chars, links: Vec::new() }));
+        tab.geoms.insert(
+            0,
+            PageGeom {
+                size: (595.0, 842.0),
+                origin: (0.0, 0.0),
+                rotation: Rotation::R0,
+            },
+        );
+        tab.selection = Some(Selection {
+            page: 0,
+            anchor: 0,
+            head: 3,
+        });
+        tab
+    }
+
+    fn frame(ctx: &egui::Context, tab: &mut DocTab, cache: &mut TextureCache, events: Vec<egui::Event>) {
+        let style = AnnotStyle::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::no_frame().show(ui, |ui| {
+                show(
+                    ui,
+                    tab,
+                    ViewContext {
+                        cache: &mut *cache,
+                        tool: Tool::SelectText,
+                        night: false,
+                        style: &style,
+                        author: "me",
+                    },
+                );
+            });
+        });
+        out.textures_delta.clear();
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn selection_toolbar_highlight_button_creates_annotation() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame(&ctx, &mut tab, &mut cache, Vec::new());
+        }
+        let rect: Rect = ctx
+            .data(|d| d.get_temp(Id::unique(("test_button", "Highlight"))))
+            .expect("selection toolbar is shown");
+        let at = rect.center();
+        tab.outbox.clear();
+        frame(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, &mut tab, &mut cache, vec![button(at, true)]);
+        frame(&ctx, &mut tab, &mut cache, vec![button(at, false)]);
+        let created = tab.outbox.iter().any(|r| {
+            matches!(
+                r,
+                Request::AddAnnot {
+                    annot: NewAnnot {
+                        kind: AnnotKind::Highlight,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        assert!(created, "clicking Highlight did not create an annotation");
+        assert!(tab.selection.is_none(), "selection is consumed by the highlight");
     }
 }

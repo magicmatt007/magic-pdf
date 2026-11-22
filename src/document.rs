@@ -99,6 +99,8 @@ pub struct DocTab {
     pub search: SearchState,
     pub texts: HashMap<usize, Option<PageText>>,
     pub selection: Option<Selection>,
+    /// A text-selection drag is in progress.
+    pub selecting: bool,
 
     /// Page geometry, known once text or annotations of a page were loaded.
     pub geoms: HashMap<usize, PageGeom>,
@@ -157,6 +159,7 @@ impl DocTab {
             search: SearchState::default(),
             texts: HashMap::new(),
             selection: None,
+            selecting: false,
             geoms: HashMap::new(),
             annots: HashMap::new(),
             annots_scanned: false,
