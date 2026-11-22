@@ -14,30 +14,53 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 S = 8  # supersampling factor for smooth edges
 
 
+GRADIENT = ((0xF9, 0x73, 0x16), (0xDC, 0x26, 0x26))  # orange -> red
+SPARKLE = (0xFA, 0xCC, 0x15)
+
+
+def sparkle(cx, cy, r, n=48):
+    """Four-point star whose edges are the SVG's quadratic curves: sqrt|u|+sqrt|v|=1."""
+    pts = []
+    for qx, qy in ((1, -1), (1, 1), (-1, 1), (-1, -1)):
+        for i in range(n):
+            t = i / n
+            a, b = t * t, (1 - t) ** 2  # from the vertical tip to the horizontal tip
+            if qx * qy > 0:
+                a, b = b, a
+            pts.append((cx + qx * r * a, cy + qy * r * b))
+    return pts
+
+
 def render(size: int) -> Image.Image:
     big = size * S
-    k = big / 128.0  # the design uses a 128x128 grid
+    k = big / 512.0  # the design uses a 512x512 grid (magic-* icon family)
 
     def r(*v):
         return [round(x * k) for x in v]
 
+    # Diagonal gradient, clipped to the rounded tile.
+    grad = Image.new("RGBA", (big, big))
+    gp = grad.load()
+    (r0, g0, b0), (r1, g1, b1) = GRADIENT
+    for y in range(big):
+        for x in range(big):
+            t = (x + y) / (2 * big)
+            gp[x, y] = (round(r0 + (r1 - r0) * t), round(g0 + (g1 - g0) * t), round(b0 + (b1 - b0) * t), 255)
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(r(0, 0, 512, 512), radius=round(112 * k), fill=255)
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle(r(4, 4, 124, 124), radius=round(24 * k), fill="#1f4e9c")
+    img.paste(grad, (0, 0), mask)
+
+    layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
     # Three pages side by side: the horizontal layout.
-    for x, alpha in ((16, 255), (50, 255), (84, 191)):
-        d.rounded_rectangle(r(x, 34, x + 28, 74), radius=round(3 * k), fill=(255, 255, 255, alpha))
-    for x in (21, 55):
-        for y, w in ((42, 18), (49, 14), (56, 18)):
-            d.rounded_rectangle(r(x, y, x + w, y + 3), radius=round(1.5 * k), fill="#9db4dc")
-    # Double arrow underneath.
-    yellow, width = "#ffd34d", round(6 * k)
-    d.line(r(30, 94, 98, 94), fill=yellow, width=width)
-    d.line(r(88, 86, 98, 94, 88, 102), fill=yellow, width=width, joint="curve")
-    d.line(r(40, 86, 30, 94, 40, 102), fill=yellow, width=width, joint="curve")
-    for cx, cy in ((30, 94), (98, 94), (88, 86), (88, 102), (40, 86), (40, 102)):
-        rad = 3 * k
-        d.ellipse([cx * k - rad, cy * k - rad, cx * k + rad, cy * k + rad], fill=yellow)
+    for x, alpha in ((64, 255), (200, 255), (336, 179)):
+        d.rounded_rectangle(r(x, 196, x + 112, 352), radius=round(12 * k), fill=(255, 255, 255, alpha))
+    for x in (84, 220):
+        for y, w in ((228, 72), (256, 56), (284, 72)):
+            d.rounded_rectangle(r(x, y, x + w, y + 12), radius=round(6 * k), fill="#fdba74")
+    d.polygon([(x * k, y * k) for x, y in sparkle(404, 112, 66)], fill=SPARKLE)
+    img = Image.alpha_composite(img, layer)
     return img.resize((size, size), Image.LANCZOS)
 
 
