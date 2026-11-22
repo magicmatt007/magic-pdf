@@ -308,7 +308,7 @@ impl App {
                     });
                 }
                 ui.separator();
-                let can_install = cfg!(any(windows, target_os = "macos")) && release.installer().is_some();
+                let can_install = crate::update::can_install() && release.installer().is_some();
                 match &self.update {
                     UpdateUi::Downloading(_) => {
                         ui.horizontal(|ui| {

@@ -1,6 +1,6 @@
-# Builds the Windows installer, a portable zip and the macOS disk image. A pushed
-# version tag (v1.2.3) publishes them as a GitHub release; a manual run ("Run
-# workflow") only builds them and keeps them as workflow artifacts for testing.
+# Builds the Windows installer, a portable zip, the macOS disk image and the Linux
+# AppImage. A pushed version tag (v1.2.3) publishes them as a GitHub release; a manual
+# run ("Run workflow") only builds them and keeps them as workflow artifacts for testing.
 name: Release
 
 on:
@@ -111,9 +111,58 @@ jobs:
           name: magic-pdf-macos
           path: dist/*.dmg
 
+  linux:
+    # The oldest supported runner: the AppImage uses the host's glibc, so building
+    # against an old one keeps it running on older distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev desktop-file-utils xvfb xauth libgl1-mesa-dri
+
+      - name: Determine version
+        run: |
+          cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.ref_type }}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$cargo_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"; exit 1
+          fi
+          echo "VERSION=$cargo_version" >> "$GITHUB_ENV"
+
+      - name: Fetch PDFium
+        run: ./scripts/fetch-pdfium.sh
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build AppImage
+        run: packaging/linux/build-appimage.sh
+
+      - name: Smoke test the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          out="$RUNNER_TEMP/selftest.txt"
+          MAGIC_PDF_SELFTEST="$out" timeout 120 xvfb-run -a \
+            "dist/magic-pdf-$VERSION-x86_64.AppImage" --new-window "$PWD/tests/fixtures/sample.pdf"
+          cat "$out"
+          grep -q "40 pages" "$out"
+
+      - name: Keep the build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magic-pdf-linux
+          path: dist/*.AppImage
+
   publish:
     if: github.ref_type == 'tag'
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -150,8 +199,23 @@ jobs:
 
           To make it your PDF viewer: select a PDF in Finder, **File → Get Info**, choose magic-pdf
           under **Open with**, then **Change All…**.
+
+          ## Linux (x86_64)
+
+          Download **magic-pdf-$version-x86_64.AppImage**, make it executable and run it:
+
+          \`\`\`
+          chmod +x magic-pdf-$version-x86_64.AppImage
+          ./magic-pdf-$version-x86_64.AppImage
+          \`\`\`
+
+          It runs on most distributions from 2022 on (glibc 2.35 or newer). If it complains
+          about FUSE, install \`libfuse2\` (Ubuntu 24.04: \`libfuse2t64\`) or start it with
+          \`APPIMAGE_EXTRACT_AND_RUN=1\`. Updates are installed from within the app, which
+          replaces the AppImage file in place. To add it to the application menu, use a tool
+          such as Gear Lever or AppImageLauncher.
           EOF
           sed -i 's/^          //' notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            dist/*.exe dist/*.zip dist/*.dmg \
+            dist/*.exe dist/*.zip dist/*.dmg dist/*.AppImage \
             --title "magic-pdf $version" --notes-file notes.md

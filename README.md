@@ -38,8 +38,8 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   move it there (unsaved changes included; on Wayland use the tab's right-click
   menu, as Wayland does not report window positions)
 - Update notices: checks GitHub at most once a day (Help menu to turn off); on
-  Windows, *Install* downloads the new installer, verifies its SHA-256 checksum
-  and updates in place
+  Windows, macOS and in the Linux AppImage, *Install* downloads the new version,
+  verifies its SHA-256 checksum and updates in place (macOS: opens the disk image)
 
 Document JavaScript is never executed.
 
@@ -61,11 +61,22 @@ your PDF viewer, select a PDF in Finder, *File → Get Info*, pick magic-pdf und
 with* and click *Change All…*. To build the app yourself on a Mac:
 `packaging/macos/build-app.sh` (writes `dist/magic-pdf.app` and the `.dmg`).
 
-**Linux:** build from source and install for your user (see below):
+**Linux** (x86_64, glibc 2.35 or newer, e.g. Ubuntu 22.04, Debian 12, Fedora 36 and
+later): download `magic-pdf-<version>-x86_64.AppImage` from the same release, make it
+executable and run it:
 
 ```bash
-packaging/linux/install.sh
+chmod +x magic-pdf-*-x86_64.AppImage
+./magic-pdf-*-x86_64.AppImage
 ```
+
+Keep it somewhere permanent (for example `~/Applications`), since updates from within
+the app replace that file. If it fails with a FUSE error, install `libfuse2` (Ubuntu
+24.04: `libfuse2t64`) or run it with `APPIMAGE_EXTRACT_AND_RUN=1`. For an application
+menu entry and "Open with" for PDF files, let a tool such as Gear Lever or
+AppImageLauncher integrate it, or build from source and install for your user (see
+below). To build the AppImage yourself: `packaging/linux/build-appimage.sh` (writes
+`dist/magic-pdf-<version>-x86_64.AppImage`).
 
 ## Building
 
@@ -85,7 +96,9 @@ packaging/linux/install.sh      # builds and installs into ~/.local
 packaging/linux/uninstall.sh    # removes it again
 ```
 
-This adds magic-pdf to the application menu and to "Open with" for PDF files. Use
+This adds magic-pdf to the application menu and to "Open with" for PDF files. Builds
+from source are updated with `git pull` and the install script again (the update notice
+links to the release page). Use
 `sudo PREFIX=/usr/local packaging/linux/install.sh` for a system-wide install.
 
 ## Releasing
@@ -93,8 +106,8 @@ This adds magic-pdf to the application menu and to "Open with" for PDF files. Us
 1. Set the new `version` in `Cargo.toml` and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
-The *Release* workflow then builds the Windows installer, the portable zip and the macOS
-disk image and publishes them as a GitHub release. Running the workflow by hand (Actions → Release → Run
+The *Release* workflow then builds the Windows installer, the portable zip, the macOS
+disk image and the Linux AppImage and publishes them as a GitHub release. Running the workflow by hand (Actions → Release → Run
 workflow) builds the same files as a downloadable artifact without publishing anything.
 CI runs clippy and the tests on Linux, Windows and macOS for every push.
 
