@@ -75,6 +75,10 @@ impl Default for AnnotStyle {
 pub struct Settings {
     pub default_mode: LayoutMode,
     pub show_sidebar: bool,
+    /// Width of the sidebar in points.
+    pub sidebar_width: f32,
+    /// Preferred thumbnail width in points (several columns when the sidebar is wide).
+    pub thumb_width: f32,
     pub night_mode: bool,
     pub dark_ui: bool,
     pub recent: Vec<PathBuf>,
@@ -97,6 +101,8 @@ impl Default for Settings {
         Self {
             default_mode: LayoutMode::Horizontal,
             show_sidebar: true,
+            sidebar_width: 220.0,
+            thumb_width: 150.0,
             night_mode: false,
             dark_ui: true,
             recent: Vec::new(),

@@ -2362,11 +2362,16 @@ impl eframe::App for App {
         let mut page_actions = Vec::new();
         if self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
             let tab = &mut self.tabs[self.active];
-            egui::Panel::left("sidebar")
+            let thumb_width = &mut self.settings.thumb_width;
+            let panel = egui::Panel::left("sidebar")
                 .resizable(true)
-                .default_size(190.0)
-                .size_range(120.0..=500.0)
-                .show(ui, |ui| sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions));
+                .default_size(self.settings.sidebar_width)
+                .size_range(sidebar::MIN_WIDTH..=900.0)
+                .show(ui, |ui| {
+                    sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width)
+                });
+            // Remembered for the next start (dragging the edge resizes it).
+            self.settings.sidebar_width = panel.response.rect.width();
         }
 
         let recent_before = self.settings.recent_colors.clone();

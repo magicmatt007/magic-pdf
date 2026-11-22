@@ -20,7 +20,19 @@ pub enum SidebarTab {
     Search,
 }
 
-const THUMB_WIDTH: f32 = 130.0;
+/// Narrowest sidebar.
+pub const MIN_WIDTH: f32 = 120.0;
+/// Range of the preferred thumbnail width.
+const THUMB_MIN: f32 = 60.0;
+const THUMB_MAX: f32 = 600.0;
+/// Horizontal gap between thumbnail columns.
+const COL_GAP: f32 = 6.0;
+/// Margin around a thumbnail inside its cell (room for the selection background).
+const CELL_MARGIN: f32 = 6.0;
+/// Height of the page number under a thumbnail.
+const LABEL_H: f32 = 24.0;
+/// Tallest page shape a thumbnail gets (height / width).
+const MAX_ASPECT: f32 = 2.0;
 
 pub fn show(
     ui: &mut Ui,
@@ -28,6 +40,7 @@ pub fn show(
     sidebar: &mut SidebarTab,
     cache: &mut TextureCache,
     actions: &mut Vec<PageAction>,
+    thumb_width: &mut f32,
 ) {
     ui.horizontal(|ui| {
         ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
@@ -44,7 +57,7 @@ pub fn show(
     });
     ui.separator();
     match sidebar {
-        SidebarTab::Pages => thumbnails(ui, tab, cache, actions),
+        SidebarTab::Pages => thumbnails(ui, tab, cache, actions, thumb_width),
         SidebarTab::Outline => outline(ui, tab),
         SidebarTab::Comments => comments(ui, tab),
         SidebarTab::Search => search_results(ui, tab),
@@ -101,7 +114,57 @@ struct ThumbDrag {
     pages: Vec<usize>,
 }
 
-fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: &mut Vec<PageAction>) {
+/// Grid geometry of the thumbnails: columns, cell width and the top of every row
+/// (content coordinates, one extra entry for the total height).
+struct Grid {
+    cols: usize,
+    cell_w: f32,
+    row_tops: Vec<f32>,
+}
+
+impl Grid {
+    fn new(sizes: &[egui::Vec2], width: f32, thumb_width: f32) -> Self {
+        let cols = (((width + COL_GAP) / (thumb_width + COL_GAP)).floor() as usize).max(1);
+        let cell_w = ((width - COL_GAP * (cols - 1) as f32) / cols as f32).max(1.0);
+        let box_w = Self::box_w(cell_w);
+        let mut row_tops = vec![0.0];
+        let mut y = 0.0;
+        for row in sizes.chunks(cols) {
+            // Each row is as tall as its tallest page, so landscape pages leave no gaps.
+            let h = row.iter().map(|s| Self::fit(*s, box_w).y).fold(0.0, f32::max);
+            y += h + 2.0 * CELL_MARGIN + LABEL_H;
+            row_tops.push(y);
+        }
+        Self { cols, cell_w, row_tops }
+    }
+
+    fn box_w(cell_w: f32) -> f32 {
+        (cell_w - 2.0 * CELL_MARGIN).max(1.0)
+    }
+
+    /// Size of a page's thumbnail in a cell of the grid.
+    fn fit(page: egui::Vec2, box_w: f32) -> egui::Vec2 {
+        page * (box_w / page.x.max(1.0)).min(box_w * MAX_ASPECT / page.y.max(1.0))
+    }
+
+    fn cell(&self, origin: egui::Pos2, page: usize) -> Rect {
+        let (row, col) = (page / self.cols, page % self.cols);
+        let min = origin + vec2(col as f32 * (self.cell_w + COL_GAP), self.row_tops[row]);
+        Rect::from_min_size(min, vec2(self.cell_w, self.row_tops[row + 1] - self.row_tops[row]))
+    }
+
+    fn rows(&self) -> usize {
+        self.row_tops.len() - 1
+    }
+}
+
+fn thumbnails(
+    ui: &mut Ui,
+    tab: &mut DocTab,
+    cache: &mut TextureCache,
+    actions: &mut Vec<PageAction>,
+    thumb_width: &mut f32,
+) {
     let Some(info) = tab.info() else { return };
     let count = info.page_sizes.len();
     let sizes: Vec<_> = info
@@ -109,14 +172,26 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: 
         .iter()
         .map(|&s| rotated_size(s, tab.rotation))
         .collect();
-    let max_aspect = sizes
-        .iter()
-        .map(|s| s.y / s.x.max(1.0))
-        .fold(0.5_f32, f32::max)
-        .min(2.0);
-    let thumb_h = THUMB_WIDTH * max_aspect;
-    let row_h = thumb_h + 22.0;
-    let spacing = ui.spacing().item_spacing.y;
+
+    // Thumbnail size: slider, or Ctrl+wheel / pinch over the thumbnails.
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Size").small().weak());
+        ui.spacing_mut().slider_width = (ui.available_width() - 8.0).clamp(40.0, 160.0);
+        ui.add(egui::Slider::new(thumb_width, THUMB_MIN..=THUMB_MAX).logarithmic(true).show_value(false))
+            .on_hover_text(format!("Thumbnail size ({} + mouse wheel over the thumbnails)", kb("Ctrl")));
+    });
+    let list_rect = ui.available_rect_before_wrap();
+    let zoom = ui.input(|i| {
+        let over = i.pointer.hover_pos().is_some_and(|p| list_rect.contains(p));
+        if over { i.zoom_delta() } else { 1.0 }
+    });
+    if zoom != 1.0 {
+        *thumb_width = (*thumb_width * zoom).clamp(THUMB_MIN, THUMB_MAX);
+    }
+
+    let scrollbar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_outer_margin;
+    let grid = Grid::new(&sizes, (ui.available_width() - scrollbar).max(1.0), *thumb_width);
+    let box_w = Grid::box_w(grid.cell_w);
     let ppp = ui.ctx().pixels_per_point();
     let drag_id = egui::Id::unique(("thumb_drag", tab.id));
     let mut drag: Option<ThumbDrag> = ui.ctx().data(|d| d.get_temp(drag_id));
@@ -132,39 +207,48 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: 
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("thumbs", tab.id))
         .auto_shrink([false, false]);
-    if let Some(page) = tab.thumbs_follow_page.take() {
+    if let Some(page) = tab.thumbs_follow_page.take()
+        && page < count
+    {
         let top = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::unique(("thumb_top", tab.id))));
         let visible_h = ui.available_height();
-        let y = page as f32 * (row_h + spacing);
+        let row = page / grid.cols;
+        let (y, row_h) = (grid.row_tops[row], grid.row_tops[row + 1] - grid.row_tops[row]);
         let out_of_view = top.is_none_or(|t| y < t || y + row_h > t + visible_h);
         if out_of_view {
             area = area.vertical_scroll_offset((y - visible_h / 2.0 + row_h / 2.0).max(0.0));
         }
     }
-    let mut rows_drawn: Vec<(usize, Rect)> = Vec::new();
+    let accent = ui.visuals().selection.bg_fill;
+    // Stronger shade of the accent for the current page's border and badge.
+    let strong = ui.visuals().selection.stroke.color;
+    let mut cells: Vec<(usize, Rect)> = Vec::new();
     let mut clip = Rect::NOTHING;
-    let output = area.show_rows(ui, row_h, sizes.len(), |ui, rows| {
+    let output = area.show_viewport(ui, |ui, viewport| {
         clip = ui.clip_rect();
-        for page in rows {
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
-            rows_drawn.push((page, rect));
-            let s = sizes[page];
-            let scale = (THUMB_WIDTH / s.x.max(1.0)).min(thumb_h / s.y.max(1.0));
-            let thumb_size = s * scale;
+        let total = *grid.row_tops.last().unwrap_or(&0.0);
+        let (content, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
+        let origin = content.min;
+        let first_row = grid.row_tops.partition_point(|&t| t <= viewport.min.y).saturating_sub(1);
+        let last_row = grid.row_tops.partition_point(|&t| t < viewport.max.y).min(grid.rows());
+        let shown = first_row * grid.cols..(last_row * grid.cols).min(count);
+        for (page, &s) in sizes.iter().enumerate().take(shown.end).skip(shown.start) {
+            let rect = grid.cell(origin, page);
+            let response = ui.interact(rect, egui::Id::unique(("thumb", tab.id, page)), Sense::click_and_drag());
+            cells.push((page, rect));
+            let row_box_h = rect.height() - 2.0 * CELL_MARGIN - LABEL_H;
+            let thumb_size = Grid::fit(s, box_w);
             let thumb = Rect::from_center_size(
-                pos2(rect.center().x, rect.top() + 2.0 + thumb_h / 2.0),
+                pos2(rect.center().x, rect.top() + CELL_MARGIN + row_box_h / 2.0),
                 thumb_size,
             );
             let current = page == tab.current_page;
             let selected = tab.page_selection.contains(&page);
             let painter = ui.painter();
             if selected {
-                painter.rect_filled(
-                    rect.shrink2(vec2(6.0, 0.0)),
-                    CornerRadius::same(4),
-                    ui.visuals().selection.bg_fill.gamma_multiply(0.35),
-                );
+                painter.rect_filled(rect, CornerRadius::same(4), accent.gamma_multiply(0.35));
+            } else if response.hovered() {
+                painter.rect_filled(rect, CornerRadius::same(4), ui.visuals().widgets.hovered.weak_bg_fill);
             }
             painter.rect_filled(thumb, CornerRadius::ZERO, Color32::WHITE);
             let want = width_bucket(thumb.width() * ppp, s.y / s.x.max(1.0));
@@ -186,20 +270,30 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: 
                 );
             }
             let stroke = if current {
-                Stroke::new(3.0, ui.visuals().selection.bg_fill)
+                Stroke::new(3.0, strong)
             } else if response.hovered() {
                 Stroke::new(1.0, ui.visuals().widgets.hovered.fg_stroke.color)
             } else {
                 Stroke::new(1.0, Color32::from_gray(80))
             };
             painter.rect_stroke(thumb, CornerRadius::ZERO, stroke, StrokeKind::Outside);
-            painter.text(
-                pos2(rect.center().x, thumb.bottom() + 4.0),
-                egui::Align2::CENTER_TOP,
-                (page + 1).to_string(),
-                egui::FontId::proportional(12.0),
-                ui.visuals().text_color(),
-            );
+            // Page number; the current page's is a filled badge.
+            let label_center = pos2(rect.center().x, thumb.bottom() + 3.0 + LABEL_H / 2.0);
+            let font = egui::FontId::proportional(12.5);
+            if current {
+                let galley = painter.layout_no_wrap((page + 1).to_string(), font, Color32::WHITE);
+                let badge = Rect::from_center_size(label_center, galley.size() + vec2(14.0, 4.0));
+                painter.rect_filled(badge, CornerRadius::same(255), strong);
+                painter.galley(badge.center() - galley.size() / 2.0, galley, Color32::WHITE);
+            } else {
+                painter.text(
+                    label_center,
+                    egui::Align2::CENTER_CENTER,
+                    (page + 1).to_string(),
+                    font,
+                    ui.visuals().text_color(),
+                );
+            }
 
             if response.clicked() {
                 select_page(tab, page, mods);
@@ -241,21 +335,25 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: 
         d.insert_temp(egui::Id::unique(("thumb_top", tab.id)), output.state.clamped_offset().y)
     });
     #[cfg(test)]
-    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test_thumb_rows"), rows_drawn.clone()));
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test_thumb_rows"), cells.clone()));
 
     // Where a drop (dragged pages or files from outside) would land.
+    let cols = grid.cols;
     let gap = pointer
-        .filter(|p| clip.x_range().contains(p.x) && clip.y_range().contains(p.y))
-        .and_then(|p| drop_gap(&rows_drawn, p.y, count));
+        .filter(|p| clip.contains(*p))
+        .and_then(|p| drop_gap(&cells, p, cols, count));
     let show_gap = |ui: &Ui, gap: usize| {
-        let y = rows_drawn
-            .iter()
-            .find(|(page, _)| *page == gap)
-            .map(|(_, r)| r.top() - spacing / 2.0)
-            .or_else(|| rows_drawn.last().map(|(_, r)| r.bottom() + spacing / 2.0));
-        if let Some(y) = y {
-            let stroke = Stroke::new(3.0, ui.visuals().selection.stroke.color);
-            ui.painter().with_clip_rect(clip).hline(clip.x_range().shrink(8.0), y, stroke);
+        let stroke = Stroke::new(3.0, ui.visuals().selection.stroke.color);
+        let painter = ui.painter().with_clip_rect(clip);
+        let before = cells.iter().find(|(page, _)| *page == gap).map(|(_, r)| (*r, true));
+        let marker = before.or_else(|| cells.iter().find(|(page, _)| *page + 1 == gap).map(|(_, r)| (*r, false)));
+        let Some((r, is_before)) = marker else { return };
+        if cols == 1 {
+            let y = if is_before { r.top() } else { r.bottom() };
+            painter.hline(r.x_range().shrink(2.0), y, stroke);
+        } else {
+            let x = if is_before { r.left() - COL_GAP / 2.0 } else { r.right() + COL_GAP / 2.0 };
+            painter.vline(x, r.y_range().shrink(4.0), stroke);
         }
     };
 
@@ -295,14 +393,21 @@ fn thumbnails(ui: &mut Ui, tab: &mut DocTab, cache: &mut TextureCache, actions: 
     });
 }
 
-/// Index of the page a drop at height `y` lands before (or `count` for the end).
-fn drop_gap(rows: &[(usize, Rect)], y: f32, count: usize) -> Option<usize> {
-    let (first, _) = rows.first()?;
-    if let Some((page, _)) = rows.iter().find(|(_, r)| y < r.center().y) {
+/// Index of the page a drop at `p` lands before (or `count` for the end). In one
+/// column the upper or lower half of a thumbnail decides, in a grid the left or
+/// right half.
+fn drop_gap(cells: &[(usize, Rect)], p: egui::Pos2, cols: usize, count: usize) -> Option<usize> {
+    let (last, _) = cells.last()?;
+    let before = |r: &Rect| {
+        if cols == 1 {
+            p.y < r.center().y
+        } else {
+            p.y < r.top() || (p.y <= r.bottom() && p.x < r.center().x)
+        }
+    };
+    if let Some((page, _)) = cells.iter().find(|(_, r)| before(r)) {
         return Some(*page);
     }
-    let (last, _) = rows.last()?;
-    let _ = first;
     Some((last + 1).min(count))
 }
 
@@ -497,6 +602,16 @@ mod tests {
     }
 
     fn frame(ctx: &egui::Context, tab: &mut DocTab, events: Vec<egui::Event>, mods: egui::Modifiers) -> Vec<PageAction> {
+        frame_with(ctx, tab, events, mods, &mut 150.0)
+    }
+
+    fn frame_with(
+        ctx: &egui::Context,
+        tab: &mut DocTab,
+        events: Vec<egui::Event>,
+        mods: egui::Modifiers,
+        thumb_width: &mut f32,
+    ) -> Vec<PageAction> {
         let mut cache = TextureCache::new(usize::MAX);
         let mut actions = Vec::new();
         let mut side = SidebarTab::Pages;
@@ -508,7 +623,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions));
+            egui::CentralPanel::default().show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions, thumb_width));
         });
         out.textures_delta.clear();
         actions
@@ -549,25 +664,67 @@ mod tests {
         assert!(tab.pages_focused);
     }
 
-    #[test]
-    fn dragging_a_thumbnail_moves_the_page() {
-        let ctx = egui::Context::default();
-        let mut tab = tab(5);
-        frame(&ctx, &mut tab, Vec::new(), egui::Modifiers::NONE);
-        let r = rows(&ctx);
-        let start = r[0].1.center();
-        // Drop just below the middle of page 3's thumbnail: lands before page 4.
-        let end = r[2].1.center() + vec2(0.0, 20.0);
+    fn drag(ctx: &egui::Context, tab: &mut DocTab, start: egui::Pos2, end: egui::Pos2, width: f32) -> Vec<PageAction> {
         let mut actions = Vec::new();
         let none = egui::Modifiers::NONE;
-        frame(&ctx, &mut tab, vec![egui::Event::PointerMoved(start)], none);
-        frame(&ctx, &mut tab, vec![press(start, true, none)], none);
+        let mut w = width;
+        frame_with(ctx, tab, vec![egui::Event::PointerMoved(start)], none, &mut w);
+        frame_with(ctx, tab, vec![press(start, true, none)], none, &mut w);
         for i in 1..=10 {
             let p = start + (end - start) * (i as f32 / 10.0);
-            actions.extend(frame(&ctx, &mut tab, vec![egui::Event::PointerMoved(p)], none));
+            actions.extend(frame_with(ctx, tab, vec![egui::Event::PointerMoved(p)], none, &mut w));
         }
-        actions.extend(frame(&ctx, &mut tab, vec![press(end, false, none)], none));
-        assert_eq!(actions, vec![PageAction::MoveTo { pages: vec![0], gap: 3 }]);
+        actions.extend(frame_with(ctx, tab, vec![press(end, false, none)], none, &mut w));
+        actions
+    }
+
+    #[test]
+    fn dragging_a_thumbnail_moves_the_page() {
+        // One column: the lower half of page 2's thumbnail lands before page 3.
+        let ctx = egui::Context::default();
+        let mut tab = tab(5);
+        frame_with(&ctx, &mut tab, Vec::new(), egui::Modifiers::NONE, &mut 400.0);
+        let r = rows(&ctx);
+        assert_eq!(r[0].1.left(), r[1].1.left(), "one column");
+        let actions = drag(&ctx, &mut tab, r[0].1.center(), r[1].1.center() + vec2(0.0, 20.0), 400.0);
+        assert_eq!(actions, vec![PageAction::MoveTo { pages: vec![0], gap: 2 }]);
+    }
+
+    #[test]
+    fn dragging_in_the_grid_uses_left_and_right_halves() {
+        let ctx = egui::Context::default();
+        let mut tab = tab(6);
+        frame_with(&ctx, &mut tab, Vec::new(), egui::Modifiers::NONE, &mut 100.0);
+        let r = rows(&ctx);
+        assert_eq!(r[0].1.top(), r[1].1.top(), "several columns");
+        // Right half of page 2 (second column): lands before page 3.
+        let actions = drag(&ctx, &mut tab, r[4].1.center(), r[1].1.center() + vec2(20.0, 0.0), 100.0);
+        assert_eq!(actions, vec![PageAction::MoveTo { pages: vec![4], gap: 2 }]);
+    }
+
+    #[test]
+    fn rows_fit_their_pages_and_thumbnails_fill_the_width() {
+        let ctx = egui::Context::default();
+        let mut tab = tab(3);
+        if let LoadState::Ready(info) = &mut tab.state {
+            info.page_sizes[1] = (842.0, 595.0); // landscape
+        }
+        frame_with(&ctx, &mut tab, Vec::new(), egui::Modifiers::NONE, &mut 400.0);
+        let r = rows(&ctx);
+        assert!(r[1].1.height() < r[0].1.height() * 0.8, "landscape row is shorter: {r:?}");
+        assert!(r[0].1.width() > 300.0, "one wide column fills the sidebar");
+    }
+
+    #[test]
+    fn ctrl_wheel_over_the_thumbnails_resizes_them() {
+        let ctx = egui::Context::default();
+        let mut tab = tab(3);
+        let mut w = 150.0;
+        frame_with(&ctx, &mut tab, Vec::new(), egui::Modifiers::NONE, &mut w);
+        let at = rows(&ctx)[0].1.center();
+        let events = vec![egui::Event::PointerMoved(at), egui::Event::Zoom(1.5)];
+        frame_with(&ctx, &mut tab, events, egui::Modifiers::CTRL, &mut w);
+        assert!((w - 225.0).abs() < 0.1, "{w}");
     }
 
     #[test]
