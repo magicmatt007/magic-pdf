@@ -887,4 +887,106 @@ mod tests {
         assert!(tb2.contents.starts_with("Grüße und Привет"));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn moving_and_resizing_annotations() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let add = |kind, rect: PdfBox, ink: Vec<Vec<(f32, f32)>>| {
+            engine.send(Request::AddAnnot {
+                doc: 1,
+                page: 0,
+                annot: NewAnnot {
+                    kind,
+                    rect,
+                    color: [255, 0, 0],
+                    interior: None,
+                    width: 2.0,
+                    contents: "x".into(),
+                    author: String::new(),
+                    quads: Vec::new(),
+                    ink,
+                    font_size: 12.0,
+                    text_color: [0, 0, 0],
+                },
+            });
+            recv_until(&engine, |r| match r {
+                Response::AnnotAdded { index, .. } => Some(index),
+                _ => None,
+            })
+        };
+        let b = |l: f32, bo: f32, r: f32, t: f32| PdfBox {
+            left: l,
+            bottom: bo,
+            right: r,
+            top: t,
+        };
+        let square = add(AnnotKind::Square, b(100.0, 100.0, 200.0, 150.0), Vec::new());
+        let ink = add(
+            AnnotKind::Ink,
+            b(98.0, 298.0, 202.0, 402.0),
+            vec![vec![(100.0, 300.0), (200.0, 400.0)]],
+        );
+        let rect_of = |list: &[AnnotInfo], i| list.iter().find(|a| a.index == i).unwrap().rect;
+        let drain = |engine: &Engine| while engine.rx.recv_timeout(Duration::from_millis(100)).is_ok() {};
+        let mv = |index, rect| {
+            drain(&engine);
+            engine.send(Request::UpdateAnnot {
+                doc: 1,
+                page: 0,
+                index,
+                change: AnnotChange {
+                    rect: Some(rect),
+                    ..Default::default()
+                },
+            });
+            annots(&engine, 1)
+        };
+
+        // Move the square.
+        let list = mv(square, b(300.0, 500.0, 400.0, 550.0));
+        assert_eq!(rect_of(&list, square), b(300.0, 500.0, 400.0, 550.0));
+        // Red border pixels appear at the new place and not at the old one.
+        // Rendered at 1200 px (about 2 px per point) so thin strokes are solid.
+        let red_at = |engine: &Engine, version, x: f32, y: f32| {
+            let key = RenderKey {
+                doc: 1,
+                page: 0,
+                width_px: 1200,
+                rotation: Rotation::R0,
+                version,
+            };
+            engine.send(Request::Render { key, priority: 0.0 });
+            let (size, rgba) = recv_until(engine, |m| match m {
+                Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
+                _ => None,
+            });
+            let s = size[0] as f32 / 595.0;
+            let (px, py) = ((x * s) as usize, ((842.0 - y) * s) as usize);
+            (py.saturating_sub(5)..py + 5).any(|yy| {
+                (px.saturating_sub(5)..px + 5).any(|xx| {
+                    let p = &rgba[(yy * size[0] + xx) * 4..][..4];
+                    p[0] > 200 && p[1] < 80 && p[2] < 80
+                })
+            })
+        };
+        assert!(red_at(&engine, 1, 300.5, 525.0), "square drawn at new place");
+        assert!(!red_at(&engine, 1, 100.5, 125.0), "square gone from old place");
+
+        // Resize the ink drawing to twice the width: its stroke scales along.
+        let list = mv(ink, b(98.0, 298.0, 306.0, 402.0));
+        assert_eq!(rect_of(&list, ink), b(98.0, 298.0, 306.0, 402.0));
+        assert!(red_at(&engine, 2, 302.0, 400.0), "stroke end moved with the resize");
+
+        // Undo the resize: stroke and rectangle return.
+        drain(&engine);
+        engine.send(Request::Undo { doc: 1 });
+        let list = annots(&engine, 1);
+        // PDFium keeps a small margin around ink strokes; the frame must be back
+        // around the original stroke (100..200), not the resized one.
+        let r = rect_of(&list, ink);
+        assert!(r.left <= 100.0 && r.right >= 200.0 && r.right < 210.0, "{r:?}");
+        assert!(red_at(&engine, 3, 200.0, 400.0));
+        assert!(!red_at(&engine, 3, 302.0, 400.0));
+    }
 }

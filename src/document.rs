@@ -64,6 +64,27 @@ pub enum Draft {
     Shape { page: usize, start: Pos2, end: Pos2 },
 }
 
+/// Which part of an annotation is being dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragMode {
+    Move,
+    /// Resize handle: 0 top-left, 1 top, 2 top-right, 3 right, 4 bottom-right,
+    /// 5 bottom, 6 bottom-left, 7 left (as seen on screen).
+    Resize(u8),
+}
+
+/// An annotation being moved or resized (page-local coordinates: points, origin at
+/// the top-left of the page as displayed).
+#[derive(Clone, Debug)]
+pub struct AnnotDrag {
+    pub page: usize,
+    pub index: usize,
+    pub mode: DragMode,
+    pub start: Rect,
+    pub start_pointer: Pos2,
+    pub current: Rect,
+}
+
 /// The currently selected annotation and its comment being edited.
 #[derive(Clone, Debug)]
 pub struct AnnotSelection {
@@ -117,6 +138,9 @@ pub struct DocTab {
     /// A just-created annotation to open for typing once it is listed.
     pub pending_edit: Option<(usize, usize)>,
     pub draft: Option<Draft>,
+    pub annot_drag: Option<AnnotDrag>,
+    /// Arrow-key nudge of the selected annotation, in displayed page points.
+    pub nudge: Vec2,
     /// Bumped per page when its content changes, so stale renders are replaced.
     pub page_versions: HashMap<usize, u32>,
     pub can_undo: bool,
@@ -184,6 +208,8 @@ impl DocTab {
             pending_edit: None,
             mark_dirty_on_open: false,
             draft: None,
+            annot_drag: None,
+            nudge: Vec2::ZERO,
             page_versions: HashMap::new(),
             can_undo: false,
             can_redo: false,
@@ -281,6 +307,7 @@ impl DocTab {
         self.selection = None;
         self.selecting = false;
         self.draft = None;
+        self.annot_drag = None;
         self.deselect_annot();
         self.page_selection.clear();
         self.page_anchor = None;

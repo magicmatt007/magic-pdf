@@ -1372,6 +1372,27 @@ impl App {
         if typing {
             return;
         }
+        // Arrow keys move a selected (movable) annotation: 1 pt, 10 pt with Shift.
+        let can_nudge = tab
+            .selected_annot
+            .as_ref()
+            .is_some_and(|sel| !sel.editing && tab.annot(sel.page, sel.index).is_some_and(|a| a.kind.movable()));
+        if can_nudge {
+            ctx.input_mut(|i| {
+                for (key, dir) in [
+                    (Key::ArrowLeft, egui::vec2(-1.0, 0.0)),
+                    (Key::ArrowRight, egui::vec2(1.0, 0.0)),
+                    (Key::ArrowUp, egui::vec2(0.0, -1.0)),
+                    (Key::ArrowDown, egui::vec2(0.0, 1.0)),
+                ] {
+                    for (mods, step) in [(Modifiers::NONE, 1.0), (Modifiers::SHIFT, 10.0)] {
+                        while i.consume_key(mods, key) {
+                            tab.nudge += dir * step;
+                        }
+                    }
+                }
+            });
+        }
         let horizontal = tab.mode.is_horizontal();
         let single = tab.mode == LayoutMode::SinglePage;
         let view = tab.view_rect;
@@ -2115,6 +2136,7 @@ impl App {
                         ("H / S", "Hand tool / text selection tool"),
                         ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
                         ("Del", "Delete the selected annotation or thumbnail pages"),
+                        ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
                         ("Ctrl / Shift + click thumbnail", "Select several pages"),
                         ("Drag thumbnails", "Reorder pages"),
                         ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),

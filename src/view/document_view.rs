@@ -7,9 +7,10 @@ use eframe::egui::{
 };
 
 use crate::icons;
-use crate::document::{AnnotSelection, DocTab, Draft, LoadState, Selection, quad};
+use crate::document::{AnnotDrag, AnnotSelection, DocTab, DragMode, Draft, LoadState, Selection, quad};
 use crate::engine::{
-    AnnotChange, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Rgb, form_mods,
+    AnnotChange, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Resize, Rgb,
+    form_mods,
 };
 use crate::settings::AnnotStyle;
 use crate::view::cache::{TextureCache, width_bucket};
@@ -153,6 +154,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
 
     handle_input(ui, tab, &response, view, &mut cx);
 
+    apply_nudge(tab);
     apply_pending_navigation(tab, view);
     tab.viewport.clamp(tab.layout.size, view.size());
     update_current_page(tab, view);
@@ -334,6 +336,11 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         if response.dragged() || tab.draft.is_some() {
             return;
         }
+    }
+
+    // Moving and resizing annotations with the hand and select tools.
+    if matches!(tool, Tool::Hand | Tool::SelectText) && !middle_down && annot_drag_input(ui, tab, response, view, pointer) {
+        return;
     }
 
     // Interactive form fields take mouse input with the hand and select tools.
@@ -936,16 +943,27 @@ fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect
         }
     }
 
-    if let Some(sel) = tab.selected_annot.as_ref().filter(|s| s.page == page)
+    let blue = Color32::from_rgb(30, 120, 255);
+    if let Some(d) = tab.annot_drag.as_ref().filter(|d| d.page == page) {
+        // Where the annotation will land.
+        if let Some(page_rect) = tab.layout.page_rect(page) {
+            let s = tab.viewport.rect_to_screen(d.current.translate(page_rect.min.to_vec2()), view);
+            painter.rect(
+                s,
+                CornerRadius::same(2),
+                Color32::from_rgba_unmultiplied(30, 120, 255, 30),
+                Stroke::new(1.5, blue),
+                StrokeKind::Outside,
+            );
+        }
+    } else if let Some(sel) = tab.selected_annot.as_ref().filter(|s| s.page == page)
         && let Some(a) = tab.annot(page, sel.index)
     {
-        let s = to_screen(&a.rect).expand(3.0);
-        painter.rect_stroke(
-            s,
-            CornerRadius::same(2),
-            Stroke::new(1.5, Color32::from_rgb(30, 120, 255)),
-            StrokeKind::Outside,
-        );
+        let s = to_screen(&a.rect);
+        painter.rect_stroke(s.expand(3.0), CornerRadius::same(2), Stroke::new(1.5, blue), StrokeKind::Outside);
+        for (_, h) in handles(s, a.kind.resize(), tab.rotation.swaps_axes()) {
+            painter.rect(h, CornerRadius::same(1), Color32::WHITE, Stroke::new(1.5, blue), StrokeKind::Middle);
+        }
     }
 }
 
@@ -985,6 +1003,239 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
             }
         }
         None => {}
+    }
+}
+
+const HANDLE: f32 = 8.0;
+
+/// Resize handles (number, screen rectangle) for a selected annotation.
+fn handles(screen: Rect, resize: Resize, rotated: bool) -> Vec<(u8, Rect)> {
+    let all = [
+        screen.left_top(),
+        screen.center_top(),
+        screen.right_top(),
+        screen.right_center(),
+        screen.right_bottom(),
+        screen.center_bottom(),
+        screen.left_bottom(),
+        screen.left_center(),
+    ];
+    let wanted: &[u8] = match resize {
+        Resize::Free => &[0, 1, 2, 3, 4, 5, 6, 7],
+        // In a view rotated by 90°, the box's width runs up and down; only offer
+        // width handles when they would change the width.
+        Resize::WidthOnly if !rotated => &[3, 7],
+        _ => &[],
+    };
+    wanted
+        .iter()
+        .map(|&i| (i, Rect::from_center_size(all[i as usize], vec2(HANDLE, HANDLE))))
+        .collect()
+}
+
+fn handle_cursor(h: u8) -> CursorIcon {
+    match h {
+        0 | 4 => CursorIcon::ResizeNwSe,
+        2 | 6 => CursorIcon::ResizeNeSw,
+        1 | 5 => CursorIcon::ResizeVertical,
+        _ => CursorIcon::ResizeHorizontal,
+    }
+}
+
+/// The rectangle after dragging a handle by `d` (page-local points). With
+/// `keep_aspect`, corner handles keep the width/height ratio.
+pub fn resize_rect(r: Rect, handle: u8, d: Vec2, keep_aspect: bool) -> Rect {
+    const MIN: f32 = 4.0;
+    let (mut l, mut t, mut rr, mut b) = (r.left(), r.top(), r.right(), r.bottom());
+    match handle {
+        0 => (l, t) = (l + d.x, t + d.y),
+        1 => t += d.y,
+        2 => (rr, t) = (rr + d.x, t + d.y),
+        3 => rr += d.x,
+        4 => (rr, b) = (rr + d.x, b + d.y),
+        5 => b += d.y,
+        6 => (l, b) = (l + d.x, b + d.y),
+        _ => l += d.x,
+    }
+    let mut out = Rect::from_min_max(pos2(l.min(rr), t.min(b)), pos2(l.max(rr), t.max(b)));
+    if keep_aspect && matches!(handle, 0 | 2 | 4 | 6) && r.height() > 0.0 {
+        let aspect = r.width() / r.height();
+        let w = out.width().max(out.height() * aspect);
+        let size = vec2(w, w / aspect);
+        // Keep the corner opposite the dragged one in place.
+        let anchor = match handle {
+            0 => r.right_bottom(),
+            2 => r.left_bottom(),
+            4 => r.left_top(),
+            _ => r.right_top(),
+        };
+        let min = pos2(
+            if matches!(handle, 0 | 6) { anchor.x - size.x } else { anchor.x },
+            if matches!(handle, 0 | 2) { anchor.y - size.y } else { anchor.y },
+        );
+        out = Rect::from_min_size(min, size);
+    }
+    if out.width() < MIN {
+        out.max.x = out.min.x + MIN;
+    }
+    if out.height() < MIN {
+        out.max.y = out.min.y + MIN;
+    }
+    out
+}
+
+/// Page-local rectangle of an annotation.
+fn annot_local(tab: &DocTab, page: usize, b: &PdfBox) -> Option<Rect> {
+    Some(geom_box_to_local(b, tab.geoms.get(&page)?, tab.rotation))
+}
+
+/// Page-local rectangle back to PDF page space.
+fn local_to_pdf_box(tab: &DocTab, page: usize, r: Rect) -> Option<PdfBox> {
+    let geom = tab.geoms.get(&page)?;
+    let a = geom_local_to_pdf(r.min, geom, tab.rotation);
+    let b = geom_local_to_pdf(r.max, geom, tab.rotation);
+    Some(PdfBox {
+        left: a.x.min(b.x),
+        bottom: a.y.min(b.y),
+        right: a.x.max(b.x),
+        top: a.y.max(b.y),
+    })
+}
+
+fn send_rect(tab: &mut DocTab, page: usize, index: usize, rect: PdfBox) {
+    // Show the result right away; the engine's answer confirms it.
+    if let Some(list) = tab.annots.get_mut(&page)
+        && let Some(a) = list.iter_mut().find(|a| a.index == index)
+    {
+        a.rect = rect;
+    }
+    tab.outbox.push(Request::UpdateAnnot {
+        doc: tab.id,
+        page,
+        index,
+        change: AnnotChange {
+            rect: Some(rect),
+            ..Default::default()
+        },
+    });
+}
+
+/// Starts, updates and finishes dragging an annotation. Returns true if the input
+/// was used for that.
+fn annot_drag_input(
+    ui: &Ui,
+    tab: &mut DocTab,
+    response: &egui::Response,
+    view: Rect,
+    pointer: Option<Pos2>,
+) -> bool {
+    let (primary_down, shift, press) =
+        ui.input(|i| (i.pointer.primary_down(), i.modifiers.shift, i.pointer.press_origin()));
+    let local_of = |tab: &DocTab, screen: Pos2, page: usize| -> Option<Pos2> {
+        let pr = tab.layout.page_rect(page)?;
+        Some((tab.viewport.to_doc(screen, view) - pr.min).to_pos2())
+    };
+
+    // A drag in progress.
+    if let Some(mut d) = tab.annot_drag.clone() {
+        if primary_down {
+            if let Some(p) = pointer.or(ui.input(|i| i.pointer.latest_pos()))
+                && let Some(local) = local_of(tab, p, d.page)
+            {
+                let delta = local - d.start_pointer;
+                d.current = match d.mode {
+                    DragMode::Move => d.start.translate(delta),
+                    DragMode::Resize(h) => resize_rect(d.start, h, delta, shift),
+                };
+                ui.ctx().set_cursor_icon(match d.mode {
+                    DragMode::Move => CursorIcon::Grabbing,
+                    DragMode::Resize(h) => handle_cursor(h),
+                });
+                tab.annot_drag = Some(d);
+            }
+            return true;
+        }
+        tab.annot_drag = None;
+        let moved = (d.current.min - d.start.min).length() > 0.1 || (d.current.max - d.start.max).length() > 0.1;
+        if moved && let Some(rect) = local_to_pdf_box(tab, d.page, d.current) {
+            send_rect(tab, d.page, d.index, rect);
+        }
+        return true;
+    }
+
+    let Some(p) = pointer else { return false };
+    let Some(page) = tab.layout.page_at(tab.viewport.to_doc(p, view)) else { return false };
+
+    // Hovering the selected annotation's handles.
+    let selected = tab
+        .selected_annot
+        .as_ref()
+        .filter(|s| s.page == page && !s.editing)
+        .and_then(|s| tab.annot(page, s.index))
+        .cloned();
+    let handle_under = |at: Pos2| {
+        selected.as_ref().and_then(|a| {
+            let screen = pdf_box_to_screen(tab, page, &a.rect, view)?;
+            handles(screen, a.kind.resize(), tab.rotation.swaps_axes())
+                .into_iter()
+                .find(|(_, r)| r.expand(2.0).contains(at))
+                .map(|(h, _)| (a.clone(), h))
+        })
+    };
+    if let Some((_, h)) = handle_under(p) {
+        ui.ctx().set_cursor_icon(handle_cursor(h));
+    }
+
+    if !response.drag_started_by(egui::PointerButton::Primary) {
+        // Movable annotations show a move cursor.
+        if let Some((_, pdf)) = screen_to_pdf(tab, p, view, Some(page))
+            && annot_at(tab, page, pdf).is_some_and(|a| a.kind.movable())
+            && handle_under(p).is_none()
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::Move);
+        }
+        return false;
+    }
+
+    let start = press.unwrap_or(p);
+    let (annot, mode) = if let Some((a, h)) = handle_under(start) {
+        (a, DragMode::Resize(h))
+    } else {
+        let Some((_, pdf)) = screen_to_pdf(tab, start, view, Some(page)) else { return false };
+        match annot_at(tab, page, pdf).filter(|a| a.kind.movable()) {
+            Some(a) => (a.clone(), DragMode::Move),
+            None => return false,
+        }
+    };
+    let (Some(rect), Some(start_pointer)) = (annot_local(tab, page, &annot.rect), local_of(tab, start, page)) else {
+        return false;
+    };
+    tab.select_annot(page, annot.index);
+    tab.selection = None;
+    tab.annot_drag = Some(AnnotDrag {
+        page,
+        index: annot.index,
+        mode,
+        start: rect,
+        start_pointer,
+        current: rect,
+    });
+    true
+}
+
+/// Moves the selected annotation by the arrow-key nudge collected this frame.
+fn apply_nudge(tab: &mut DocTab) {
+    let nudge = std::mem::take(&mut tab.nudge);
+    if nudge == Vec2::ZERO {
+        return;
+    }
+    let Some(sel) = tab.selected_annot.as_ref().filter(|s| !s.editing) else { return };
+    let (page, index) = (sel.page, sel.index);
+    let Some(a) = tab.annot(page, index).filter(|a| a.kind.movable()).cloned() else { return };
+    if let Some(local) = annot_local(tab, page, &a.rect)
+        && let Some(rect) = local_to_pdf_box(tab, page, local.translate(nudge))
+    {
+        send_rect(tab, page, index, rect);
     }
 }
 
@@ -1038,6 +1289,9 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
 
 /// Properties popup for the selected annotation.
 fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>) {
+    if tab.annot_drag.is_some() {
+        return;
+    }
     let Some(sel) = tab.selected_annot.clone() else { return };
     let Some(annot) = tab.annot(sel.page, sel.index).cloned() else {
         // Deleted (or not loaded yet).
@@ -1631,5 +1885,117 @@ mod tests {
         assert!(saved, "typed text was not saved");
         let saves = tab.outbox.iter().filter(|r| matches!(r, Request::UpdateAnnot { .. })).count();
         assert_eq!(saves, 1);
+    }
+
+    fn square(index: usize, kind: AnnotKind) -> AnnotInfo {
+        AnnotInfo {
+            index,
+            kind,
+            rect: PdfBox {
+                left: 100.0,
+                bottom: 600.0,
+                right: 200.0,
+                top: 700.0,
+            },
+            color: Some([255, 0, 0]),
+            interior: None,
+            width: 2.0,
+            contents: String::new(),
+            author: String::new(),
+            modified: String::new(),
+            font_size: Some(12.0),
+            text_color: Some([0, 0, 0]),
+        }
+    }
+
+    fn drag(ctx: &egui::Context, tab: &mut DocTab, cache: &mut TextureCache, from: Pos2, to: Pos2, tool: Tool) {
+        frame_with(ctx, tab, cache, vec![egui::Event::PointerMoved(from)], tool);
+        frame_with(ctx, tab, cache, vec![button(from, true)], tool);
+        for i in 1..=8 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            frame_with(ctx, tab, cache, vec![egui::Event::PointerMoved(p)], tool);
+        }
+        frame_with(ctx, tab, cache, vec![button(to, false)], tool);
+        frame_with(ctx, tab, cache, Vec::new(), tool);
+    }
+
+    fn sent_rect(tab: &DocTab) -> Option<PdfBox> {
+        tab.outbox.iter().find_map(|r| match r {
+            Request::UpdateAnnot { change, .. } => change.rect,
+            _ => None,
+        })
+    }
+
+    fn setup(kind: AnnotKind) -> (egui::Context, DocTab, TextureCache) {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        tab.annots.insert(0, vec![square(4, kind)]);
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        tab.outbox.clear();
+        (ctx, tab, cache)
+    }
+
+    #[test]
+    fn resize_math() {
+        let r = Rect::from_min_size(pos2(10.0, 10.0), vec2(100.0, 50.0));
+        assert_eq!(resize_rect(r, 4, vec2(20.0, 10.0), false), Rect::from_min_max(pos2(10.0, 10.0), pos2(130.0, 70.0)));
+        assert_eq!(resize_rect(r, 7, vec2(-5.0, 99.0), false), Rect::from_min_max(pos2(5.0, 10.0), pos2(110.0, 60.0)));
+        // Shift keeps the 2:1 ratio, anchored at the opposite corner.
+        let k = resize_rect(r, 4, vec2(100.0, 0.0), true);
+        assert_eq!(k.min, r.min);
+        assert!((k.width() / k.height() - 2.0).abs() < 1e-4);
+        // Never smaller than 4 pt.
+        let tiny = resize_rect(r, 3, vec2(-500.0, 0.0), false);
+        assert!(tiny.width() >= 4.0 && tiny.height() >= 4.0);
+    }
+
+    #[test]
+    fn dragging_a_shape_moves_it() {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::Square);
+        let screen = pdf_box_to_screen(&tab, 0, &tab.annots[&0][0].rect, tab.view_rect).unwrap();
+        let z = tab.viewport.zoom;
+        drag(&ctx, &mut tab, &mut cache, screen.center(), screen.center() + vec2(60.0, 30.0), Tool::Hand);
+        let r = sent_rect(&tab).expect("move sent");
+        assert!((r.left - (100.0 + 60.0 / z)).abs() < 0.5, "{r:?}");
+        assert!((r.top - (700.0 - 30.0 / z)).abs() < 0.5, "{r:?}");
+        assert!((r.right - r.left - 100.0).abs() < 0.01, "size kept");
+        assert_eq!(tab.selected_annot.as_ref().map(|s| s.index), Some(4));
+        assert_eq!(tab.annots[&0][0].rect, r, "shown at the new place right away");
+    }
+
+    #[test]
+    fn dragging_a_corner_handle_resizes() {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::Square);
+        tab.select_annot(0, 4);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let screen = pdf_box_to_screen(&tab, 0, &tab.annots[&0][0].rect, tab.view_rect).unwrap();
+        let z = tab.viewport.zoom;
+        let corner = screen.right_bottom();
+        drag(&ctx, &mut tab, &mut cache, corner, corner + vec2(40.0, 20.0), Tool::Hand);
+        let r = sent_rect(&tab).expect("resize sent");
+        assert!((r.left - 100.0).abs() < 0.01 && (r.top - 700.0).abs() < 0.01, "top-left stays: {r:?}");
+        assert!((r.right - (200.0 + 40.0 / z)).abs() < 0.5, "{r:?}");
+        assert!((r.bottom - (600.0 - 20.0 / z)).abs() < 0.5, "{r:?}");
+    }
+
+    #[test]
+    fn arrow_nudge_and_text_box_handles() {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::Square);
+        tab.select_annot(0, 4);
+        tab.nudge = vec2(10.0, 0.0);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let r = sent_rect(&tab).expect("nudge sent");
+        assert!((r.left - 110.0).abs() < 1e-3 && (r.bottom - 600.0).abs() < 1e-3, "{r:?}");
+
+        // Text boxes only resize in width; notes not at all.
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 40.0));
+        assert_eq!(handles(screen, AnnotKind::FreeText.resize(), false).len(), 2);
+        assert!(handles(screen, AnnotKind::Note.resize(), false).is_empty());
+        assert_eq!(handles(screen, AnnotKind::Ink.resize(), false).len(), 8);
+        assert!(!AnnotKind::Highlight.movable());
     }
 }

@@ -212,6 +212,24 @@ impl AnnotKind {
         )
     }
 
+    /// Kinds that can be moved by dragging (text markup stays on its text).
+    pub fn movable(self) -> bool {
+        matches!(
+            self,
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::Note | AnnotKind::FreeText
+        )
+    }
+
+    /// How the kind can be resized.
+    pub fn resize(self) -> Resize {
+        match self {
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink => Resize::Free,
+            // A text box's height follows its text.
+            AnnotKind::FreeText => Resize::WidthOnly,
+            _ => Resize::None,
+        }
+    }
+
     pub fn has_border_width(self) -> bool {
         matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
     }
@@ -222,6 +240,13 @@ impl AnnotKind {
 }
 
 pub type Rgb = [u8; 3];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resize {
+    None,
+    WidthOnly,
+    Free,
+}
 
 /// A new annotation to create. Coordinates are in PDF page space.
 #[derive(Clone, Debug)]
@@ -267,6 +292,11 @@ pub struct AnnotChange {
     pub contents: Option<String>,
     pub font_size: Option<f32>,
     pub text_color: Option<Rgb>,
+    /// Move or resize: the new rectangle (PDF page space).
+    pub rect: Option<PdfBox>,
+    /// Move or resize as an exact transform `[sx, sy, tx, ty]` (x' = sx*x + tx); used
+    /// for undo/redo so the result does not depend on the current rectangle.
+    pub transform: Option<[f32; 4]>,
 }
 
 /// A form field widget (interactive AcroForm field).

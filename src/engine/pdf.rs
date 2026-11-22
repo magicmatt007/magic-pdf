@@ -919,6 +919,8 @@ impl<'d> Page<'d> {
         };
         let mut undo = AnnotChange::default();
         let restyle = change.color.is_some()
+            || change.rect.is_some()
+            || change.transform.is_some()
             || change.interior.is_some()
             || change.width.is_some()
             || change.font_size.is_some()
@@ -968,6 +970,33 @@ impl<'d> Page<'d> {
                 };
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(&style));
             }
+            if change.rect.is_some() || change.transform.is_some() {
+                let mut r = FS_RECTF {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                };
+                lib.FPDFAnnot_GetRect(a.handle, &mut r);
+                let current = to_box(&r);
+                let t = match (change.transform, change.rect) {
+                    (Some(t), _) => t,
+                    (None, Some(new)) => rect_transform(current, new),
+                    (None, None) => unreachable!(),
+                };
+                undo.transform = Some(invert_transform(t));
+                if lib.FPDFAnnot_GetSubtype(a.handle) == SUBTYPE_INK {
+                    self.transform_ink(&a, t);
+                }
+                let new = apply_transform_box(t, current);
+                let nr = FS_RECTF {
+                    left: new.left,
+                    top: new.top,
+                    right: new.right,
+                    bottom: new.bottom,
+                };
+                lib.FPDFAnnot_SetRect(a.handle, &nr);
+            }
             if let Some(text) = &change.contents {
                 undo.contents = Some(string("Contents"));
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", text);
@@ -975,6 +1004,29 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "M", &pdf_date_now());
         }
         Ok(undo)
+    }
+
+    /// Applies a transform to an ink annotation's strokes.
+    fn transform_ink(&self, a: &Annot, t: [f32; 4]) {
+        let lib = self.lib();
+        unsafe {
+            let n = lib.FPDFAnnot_GetInkListCount(a.handle);
+            let mut strokes = Vec::new();
+            for i in 0..n {
+                let len = lib.FPDFAnnot_GetInkListPath(a.handle, i, ptr::null_mut(), 0);
+                let mut pts = vec![FS_POINTF { x: 0.0, y: 0.0 }; len as usize];
+                lib.FPDFAnnot_GetInkListPath(a.handle, i, pts.as_mut_ptr(), len);
+                for p in &mut pts {
+                    p.x = t[0] * p.x + t[2];
+                    p.y = t[1] * p.y + t[3];
+                }
+                strokes.push(pts);
+            }
+            lib.FPDFAnnot_RemoveInkList(a.handle);
+            for pts in strokes {
+                lib.FPDFAnnot_AddInkStroke(a.handle, pts.as_ptr(), pts.len() as _);
+            }
+        }
     }
 
     pub fn annot_is_text_box(&self, index: usize) -> bool {
@@ -1254,6 +1306,59 @@ impl GlyphSource for PdfiumFont {
                     out.push_str("h\n");
                 }
             }
+        }
+    }
+}
+
+
+/// The transform `[sx, sy, tx, ty]` mapping rectangle `from` onto `to`.
+pub fn rect_transform(from: PdfBox, to: PdfBox) -> [f32; 4] {
+    let scale = |f0: f32, f1: f32, t0: f32, t1: f32| {
+        if (f1 - f0).abs() < 1e-3 { 1.0 } else { (t1 - t0) / (f1 - f0) }
+    };
+    let sx = scale(from.left, from.right, to.left, to.right);
+    let sy = scale(from.bottom, from.top, to.bottom, to.top);
+    [sx, sy, to.left - sx * from.left, to.bottom - sy * from.bottom]
+}
+
+pub fn invert_transform([sx, sy, tx, ty]: [f32; 4]) -> [f32; 4] {
+    [1.0 / sx, 1.0 / sy, -tx / sx, -ty / sy]
+}
+
+pub fn apply_transform_box([sx, sy, tx, ty]: [f32; 4], b: PdfBox) -> PdfBox {
+    let (x0, x1) = (sx * b.left + tx, sx * b.right + tx);
+    let (y0, y1) = (sy * b.bottom + ty, sy * b.top + ty);
+    PdfBox {
+        left: x0.min(x1),
+        bottom: y0.min(y1),
+        right: x0.max(x1),
+        top: y0.max(y1),
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    #[test]
+    fn transforms_map_rectangles_and_invert_exactly() {
+        let a = PdfBox {
+            left: 10.0,
+            bottom: 20.0,
+            right: 110.0,
+            top: 70.0,
+        };
+        let b = PdfBox {
+            left: 300.0,
+            bottom: 400.0,
+            right: 500.0,
+            top: 425.0,
+        };
+        let t = rect_transform(a, b);
+        assert_eq!(apply_transform_box(t, a), b);
+        let back = apply_transform_box(invert_transform(t), b);
+        for (x, y) in [(back.left, a.left), (back.bottom, a.bottom), (back.right, a.right), (back.top, a.top)] {
+            assert!((x - y).abs() < 1e-3);
         }
     }
 }
