@@ -28,6 +28,16 @@ On Windows run `scripts\fetch-pdfium.ps1` instead. PDFium is loaded at runtime f
 order) `$MAGIC_PDF_PDFIUM_DIR`, the executable's directory, `third_party/pdfium` and the
 system library path, so a distribution is just the executable plus one shared library.
 
+## Installing on Linux
+
+```bash
+packaging/linux/install.sh      # builds and installs into ~/.local
+packaging/linux/uninstall.sh    # removes it again
+```
+
+This adds magic-pdf to the application menu and to "Open with" for PDF files. Use
+`sudo PREFIX=/usr/local packaging/linux/install.sh` for a system-wide install.
+
 ## Tests
 
 ```bash

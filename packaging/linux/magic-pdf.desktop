@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=magic-pdf
+GenericName=PDF Viewer
+Comment=Lightweight PDF viewer with horizontal page layout for wide screens
+Exec=magic-pdf %F
+Icon=magic-pdf
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+Keywords=PDF;document;viewer;reader;
+StartupWMClass=magic-pdf
+StartupNotify=true
