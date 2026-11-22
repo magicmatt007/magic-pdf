@@ -579,15 +579,16 @@ impl App {
         }
     }
 
-    /// Sends keyboard input to the focused form field. Does nothing (leaving events in
-    /// place) when no field has focus or an egui widget is being typed into.
-    fn route_form_keys(&mut self, ctx: &egui::Context) {
+    /// Sends keyboard input to the focused form field. Runs on the raw input before
+    /// egui sees it, so egui neither moves its own focus on Tab nor fires shortcuts.
+    /// Does nothing when no field has focus or an egui text box is being typed into.
+    fn route_form_keys(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.form_focus.is_none() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let doc = tab.id;
-        let (mut reqs, kill_focus) = ctx.input_mut(|i| take_form_input(&mut i.events, doc));
+        let (mut reqs, kill_focus) = take_form_input(events, doc);
         if kill_focus {
             reqs.push(Request::FormKillFocus { doc });
             if let Some(t) = self.tabs.get_mut(self.active) {
@@ -1485,7 +1486,6 @@ impl eframe::App for App {
         self.process_responses();
         self.handle_close_request(&ctx);
         self.handle_dropped_files(&ctx);
-        self.route_form_keys(&ctx);
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
@@ -1574,6 +1574,10 @@ impl eframe::App for App {
             None => "magic-pdf".into(),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.route_form_keys(ctx, &mut raw_input.events);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1746,6 +1750,38 @@ mod tests {
         let (reqs, _) = take_form_input(&mut events, 1);
         assert!(reqs.is_empty());
         assert_eq!(events.len(), 4);
+    }
+
+    /// Runs one egui frame containing a button with `events` and returns whether egui
+    /// gave keyboard focus to a widget.
+    fn egui_takes_focus(events: Vec<egui::Event>) -> bool {
+        let ctx = egui::Context::default();
+        let input = |events| egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let frame = |ctx: &egui::Context, events| {
+            let mut output = ctx.run_ui(input(events), |ui| {
+                let _ = ui.button("File");
+            });
+            output.textures_delta.clear();
+        };
+        frame(&ctx, Vec::new());
+        frame(&ctx, events);
+        ctx.memory(|m| m.focused().is_some())
+    }
+
+    #[test]
+    fn tab_in_a_field_does_not_move_egui_focus() {
+        let tab = vec![key(Key::Tab, Modifiers::NONE)];
+        // Unfiltered, egui uses Tab to focus the next widget (the menu bar).
+        assert!(egui_takes_focus(tab.clone()));
+        // Filtered before egui sees it (as the raw input hook does), focus stays put
+        // and the field gets the key instead.
+        let mut events = tab;
+        let (reqs, _) = take_form_input(&mut events, 1);
+        assert!(matches!(reqs[0], Request::FormKey { key: FormKey::Down(0x09), .. }));
+        assert!(!egui_takes_focus(events));
     }
 
     #[test]
