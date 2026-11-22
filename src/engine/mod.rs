@@ -497,7 +497,7 @@ mod tests {
             Response::Error { message, .. } => panic!("{message}"),
             _ => None,
         });
-        assert_eq!(edit_state(&engine).2, false, "saving clears the dirty flag");
+        assert!(!edit_state(&engine).2, "saving clears the dirty flag");
 
         open(&engine, 2, out);
         engine.send(Request::ScanAnnots { doc: 2 });

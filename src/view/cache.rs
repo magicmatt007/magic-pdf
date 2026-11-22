@@ -22,6 +22,17 @@ pub fn width_bucket(px: f32, aspect_h_over_w: f32) -> u32 {
     w.max(16.0) as u32
 }
 
+/// Ordering key for [`TextureCache::best`] (higher is better).
+fn rank(k: &RenderKey, want_width: u32, version: u32) -> (bool, bool, i64) {
+    let sharp = k.width_px as f32 >= want_width as f32 * 0.9;
+    let current = k.version == version;
+    if sharp {
+        (true, current, -(k.width_px as i64))
+    } else {
+        (false, current, k.width_px as i64)
+    }
+}
+
 struct Entry {
     texture: TextureHandle,
     bytes: usize,
@@ -80,10 +91,11 @@ impl TextureCache {
         self.total_bytes += bytes;
     }
 
-    /// Best available texture for a page: prefers the current content `version`, then
-    /// the smallest render at least `want_width` wide, otherwise the largest available
-    /// (shown scaled until the crisp one arrives). Stale versions are used as
-    /// placeholders to avoid flicker after edits.
+    /// Best available texture for a page. Sharpness comes first: among renders that
+    /// are (nearly) wide enough, the current content `version` wins, then the smallest.
+    /// If none is wide enough, the largest is used, scaled, until the crisp one arrives.
+    /// So after an edit (e.g. typing in a form field) the previous sharp render stays
+    /// on screen instead of a blurry thumbnail of the new version.
     pub fn best(
         &mut self,
         doc: DocId,
@@ -92,27 +104,11 @@ impl TextureCache {
         want_width: u32,
         version: u32,
     ) -> Option<(TextureHandle, RenderKey)> {
-        let mut best: Option<RenderKey> = None;
-        for key in self.entries.keys() {
-            if key.doc != doc || key.page != page || key.rotation != rotation {
-                continue;
-            }
-            best = match best {
-                None => Some(*key),
-                Some(b) => {
-                    let (kv, bv) = (key.version == version, b.version == version);
-                    let better = if kv != bv {
-                        kv
-                    } else if b.width_px >= want_width {
-                        key.width_px >= want_width && key.width_px < b.width_px
-                    } else {
-                        key.width_px > b.width_px
-                    };
-                    Some(if better { *key } else { b })
-                }
-            };
-        }
-        let key = best?;
+        let key = *self
+            .entries
+            .keys()
+            .filter(|k| k.doc == doc && k.page == page && k.rotation == rotation)
+            .max_by_key(|k| rank(k, want_width, version))?;
         let entry = self.entries.get_mut(&key)?;
         entry.last_used = self.frame;
         Some((entry.texture.clone(), key))
@@ -165,7 +161,51 @@ impl TextureCache {
 
 #[cfg(test)]
 mod tests {
-    use super::width_bucket;
+    use super::*;
+
+    fn key(width_px: u32, version: u32) -> RenderKey {
+        RenderKey {
+            doc: 1,
+            page: 0,
+            width_px,
+            rotation: Rotation::R0,
+            version,
+        }
+    }
+
+    fn insert(cache: &mut TextureCache, ctx: &egui::Context, k: RenderKey) {
+        cache.insert(ctx, k, [1, 1], vec![255; 4]);
+    }
+
+    fn best(cache: &mut TextureCache, want: u32, version: u32) -> RenderKey {
+        cache.best(1, 0, Rotation::R0, want, version).unwrap().1
+    }
+
+    #[test]
+    fn keeps_sharp_old_render_over_blurry_new_thumbnail() {
+        let ctx = egui::Context::default();
+        let mut cache = TextureCache::new(usize::MAX);
+        insert(&mut cache, &ctx, key(1000, 0));
+        // After an edit only the new thumbnail has arrived: keep showing the sharp one.
+        insert(&mut cache, &ctx, key(130, 1));
+        assert_eq!(best(&mut cache, 1000, 1), key(1000, 0));
+        // Once the sharp new version arrives it wins.
+        insert(&mut cache, &ctx, key(1000, 1));
+        assert_eq!(best(&mut cache, 1000, 1), key(1000, 1));
+        // The thumbnail view itself gets the small current render.
+        assert_eq!(best(&mut cache, 130, 1), key(130, 1));
+    }
+
+    #[test]
+    fn prefers_smallest_sharp_then_largest_blurry() {
+        let ctx = egui::Context::default();
+        let mut cache = TextureCache::new(usize::MAX);
+        insert(&mut cache, &ctx, key(200, 0));
+        insert(&mut cache, &ctx, key(800, 0));
+        insert(&mut cache, &ctx, key(1600, 0));
+        assert_eq!(best(&mut cache, 700, 0), key(800, 0));
+        assert_eq!(best(&mut cache, 3000, 0), key(1600, 0));
+    }
 
     #[test]
     fn buckets_are_monotonic_and_cover_request() {
