@@ -9,6 +9,7 @@ use std::ptr;
 use pdfium_render::prelude::*;
 
 use super::commands::*;
+use super::textbox::{self, BoxStyle, GlyphSource};
 
 pub type Lib = &'static dyn PdfiumLibraryBindings;
 
@@ -799,7 +800,16 @@ impl<'d> Page<'d> {
                 contents: string("Contents"),
                 author: string("T"),
                 modified: string("M"),
+                font_size: None,
+                text_color: None,
             });
+            if kind == AnnotKind::FreeText
+                && let Some(last) = out.last_mut()
+            {
+                let (size, color) = textbox::parse_default_appearance(&string("DA"));
+                last.font_size = size;
+                last.text_color = color;
+            }
         }
         out
     }
@@ -829,6 +839,7 @@ impl<'d> Page<'d> {
             AnnotKind::Ink => SUBTYPE_INK,
             AnnotKind::Square => SUBTYPE_SQUARE,
             AnnotKind::Circle => SUBTYPE_CIRCLE,
+            AnnotKind::FreeText => SUBTYPE_FREETEXT,
             other => return Err(format!("creating {} annotations is not supported", other.label())),
         };
         let handle = unsafe { lib.FPDFPage_CreateAnnot(self.handle, subtype) };
@@ -883,6 +894,15 @@ impl<'d> Page<'d> {
             if n.kind == AnnotKind::Note {
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Name", "Comment");
             }
+            if n.kind == AnnotKind::FreeText {
+                let style = BoxStyle {
+                    font_size: n.font_size,
+                    text_color: n.text_color,
+                    border: (n.color, n.width),
+                    fill: n.interior,
+                };
+                lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(&style));
+            }
         }
         if index < 0 {
             return Err("annotation index unavailable".into());
@@ -898,7 +918,11 @@ impl<'d> Page<'d> {
             read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len) })
         };
         let mut undo = AnnotChange::default();
-        let restyle = change.color.is_some() || change.interior.is_some() || change.width.is_some();
+        let restyle = change.color.is_some()
+            || change.interior.is_some()
+            || change.width.is_some()
+            || change.font_size.is_some()
+            || change.text_color.is_some();
         unsafe {
             if restyle {
                 // PDFium refuses colour access while an appearance stream exists. Drop it;
@@ -927,6 +951,23 @@ impl<'d> Page<'d> {
                 undo.width = Some(old);
                 lib.FPDFAnnot_SetBorder(a.handle, hr, vr, w);
             }
+            if change.font_size.is_some() || change.text_color.is_some() {
+                let (size, color) = textbox::parse_default_appearance(&string("DA"));
+                let (size, color) = (size.unwrap_or(12.0), color.unwrap_or([0, 0, 0]));
+                if change.font_size.is_some() {
+                    undo.font_size = Some(size);
+                }
+                if change.text_color.is_some() {
+                    undo.text_color = Some(color);
+                }
+                let style = BoxStyle {
+                    font_size: change.font_size.unwrap_or(size),
+                    text_color: change.text_color.unwrap_or(color),
+                    border: ([0, 0, 0], 0.0),
+                    fill: None,
+                };
+                lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(&style));
+            }
             if let Some(text) = &change.contents {
                 undo.contents = Some(string("Contents"));
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", text);
@@ -934,6 +975,54 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "M", &pdf_date_now());
         }
         Ok(undo)
+    }
+
+    pub fn annot_is_text_box(&self, index: usize) -> bool {
+        self.annot(index)
+            .is_some_and(|a| unsafe { self.lib().FPDFAnnot_GetSubtype(a.handle) } == SUBTYPE_FREETEXT)
+    }
+
+    /// Re-lays out a text box from its stored text and style and sets its appearance
+    /// (the box grows or shrinks in height to fit the text).
+    pub fn refresh_text_box(&self, index: usize, font: &dyn GlyphSource) -> Result<(), String> {
+        let lib = self.lib();
+        let a = self.annot(index).ok_or("annotation not found")?;
+        unsafe {
+            // Without an appearance PDFium lets us read the colours.
+            lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
+            let string = |key: &str| {
+                read_utf16(|buf, len| lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len))
+            };
+            let mut r = FS_RECTF {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            };
+            lib.FPDFAnnot_GetRect(a.handle, &mut r);
+            let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
+            lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width);
+            let (size, color) = textbox::parse_default_appearance(&string("DA"));
+            let style = BoxStyle {
+                font_size: size.unwrap_or(12.0),
+                text_color: color.unwrap_or([0, 0, 0]),
+                border: (self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]), width),
+                fill: self.annot_color(&a, COLORTYPE_INTERIOR),
+            };
+            let (rect, content) = textbox::appearance(to_box(&r), &string("Contents"), &style, font);
+            let new = FS_RECTF {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            };
+            lib.FPDFAnnot_SetRect(a.handle, &new);
+            let content = wide(&content);
+            if !lib.is_true(lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, content.as_ptr())) {
+                return Err("PDFium could not set the text box appearance".into());
+            }
+        }
+        Ok(())
     }
 
     /// Forwards a mouse event to the form-fill module. Returns true if a field handled it.
@@ -1071,6 +1160,100 @@ impl<'d> Page<'d> {
         all.dedup();
         for i in all.into_iter().rev() {
             unsafe { lib.FPDFPage_RemoveAnnot(self.handle, i as c_int) };
+        }
+    }
+}
+
+
+/// Glyph metrics and outlines from a TrueType font loaded into a scratch document (so
+/// nothing is added to the user's documents).
+pub struct PdfiumFont {
+    lib: Lib,
+    _doc: Doc,
+    font: FPDF_FONT,
+    advances: RefCell<std::collections::HashMap<char, f32>>,
+    ascent: f32,
+}
+
+impl PdfiumFont {
+    pub fn load(lib: Lib, ttf: &[u8]) -> Result<PdfiumFont, String> {
+        const FPDF_FONT_TRUETYPE: c_int = 2;
+        let doc = Doc::create(lib)?;
+        let font = unsafe { lib.FPDFText_LoadFont(doc.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+        if font.is_null() {
+            return Err("PDFium could not load the text box font".into());
+        }
+        let mut ascent = 0.8;
+        unsafe { lib.FPDFFont_GetAscent(font, 1.0, &mut ascent) };
+        Ok(PdfiumFont {
+            lib,
+            _doc: doc,
+            font,
+            advances: RefCell::new(std::collections::HashMap::new()),
+            ascent,
+        })
+    }
+}
+
+impl Drop for PdfiumFont {
+    fn drop(&mut self) {
+        unsafe { self.lib.FPDFFont_Close(self.font) };
+    }
+}
+
+impl GlyphSource for PdfiumFont {
+    fn advance(&self, ch: char) -> f32 {
+        *self.advances.borrow_mut().entry(ch).or_insert_with(|| {
+            let mut w = 0.0;
+            let ok = unsafe { self.lib.FPDFFont_GetGlyphWidth(self.font, ch as u32, 1.0, &mut w) };
+            if self.lib.is_true(ok) { w } else { 0.5 }
+        })
+    }
+
+    fn ascent(&self) -> f32 {
+        self.ascent
+    }
+
+    fn outline(&self, ch: char, size: f32, x: f32, y: f32, out: &mut String) {
+        use std::fmt::Write as _;
+        const SEGMENT_LINETO: c_int = 0;
+        const SEGMENT_BEZIERTO: c_int = 1;
+        const SEGMENT_MOVETO: c_int = 2;
+        let lib = self.lib;
+        unsafe {
+            // PDFium returns outlines in em units (whatever size is asked for), so
+            // request size 1 and scale ourselves.
+            let path = lib.FPDFFont_GetGlyphPath(self.font, ch as u32, 1.0);
+            if path.is_null() {
+                return;
+            }
+            let mut bezier: Vec<(f32, f32)> = Vec::new();
+            for i in 0..lib.FPDFGlyphPath_CountGlyphSegments(path) {
+                let seg = lib.FPDFGlyphPath_GetGlyphPathSegment(path, i);
+                let (mut px, mut py) = (0.0, 0.0);
+                lib.FPDFPathSegment_GetPoint(seg, &mut px, &mut py);
+                let (px, py) = (x + px * size, y + py * size);
+                match lib.FPDFPathSegment_GetType(seg) {
+                    SEGMENT_MOVETO => {
+                        let _ = writeln!(out, "{px:.2} {py:.2} m");
+                    }
+                    SEGMENT_LINETO => {
+                        let _ = writeln!(out, "{px:.2} {py:.2} l");
+                    }
+                    SEGMENT_BEZIERTO => {
+                        bezier.push((px, py));
+                        if bezier.len() == 3 {
+                            let [(x1, y1), (x2, y2), (x3, y3)] = [bezier[0], bezier[1], bezier[2]];
+                            let _ = writeln!(out, "{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x3:.2} {y3:.2} c");
+                            bezier.clear();
+                        }
+                    }
+                    _ => {}
+                }
+                if lib.is_true(lib.FPDFPathSegment_GetClose(seg)) {
+                    out.push_str("h\n");
+                }
+            }
         }
     }
 }

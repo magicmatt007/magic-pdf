@@ -42,6 +42,11 @@ pub struct AnnotStyle {
     pub shape: Rgb,
     pub shape_width: f32,
     pub shape_fill: Option<Rgb>,
+    pub textbox_border: Rgb,
+    pub textbox_border_width: f32,
+    pub textbox_text: Rgb,
+    pub textbox_font_size: f32,
+    pub textbox_fill: Option<Rgb>,
 }
 
 impl Default for AnnotStyle {
@@ -56,6 +61,11 @@ impl Default for AnnotStyle {
             shape: [220, 30, 30],
             shape_width: 2.0,
             shape_fill: None,
+            textbox_border: [220, 30, 30],
+            textbox_border_width: 1.0,
+            textbox_text: [0, 0, 0],
+            textbox_font_size: 12.0,
+            textbox_fill: Some([255, 255, 255]),
         }
     }
 }

@@ -16,6 +16,7 @@ pub const TEXT_STRIKETHROUGH: &str = "\u{e5c2}";
 pub const NOTE_PENCIL: &str = "\u{e34c}";
 pub const SCRIBBLE: &str = "\u{e806}";
 pub const RECTANGLE: &str = "\u{e3f0}";
+pub const TEXTBOX: &str = "\u{eb0a}";
 pub const CIRCLE: &str = "\u{e18a}";
 pub const CARET_LEFT: &str = "\u{e138}";
 pub const CARET_RIGHT: &str = "\u{e13a}";

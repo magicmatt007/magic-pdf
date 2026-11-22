@@ -1950,6 +1950,7 @@ dependencies = [
  "directories",
  "eframe",
  "env_logger",
+ "epaint_default_fonts",
  "log",
  "open",
  "pdfium-render",

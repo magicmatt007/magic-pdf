@@ -73,6 +73,8 @@ pub struct AnnotSelection {
     /// The comment as last saved (or loaded), to avoid saving the same text twice.
     pub committed: String,
     pub focus_contents: bool,
+    /// A text box's text is being edited on the page.
+    pub editing: bool,
 }
 
 pub struct DocTab {
@@ -110,6 +112,8 @@ pub struct DocTab {
     pub annots: HashMap<usize, Vec<AnnotInfo>>,
     pub annots_scanned: bool,
     pub selected_annot: Option<AnnotSelection>,
+    /// A just-created annotation to open for typing once it is listed.
+    pub pending_edit: Option<(usize, usize)>,
     pub draft: Option<Draft>,
     /// Bumped per page when its content changes, so stale renders are replaced.
     pub page_versions: HashMap<usize, u32>,
@@ -175,6 +179,7 @@ impl DocTab {
             annots: HashMap::new(),
             annots_scanned: false,
             selected_annot: None,
+            pending_edit: None,
             draft: None,
             page_versions: HashMap::new(),
             can_undo: false,
@@ -262,6 +267,7 @@ impl DocTab {
             committed: contents.clone(),
             contents,
             focus_contents: false,
+            editing: false,
         });
         self.selection = None;
     }

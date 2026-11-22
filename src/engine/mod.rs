@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod pages;
+pub mod textbox;
 mod pdf;
 #[cfg(windows)]
 mod print_windows;
@@ -274,6 +275,8 @@ mod tests {
             author: "tester".into(),
             quads: Vec::new(),
             ink: Vec::new(),
+            font_size: 12.0,
+            text_color: [0, 0, 0],
         };
         let mut hl = new(AnnotKind::Highlight, heading);
         hl.quads = vec![[
@@ -553,6 +556,8 @@ mod tests {
                 author: String::new(),
                 quads: Vec::new(),
                 ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 0],
             },
         });
         recv_until(&engine, |r| matches!(r, Response::AnnotAdded { .. }).then_some(()));
@@ -717,6 +722,8 @@ mod tests {
                 author: String::new(),
                 quads: Vec::new(),
                 ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 0],
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -771,5 +778,113 @@ mod tests {
         let a = annots(&engine, 1);
         assert_eq!(a.iter().find(|a| a.index == index).unwrap().interior, Some([255, 0, 0]));
         assert!(red_inside(&engine, 6) > 1000);
+    }
+
+    #[test]
+    fn text_box_renders_wraps_and_saves() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-textbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_serial, engine) = start();
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+        open(&engine, 1, form);
+        // An empty area of the page, 150 pt wide.
+        let rect = PdfBox {
+            left: 300.0,
+            bottom: 380.0,
+            right: 450.0,
+            top: 400.0,
+        };
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::FreeText,
+                rect,
+                color: [220, 30, 30],
+                interior: Some([255, 255, 255]),
+                width: 1.0,
+                contents: "Grüße und Привет – this sentence is long enough to wrap".into(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 255],
+            },
+        });
+        let index = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        let list = annots(&engine, 1);
+        let tb = list.iter().find(|a| a.index == index).unwrap().clone();
+        assert_eq!(tb.kind, AnnotKind::FreeText);
+        assert_eq!(tb.font_size, Some(12.0));
+        assert_eq!(tb.text_color, Some([0, 0, 255]));
+        assert_eq!(tb.rect.top, 400.0, "the box keeps its top edge");
+        assert!(tb.rect.top - tb.rect.bottom > 40.0, "box grew to fit the wrapped lines: {:?}", tb.rect);
+
+        // Text pixels inside the box (rendered 600 px wide: 595 pt page).
+        let blue_in_box = |engine: &Engine, version, r: PdfBox| {
+            let key = RenderKey {
+                doc: 1,
+                page: 0,
+                width_px: 600,
+                rotation: Rotation::R0,
+                version,
+            };
+            engine.send(Request::Render { key, priority: 0.0 });
+            let (size, rgba) = recv_until(engine, |m| match m {
+                Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
+                _ => None,
+            });
+            let s = size[0] as f32 / 595.0;
+            let mut n = 0;
+            for y in ((842.0 - r.top) * s) as usize..((842.0 - r.bottom) * s) as usize {
+                for x in (r.left * s) as usize..(r.right * s) as usize {
+                    let p = &rgba[(y * size[0] + x) * 4..][..4];
+                    if p[2] > 150 && p[0] < 100 && p[1] < 100 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(blue_in_box(&engine, 1, tb.rect) > 200, "text not drawn");
+
+        // Recolour the text: the appearance is regenerated.
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index,
+            change: AnnotChange {
+                text_color: Some([0, 0, 0]),
+                ..Default::default()
+            },
+        });
+        let list = annots(&engine, 1);
+        assert_eq!(list.iter().find(|a| a.index == index).unwrap().text_color, Some([0, 0, 0]));
+        assert_eq!(blue_in_box(&engine, 2, tb.rect), 0, "old colour still drawn");
+
+        let out = dir.join("tb.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let bytes = std::fs::read(&out).unwrap();
+        let has = |n: &str| bytes.windows(n.len()).any(|w| w == n.as_bytes());
+        assert!(has("/FreeText") && has("/DA"));
+        assert!(!has("/FontFile"), "no font must be embedded in the document");
+        if let Some(keep) = std::env::var_os("MAGIC_PDF_KEEP_TEXTBOX") {
+            std::fs::copy(&out, keep).unwrap();
+        }
+
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let list = recv_until(&engine, |r| match r {
+            Response::PageAnnots { doc: 2, page: 0, annots, .. } => Some(annots),
+            _ => None,
+        });
+        let tb2 = list.iter().find(|a| a.kind == AnnotKind::FreeText).unwrap();
+        assert!(tb2.contents.starts_with("Grüße und Привет"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

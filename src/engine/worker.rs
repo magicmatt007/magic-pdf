@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::commands::*;
 use super::pages::{PageMapping, PageOp};
 use super::library_search_dirs;
-use super::pdf::{Doc, Lib, OpenError};
+use super::pdf::{Doc, Lib, OpenError, PdfiumFont};
 
 const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
 
@@ -110,10 +110,12 @@ struct Worker {
     scans: Vec<ScanJob>,
     tx: Sender<Response>,
     wake: Box<dyn Fn() + Send>,
+    /// Font for text box appearances, loaded on first use.
+    text_font: Option<PdfiumFont>,
 }
 
 /// Binds and initialises PDFium once per process; it stays loaded until exit.
-fn shared_pdfium() -> Result<&'static Pdfium, String> {
+pub(super) fn shared_pdfium() -> Result<&'static Pdfium, String> {
     static PDFIUM: std::sync::Mutex<Option<&'static Pdfium>> = std::sync::Mutex::new(None);
     let mut slot = PDFIUM.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = *slot {
@@ -177,6 +179,7 @@ pub(super) fn run(
         scans: Vec::new(),
         tx,
         wake,
+        text_font: None,
     };
 
     loop {
@@ -708,6 +711,26 @@ impl Worker {
         self.error(doc, "Native printing is only available on Windows");
     }
 
+    /// Redraws a text box annotation (after creating or changing it).
+    fn refresh_text_box(&mut self, doc: DocId, page_index: usize, index: usize) {
+        if self.text_font.is_none() {
+            match PdfiumFont::load(self.lib, epaint_default_fonts::UBUNTU_LIGHT) {
+                Ok(f) => self.text_font = Some(f),
+                Err(e) => {
+                    self.error(doc, e);
+                    return;
+                }
+            }
+        }
+        let (Some(od), Some(font)) = (self.docs.get(&doc), self.text_font.as_ref()) else { return };
+        let Some(page) = od.doc.page(page_index) else { return };
+        if page.annot_is_text_box(index)
+            && let Err(e) = page.refresh_text_box(index, font)
+        {
+            log::warn!("text box: {e}");
+        }
+    }
+
     fn after_edit(&self, doc: DocId, page: usize) {
         self.send(Response::PageChanged { doc, page });
         self.send_annots(doc, page);
@@ -751,6 +774,7 @@ impl Worker {
             Ok(index) => {
                 od.colors.insert((page_index, index), (Some(annot.color), annot.interior));
                 Self::push_edit(od, Edit::Add { page: page_index, index });
+                self.refresh_text_box(doc, page_index, index);
                 self.send(Response::AnnotAdded {
                     doc,
                     page: page_index,
@@ -781,6 +805,7 @@ impl Worker {
                         redo: change,
                     },
                 );
+                self.refresh_text_box(doc, page_index, index);
                 self.after_edit(doc, page_index);
             }
             Err(e) => self.error(doc, e),
@@ -832,9 +857,12 @@ impl Worker {
                 (Edit::Pages(_), _) => unreachable!("handled above"),
             }
         };
-        if let Edit::Update { index, undo: u, redo: r, .. } = &edit {
+        let updated = if let Edit::Update { index, undo: u, redo: r, .. } = &edit {
             remember_colors(od, page_index, *index, if undo { u } else { r });
-        }
+            Some(*index)
+        } else {
+            None
+        };
         if !ok {
             log::warn!("could not {} {edit:?}", if undo { "undo" } else { "redo" });
         }
@@ -842,6 +870,9 @@ impl Worker {
             od.redo.push(edit);
         } else {
             od.undo.push(edit);
+        }
+        if let Some(index) = updated {
+            self.refresh_text_box(doc, page_index, index);
         }
         self.after_edit(doc, page_index);
     }

@@ -350,6 +350,15 @@ impl App {
                     } else {
                         tab.annots.insert(page, annots);
                     }
+                    // A just-created note or text box: open it for typing now that it
+                    // is known (its kind decides between comment box and in-place text).
+                    if let Some((p, i)) = tab.pending_edit
+                        && p == page
+                        && tab.annot(p, i).is_some()
+                    {
+                        tab.pending_edit = None;
+                        document_view::focus_annot(tab, p, i, true);
+                    }
                 }
             }
             Response::AnnotScanDone { doc } => {
@@ -365,10 +374,10 @@ impl App {
             Response::AnnotAdded { doc, page, index } => {
                 let tool = self.tool;
                 if let Some(tab) = self.tab_mut(doc)
-                    && tool == Tool::Note
+                    && matches!(tool, Tool::Note | Tool::TextBox)
                 {
-                    // Let the user type the note right away.
-                    document_view::focus_annot(tab, page, index, true);
+                    // Let the user type the note or the box's text right away.
+                    tab.pending_edit = Some((page, index));
                 }
             }
             Response::EditState {
@@ -934,6 +943,7 @@ impl App {
                 (Key::D, Tool::Ink),
                 (Key::R, Tool::Rect),
                 (Key::E, Tool::Ellipse),
+                (Key::T, Tool::TextBox),
             ] {
                 if shortcut(Modifiers::NONE, key) {
                     self.tool = tool;
@@ -1620,7 +1630,7 @@ impl App {
                         ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
-                        ("U / N / D / R / E", "Highlight, note, draw, rectangle, ellipse"),
+                        ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
                         ("Del", "Delete the selected annotation or thumbnail pages"),
                         ("Ctrl / Shift + click thumbnail", "Select several pages"),
                         ("Drag thumbnails", "Reorder pages"),

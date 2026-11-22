@@ -28,14 +28,16 @@ pub enum Tool {
     Ink,
     Rect,
     Ellipse,
+    TextBox,
 }
 
 impl Tool {
-    pub const ANNOTATION_TOOLS: [Tool; 7] = [
+    pub const ANNOTATION_TOOLS: [Tool; 8] = [
         Tool::Highlight,
         Tool::Underline,
         Tool::StrikeOut,
         Tool::Note,
+        Tool::TextBox,
         Tool::Ink,
         Tool::Rect,
         Tool::Ellipse,
@@ -61,6 +63,7 @@ impl Tool {
             Tool::Ink => icons::SCRIBBLE,
             Tool::Rect => icons::RECTANGLE,
             Tool::Ellipse => icons::CIRCLE,
+            Tool::TextBox => icons::TEXTBOX,
         })
     }
 
@@ -75,6 +78,7 @@ impl Tool {
             Tool::Ink => "Freehand drawing (D)",
             Tool::Rect => "Rectangle (R)",
             Tool::Ellipse => "Ellipse (E)",
+            Tool::TextBox => "Text box (T): click or drag, then type",
         }
     }
 
@@ -87,6 +91,7 @@ impl Tool {
             Tool::Note => Some(&mut style.note),
             Tool::Ink => Some(&mut style.ink),
             Tool::Rect | Tool::Ellipse => Some(&mut style.shape),
+            Tool::TextBox => Some(&mut style.textbox_border),
             Tool::Hand | Tool::SelectText => None,
         }
     }
@@ -337,10 +342,24 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     });
 
     // Drawing tools.
-    if matches!(tool, Tool::Ink | Tool::Rect | Tool::Ellipse) && !middle_down {
+    if matches!(tool, Tool::Ink | Tool::Rect | Tool::Ellipse | Tool::TextBox) && !middle_down {
         draw_tool_input(ui, tab, response, view, cx, pointer);
         if hovered {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        // A click (no drag) with the text box tool places a box of default width.
+        if tool == Tool::TextBox
+            && response.clicked()
+            && let Some((page, p)) = pointer.and_then(|pt| screen_to_pdf(tab, pt, view, None))
+        {
+            let rect = PdfBox {
+                left: p.x,
+                bottom: p.y - 20.0,
+                right: p.x + crate::engine::textbox::DEFAULT_WIDTH,
+                top: p.y,
+            };
+            create(tab, page, cx, AnnotKind::FreeText, rect, cx.style.textbox_border, Vec::new(), Vec::new());
+            return;
         }
         if response.dragged() || tab.draft.is_some() {
             return;
@@ -439,6 +458,15 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
 
     if matches!(tool, Tool::Hand | Tool::SelectText) && hovered_annot.is_some() && link.is_none() && !panning {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    if response.double_clicked()
+        && let Some(a) = hovered_annot.as_ref().filter(|a| a.kind == AnnotKind::FreeText)
+        && matches!(tool, Tool::Hand | Tool::SelectText)
+    {
+        // Double-click a text box to edit its text.
+        let index = a.index;
+        focus_annot(tab, page, index, true);
+        return;
     }
     if response.clicked() && link.is_none() {
         match &hovered_annot {
@@ -659,6 +687,22 @@ fn draw_tool_input(
                 let stroke = points.iter().map(|p| (p.x, p.y)).collect();
                 create(tab, page, cx, AnnotKind::Ink, rect, style.ink, Vec::new(), vec![stroke]);
             }
+            Draft::Shape { page, start, end } if cx.tool == Tool::TextBox => {
+                // The drag sets position and width; the height follows the text.
+                let left = start.x.min(end.x);
+                let mut right = start.x.max(end.x);
+                if right - left < 30.0 {
+                    right = left + crate::engine::textbox::DEFAULT_WIDTH;
+                }
+                let top = start.y.max(end.y);
+                let rect = PdfBox {
+                    left,
+                    bottom: top - 20.0,
+                    right,
+                    top,
+                };
+                create(tab, page, cx, AnnotKind::FreeText, rect, style.textbox_border, Vec::new(), Vec::new());
+            }
             Draft::Shape { page, start, end } => {
                 let rect = PdfBox {
                     left: start.x.min(end.x),
@@ -695,6 +739,7 @@ fn create(
     let (width, interior) = match kind {
         AnnotKind::Ink => (style.ink_width, None),
         AnnotKind::Square | AnnotKind::Circle => (style.shape_width, style.shape_fill),
+        AnnotKind::FreeText => (style.textbox_border_width, style.textbox_fill),
         _ => (1.0, None),
     };
     tab.outbox.push(Request::AddAnnot {
@@ -710,6 +755,8 @@ fn create(
             author: cx.author.to_string(),
             quads,
             ink,
+            font_size: style.textbox_font_size,
+            text_color: style.textbox_text,
         },
     });
 }
@@ -949,8 +996,17 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
                 return;
             };
             let r = Rect::from_two_pos(a, b);
-            let stroke = Stroke::new(cx.style.shape_width * zoom, rgb(cx.style.shape));
-            let fill = cx.style.shape_fill.map(rgb).unwrap_or(Color32::TRANSPARENT);
+            let (stroke, fill) = if cx.tool == Tool::TextBox {
+                (
+                    Stroke::new(cx.style.textbox_border_width.max(1.0) * zoom, rgb(cx.style.textbox_border)),
+                    Color32::TRANSPARENT,
+                )
+            } else {
+                (
+                    Stroke::new(cx.style.shape_width * zoom, rgb(cx.style.shape)),
+                    cx.style.shape_fill.map(rgb).unwrap_or(Color32::TRANSPARENT),
+                )
+            };
             if cx.tool == Tool::Ellipse {
                 painter.add(Shape::ellipse_filled(r.center(), r.size() / 2.0, fill));
                 painter.add(Shape::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
@@ -1024,6 +1080,10 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
     if !view.intersects(screen) {
         return;
     }
+    if sel.editing {
+        text_box_editor(ui, tab, &annot, screen);
+        return;
+    }
     let width = 260.0;
     let mut pos = pos2(screen.right() + 10.0, screen.top());
     if pos.x + width > view.right() {
@@ -1035,6 +1095,7 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
     let mut delete = false;
     let mut contents = sel.contents.clone();
     let mut focus = sel.focus_contents;
+    let mut start_editing = false;
     egui::Area::new(Id::unique(("annot_popup", tab.id)))
         .fixed_pos(pos)
         .order(egui::Order::Foreground)
@@ -1098,20 +1159,40 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
                         }
                     }
                 }
-                let edit = ui.add(
-                    egui::TextEdit::multiline(&mut contents)
-                        .hint_text("Add a comment…")
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
-                #[cfg(test)]
-                ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_comment_box"), edit.rect));
-                if focus {
-                    edit.request_focus();
-                    focus = false;
-                }
-                if edit.lost_focus() && contents != sel.committed {
-                    change.contents = Some(contents.clone());
+                if annot.kind == AnnotKind::FreeText {
+                    // A text box's "comment" is its visible text, edited on the page.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak("Text");
+                        for c in TEXT_PALETTE {
+                            if color_swatch(ui, c, annot.text_color == Some(c)).clicked() {
+                                change.text_color = Some(c);
+                            }
+                        }
+                    });
+                    let mut size = annot.font_size.unwrap_or(12.0);
+                    let r = ui.add(egui::Slider::new(&mut size, 6.0..=48.0).step_by(1.0).text("Size"));
+                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                        change.font_size = Some(size);
+                    }
+                    if ui.button("Edit text (double-click the box)").clicked() {
+                        start_editing = true;
+                    }
+                } else {
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(&mut contents)
+                            .hint_text("Add a comment…")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_comment_box"), edit.rect));
+                    if focus {
+                        edit.request_focus();
+                        focus = false;
+                    }
+                    if edit.lost_focus() && contents != sel.committed {
+                        change.contents = Some(contents.clone());
+                    }
                 }
             });
         });
@@ -1121,6 +1202,10 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
         }
         s.contents = contents;
         s.focus_contents = focus;
+        if start_editing {
+            s.editing = true;
+            s.focus_contents = true;
+        }
     }
     if delete {
         tab.outbox.push(Request::DeleteAnnot {
@@ -1136,6 +1221,69 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
             index: sel.index,
             change,
         });
+    }
+}
+
+/// Text colours offered for text boxes.
+pub const TEXT_PALETTE: [Rgb; 6] = [[0, 0, 0], [80, 80, 80], [220, 30, 30], [0, 110, 230], [40, 140, 60], [140, 70, 200]];
+
+/// Edits a text box's text in place: an editor drawn over the box, using the same
+/// font (egui's proportional font is the one the box is drawn with), size and colours.
+/// The text is saved when the editor loses focus (click elsewhere, Esc).
+fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect) {
+    let Some(sel) = tab.selected_annot.as_mut() else { return };
+    let zoom = tab.viewport.zoom;
+    let size = annot.font_size.unwrap_or(12.0) * zoom;
+    let pad = crate::engine::textbox::PADDING * zoom;
+    let border = annot.width * zoom;
+    let fill = annot.interior.map(rgb).unwrap_or(Color32::WHITE);
+    let text_color = rgb(annot.text_color.unwrap_or([0, 0, 0]));
+    let mut contents = sel.contents.clone();
+    let mut lost = false;
+    egui::Area::new(Id::unique(("text_box_editor", tab.id)))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(Stroke::new(border, rgb(annot.color.unwrap_or([0, 0, 0]))))
+                .inner_margin(pad)
+                .show(ui, |ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(&mut contents)
+                            .font(egui::FontId::proportional(size))
+                            .text_color(text_color)
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_rows(1)
+                            .desired_width((screen.width() - 2.0 * pad - 2.0 * border).max(20.0)),
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_text_box_editor"), edit.rect));
+                    if sel.focus_contents {
+                        edit.request_focus();
+                        sel.focus_contents = false;
+                    }
+                    lost = edit.lost_focus();
+                });
+        });
+    sel.contents = contents;
+    if lost {
+        // Done editing: save the text, keep the box selected.
+        sel.editing = false;
+        if sel.contents != sel.committed {
+            sel.committed = sel.contents.clone();
+            let req = Request::UpdateAnnot {
+                doc: tab.id,
+                page: sel.page,
+                index: sel.index,
+                change: AnnotChange {
+                    contents: Some(sel.contents.clone()),
+                    ..Default::default()
+                },
+            };
+            tab.outbox.push(req);
+        }
     }
 }
 
@@ -1170,8 +1318,13 @@ pub fn format_pdf_date(d: &str) -> String {
 /// Applies an annotation selection change coming from outside the view (e.g. sidebar).
 pub fn focus_annot(tab: &mut DocTab, page: usize, index: usize, edit: bool) {
     tab.select_annot(page, index);
-    if let Some(AnnotSelection { focus_contents, .. }) = &mut tab.selected_annot {
+    let is_text_box = tab.annot(page, index).is_some_and(|a| a.kind == AnnotKind::FreeText);
+    if let Some(AnnotSelection {
+        focus_contents, editing, ..
+    }) = &mut tab.selected_annot
+    {
         *focus_contents = edit;
+        *editing = edit && is_text_box;
     }
     if let Some(rect) = tab.annot(page, index).map(|a| a.rect) {
         tab.reveal(page, rect);
@@ -1327,6 +1480,8 @@ mod tests {
                 contents: String::new(),
                 author: "me".into(),
                 modified: String::new(),
+                font_size: None,
+                text_color: None,
             }],
         );
         tab.select_annot(0, 3);
@@ -1386,6 +1541,8 @@ mod tests {
                 contents: String::new(),
                 author: "me".into(),
                 modified: String::new(),
+                font_size: None,
+                text_color: None,
             }],
         );
         // A big text field under where the popup appears.
@@ -1447,6 +1604,8 @@ mod tests {
                 contents: String::new(),
                 author: String::new(),
                 modified: String::new(),
+                font_size: None,
+                text_color: None,
             }],
         );
         tab.select_annot(0, 5);
@@ -1463,5 +1622,64 @@ mod tests {
         });
         assert!(matches!(interior, Some(Some(_))), "ticking Fill sent {interior:?}");
         assert!(tab.selected_annot.is_some(), "popup stays open");
+    }
+
+    #[test]
+    fn text_box_tool_creates_and_edits_in_place() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::TextBox);
+        }
+        // Click on the page with the text box tool.
+        let page = tab.viewport.rect_to_screen(tab.layout.page_rect(0).unwrap(), tab.view_rect);
+        let at = page.center();
+        tab.outbox.clear();
+        click(&ctx, &mut tab, &mut cache, at, Tool::TextBox);
+        let created = tab.outbox.iter().find_map(|r| match r {
+            Request::AddAnnot { annot, .. } if annot.kind == AnnotKind::FreeText => Some(annot.clone()),
+            _ => None,
+        });
+        let created = created.expect("a text box is created");
+        assert!((created.rect.right - created.rect.left - 200.0).abs() < 1e-3);
+
+        // The engine lists the new box; it opens for typing.
+        tab.annots.insert(
+            0,
+            vec![AnnotInfo {
+                index: 7,
+                kind: AnnotKind::FreeText,
+                rect: PdfBox {
+                    bottom: created.rect.top - 23.0,
+                    ..created.rect
+                },
+                color: Some([220, 30, 30]),
+                interior: Some([255, 255, 255]),
+                width: 1.0,
+                contents: String::new(),
+                author: String::new(),
+                modified: String::new(),
+                font_size: Some(12.0),
+                text_color: Some([0, 0, 0]),
+            }],
+        );
+        focus_annot(&mut tab, 0, 7, true);
+        for _ in 0..2 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::TextBox);
+        }
+        assert!(ctx.data(|d| d.get_temp::<Rect>(Id::unique("test_text_box_editor"))).is_some());
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("Hallo".into())], Tool::TextBox);
+        tab.outbox.clear();
+
+        // Click elsewhere on the page (with the hand tool) to finish.
+        click(&ctx, &mut tab, &mut cache, page.center_bottom() - vec2(0.0, 30.0), Tool::Hand);
+        let saved = tab.outbox.iter().any(|r| {
+            matches!(r, Request::UpdateAnnot { index: 7, change, .. } if change.contents.as_deref() == Some("Hallo"))
+        });
+        assert!(saved, "typed text was not saved");
+        let saves = tab.outbox.iter().filter(|r| matches!(r, Request::UpdateAnnot { .. })).count();
+        assert_eq!(saves, 1);
     }
 }

@@ -208,15 +208,16 @@ impl AnnotKind {
                 | AnnotKind::Ink
                 | AnnotKind::Square
                 | AnnotKind::Circle
+                | AnnotKind::FreeText
         )
     }
 
     pub fn has_border_width(self) -> bool {
-        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle)
+        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
     }
 
     pub fn has_interior(self) -> bool {
-        matches!(self, AnnotKind::Square | AnnotKind::Circle)
+        matches!(self, AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
     }
 }
 
@@ -235,6 +236,9 @@ pub struct NewAnnot {
     /// Text markup quads: x1,y1 (top-left), x2,y2 (top-right), x3,y3 (bottom-left), x4,y4.
     pub quads: Vec<[f32; 8]>,
     pub ink: Vec<Vec<(f32, f32)>>,
+    /// Text boxes: font size and text colour.
+    pub font_size: f32,
+    pub text_color: Rgb,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,6 +253,9 @@ pub struct AnnotInfo {
     pub contents: String,
     pub author: String,
     pub modified: String,
+    /// Text boxes: font size and text colour (from /DA).
+    pub font_size: Option<f32>,
+    pub text_color: Option<Rgb>,
 }
 
 /// Property changes; `None` leaves a property untouched.
@@ -258,6 +265,8 @@ pub struct AnnotChange {
     pub interior: Option<Option<Rgb>>,
     pub width: Option<f32>,
     pub contents: Option<String>,
+    pub font_size: Option<f32>,
+    pub text_color: Option<Rgb>,
 }
 
 /// A form field widget (interactive AcroForm field).
