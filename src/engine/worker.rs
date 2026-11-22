@@ -1,7 +1,7 @@
 //! The PDFium worker loop. Everything in here runs on the `pdfium` thread.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError};
 use pdfium_render::prelude::{Pdfium, PdfiumLibraryBindingsAccessor};
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use super::commands::*;
 use super::pages::{PageMapping, PageOp};
 use super::library_search_dirs;
+use super::ocr::{self, OcrWord};
 use super::pdf::{Doc, FontFamily, Lib, OpenError};
 
 const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
@@ -101,6 +102,31 @@ struct ScanJob {
     next_page: usize,
 }
 
+/// A text recognition run. Pages are rendered here; Tesseract runs on a helper
+/// thread (one page at a time) so the worker stays responsive meanwhile.
+struct OcrJob {
+    id: u64,
+    doc: DocId,
+    pages: Vec<usize>,
+    next: usize,
+    exe: PathBuf,
+    languages: String,
+    force: bool,
+    /// Tesseract is working on `pages[next]`.
+    running: bool,
+    results: Vec<(usize, Vec<OcrWord>)>,
+    skipped: usize,
+}
+
+/// Tesseract's answer for one page, sent back from the helper thread.
+struct OcrPageResult {
+    job: u64,
+    page: usize,
+    /// Size of the rendering Tesseract read.
+    size: (usize, usize),
+    hocr: Result<String, String>,
+}
+
 struct Worker {
     lib: Lib,
     docs: HashMap<DocId, OpenDoc>,
@@ -114,6 +140,9 @@ struct Worker {
     text_font: Option<FontFamily>,
     /// The annotation copied last (document, page, annotation).
     clip: Option<(DocId, usize, NewAnnot)>,
+    ocr: Option<OcrJob>,
+    ocr_runs: u64,
+    ocr_tx: Sender<OcrPageResult>,
 }
 
 /// Binds and initialises PDFium once per process; it stays loaded until exit.
@@ -171,6 +200,7 @@ pub(super) fn run(
     };
     let _ = ready.send(Ok(()));
     let lib: Lib = pdfium.bindings();
+    let (ocr_tx, ocr_rx) = crossbeam_channel::unbounded();
 
     let mut w = Worker {
         lib,
@@ -183,13 +213,23 @@ pub(super) fn run(
         wake,
         text_font: None,
         clip: None,
+        ocr: None,
+        ocr_runs: 0,
+        ocr_tx,
     };
 
     loop {
         if w.is_idle() {
-            match rx.recv() {
-                Ok(req) => w.handle(req),
-                Err(RecvError) => return,
+            crossbeam_channel::select! {
+                recv(rx) -> req => match req {
+                    Ok(req) => w.handle(req),
+                    Err(RecvError) => return,
+                },
+                recv(ocr_rx) -> res => {
+                    if let Ok(res) = res {
+                        w.ocr_page_done(res);
+                    }
+                }
             }
         }
         loop {
@@ -199,13 +239,20 @@ pub(super) fn run(
                 Err(TryRecvError::Disconnected) => return,
             }
         }
+        while let Ok(res) = ocr_rx.try_recv() {
+            w.ocr_page_done(res);
+        }
         w.step();
     }
 }
 
 impl Worker {
     fn is_idle(&self) -> bool {
-        self.renders.is_empty() && self.text_requests.is_empty() && self.searches.is_empty() && self.scans.is_empty()
+        self.renders.is_empty()
+            && self.text_requests.is_empty()
+            && self.searches.is_empty()
+            && self.scans.is_empty()
+            && self.ocr.as_ref().is_none_or(|j| j.running)
     }
 
     fn send(&self, resp: Response) {
@@ -222,6 +269,9 @@ impl Worker {
                 self.text_requests.retain(|(d, _)| *d != doc);
                 self.searches.retain(|s| s.doc != doc);
                 self.scans.retain(|s| s.doc != doc);
+                if self.ocr.as_ref().is_some_and(|j| j.doc == doc) {
+                    self.ocr = None;
+                }
             }
             Request::Render { key, priority } => {
                 self.renders.insert(key, priority);
@@ -332,7 +382,9 @@ impl Worker {
                     Err(e) => self.error(doc, format!("Preparing the print job failed: {e}")),
                 }
             }
-            Request::EditPages { doc, op } => self.edit_pages(doc, op),
+            Request::EditPages { doc, op } => {
+                self.edit_pages(doc, op);
+            }
             Request::InsertFile { doc, path, at } => match std::fs::read(&path) {
                 Ok(bytes) => {
                     let name = path
@@ -401,6 +453,133 @@ impl Worker {
                 title,
                 current_page,
             } => self.print_native(doc, &title, current_page),
+            Request::Ocr {
+                doc,
+                pages,
+                exe,
+                languages,
+                force,
+            } => {
+                if self.ocr.is_some() {
+                    self.send(Response::OcrFinished {
+                        doc,
+                        result: OcrOutcome::Failed("Text recognition is already running.".into()),
+                    });
+                    return;
+                }
+                self.ocr_runs += 1;
+                self.ocr = Some(OcrJob {
+                    id: self.ocr_runs,
+                    doc,
+                    pages,
+                    next: 0,
+                    exe,
+                    languages,
+                    force,
+                    running: false,
+                    results: Vec::new(),
+                    skipped: 0,
+                });
+            }
+            Request::CancelOcr { doc } => self.end_ocr(doc, OcrOutcome::Cancelled),
+        }
+    }
+
+    /// Stops the recognition of `doc` (if running) and reports `outcome`.
+    fn end_ocr(&mut self, doc: DocId, outcome: OcrOutcome) {
+        if self.ocr.as_ref().is_some_and(|j| j.doc == doc) {
+            // A page still in Tesseract is ignored when it arrives (the job id is gone).
+            self.ocr = None;
+            self.send(Response::OcrFinished { doc, result: outcome });
+        }
+    }
+
+    /// Renders the next page of the recognition job and hands it to Tesseract, or
+    /// finishes the job.
+    fn ocr_step(&mut self) {
+        let Some(job) = self.ocr.as_mut() else { return };
+        let doc = job.doc;
+        let Some(od) = self.docs.get(&doc) else {
+            self.ocr = None;
+            return;
+        };
+        let Some(&page_index) = job.pages.get(job.next) else {
+            let job = self.ocr.take().expect("job");
+            let recognised = job.results.iter().filter(|(_, w)| !w.is_empty()).count();
+            let words = job.results.iter().map(|(_, w)| w.len()).sum();
+            let pages: Vec<_> = job.results.into_iter().filter(|(_, w)| !w.is_empty()).collect();
+            let ok = pages.is_empty()
+                || self.edit_pages(doc, PageOp::TextLayer {
+                    pages,
+                    replace: job.force,
+                });
+            let result = if ok {
+                OcrOutcome::Done {
+                    recognised,
+                    skipped: job.skipped,
+                    words,
+                }
+            } else {
+                OcrOutcome::Failed("The recognised text could not be added to the document.".into())
+            };
+            self.send(Response::OcrFinished { doc, result });
+            return;
+        };
+        let (done, total) = (job.next, job.pages.len());
+        let page = od.doc.page(page_index);
+        if page.as_ref().is_none_or(|p| !job.force && p.text_char_count() >= ocr::HAS_TEXT_CHARS) {
+            job.skipped += 1;
+            job.next += 1;
+            return;
+        }
+        let page = page.expect("checked");
+        let (w, h) = od.doc.page_size(page_index);
+        let scale = (ocr::DPI / 72.0).min(ocr::MAX_SIDE / w.max(h));
+        let size = ((w * scale).round().max(1.0) as usize, (h * scale).round().max(1.0) as usize);
+        let image = std::env::temp_dir().join(format!("magic-pdf-ocr-{}-{}-{page_index}.pgm", std::process::id(), job.id));
+        let written = page
+            .render_gray(size.0, size.1)
+            .ok_or_else(|| "could not render the page".to_string())
+            .and_then(|gray| ocr::write_pgm(&image, size.0, size.1, &gray).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            self.end_ocr(doc, OcrOutcome::Failed(format!("Page {}: {e}", page_index + 1)));
+            return;
+        }
+        job.running = true;
+        let (id, exe, languages, tx) = (job.id, job.exe.clone(), job.languages.clone(), self.ocr_tx.clone());
+        self.send(Response::OcrProgress { doc, done, total });
+        let spawned = std::thread::Builder::new().name("ocr".into()).spawn(move || {
+            let hocr = ocr::recognise(&exe, &image, &languages);
+            let _ = std::fs::remove_file(&image);
+            let _ = tx.send(OcrPageResult {
+                job: id,
+                page: page_index,
+                size,
+                hocr,
+            });
+        });
+        if let Err(e) = spawned {
+            self.end_ocr(doc, OcrOutcome::Failed(e.to_string()));
+        }
+    }
+
+    fn ocr_page_done(&mut self, res: OcrPageResult) {
+        let Some(job) = self.ocr.as_mut().filter(|j| j.id == res.job) else { return };
+        let doc = job.doc;
+        match res.hocr {
+            Ok(hocr) => {
+                let words = ocr::parse_hocr(&hocr);
+                let placed = self
+                    .docs
+                    .get(&doc)
+                    .and_then(|od| od.doc.page(res.page))
+                    .map(|p| p.place_ocr_words(res.size.0, res.size.1, words))
+                    .unwrap_or_default();
+                job.results.push((res.page, placed));
+                job.running = false;
+                job.next += 1;
+            }
+            Err(e) => self.end_ocr(doc, OcrOutcome::Failed(e)),
         }
     }
 
@@ -423,6 +602,10 @@ impl Worker {
         }
         if !self.scans.is_empty() {
             self.scan_step();
+            return;
+        }
+        if self.ocr.as_ref().is_some_and(|j| !j.running) {
+            self.ocr_step();
         }
     }
 
@@ -574,7 +757,9 @@ impl Worker {
         }
     }
 
-    fn pages_changed(&self, doc: DocId, mapping: PageMapping) {
+    fn pages_changed(&mut self, doc: DocId, mapping: PageMapping) {
+        // Recognised pages would land on the wrong pages now.
+        self.end_ocr(doc, OcrOutcome::Failed("The pages changed during text recognition.".into()));
         let Some(od) = self.docs.get(&doc) else { return };
         let info = Self::doc_info(od);
         self.send(Response::PagesChanged { doc, info, mapping });
@@ -582,18 +767,19 @@ impl Worker {
         self.send_edit_state(doc);
     }
 
-    fn edit_pages(&mut self, doc: DocId, mut op: PageOp) {
-        let Some(od) = self.docs.get_mut(&doc) else { return };
+    /// Applies a page operation as an undoable edit; false if it failed (reported).
+    fn edit_pages(&mut self, doc: DocId, mut op: PageOp) -> bool {
+        let Some(od) = self.docs.get_mut(&doc) else { return false };
         let count = od.doc.page_count();
         if let Err(e) = op.validate(count) {
             self.error(doc, format!("{}: {e}", op.label()));
-            return;
+            return false;
         }
         let snapshot = match od.doc.save_to_bytes() {
             Ok(b) => Arc::new(b),
             Err(e) => {
                 self.error(doc, e);
-                return;
+                return false;
             }
         };
         match od.doc.apply_page_op(&op) {
@@ -612,6 +798,7 @@ impl Worker {
                 Self::push_edit(od, Edit::Pages(Box::new(edit)));
                 trim_snapshots(od);
                 self.pages_changed(doc, mapping);
+                true
             }
             Err(e) => {
                 // A failed operation may have half-applied; restore the snapshot.
@@ -624,6 +811,7 @@ impl Worker {
                     new_count: count,
                     changed: (0..count).collect(),
                 });
+                false
             }
         }
     }

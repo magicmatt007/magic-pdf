@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod pages;
+pub mod ocr;
 pub mod rich;
 pub mod shapes;
 pub mod textbox;
@@ -1517,5 +1518,118 @@ mod tests {
         let list = save_and_reopen(&engine, 1, "replies");
         let got = list.iter().find(|x| x.contents == "Check this").unwrap();
         assert_eq!((got.replies.clone(), got.status.as_str()), (replies, "Completed"));
+    }
+
+    fn search_pages(engine: &Engine, doc: DocId, text: &str) -> Vec<(usize, Vec<Vec<PdfBox>>)> {
+        engine.send(Request::Search {
+            doc,
+            generation: 1,
+            query: SearchQuery {
+                text: text.into(),
+                match_case: false,
+                whole_word: false,
+            },
+        });
+        let mut found = Vec::new();
+        loop {
+            match recv(engine) {
+                Response::SearchResults { doc: d, page, hits, .. } if d == doc => found.push((page, hits)),
+                Response::SearchDone { doc: d, .. } if d == doc => return found,
+                _ => {}
+            }
+        }
+    }
+
+    fn run_ocr(engine: &Engine, doc: DocId, pages: Vec<usize>, exe: &std::path::Path, force: bool) -> OcrOutcome {
+        engine.send(Request::Ocr {
+            doc,
+            pages,
+            exe: exe.to_path_buf(),
+            languages: "eng".into(),
+            force,
+        });
+        loop {
+            let r = engine.rx.recv_timeout(Duration::from_secs(120)).expect("OCR response");
+            if let Response::OcrFinished { doc: d, result } = r
+                && d == doc
+            {
+                return result;
+            }
+        }
+    }
+
+    #[test]
+    fn ocr_adds_a_searchable_text_layer() {
+        let Some(exe) = ocr::find_tesseract() else {
+            eprintln!("SKIPPED ocr_adds_a_searchable_text_layer: Tesseract is not installed");
+            return;
+        };
+        if !ocr::languages(&exe).is_ok_and(|l| l.iter().any(|l| l == "eng")) {
+            eprintln!("SKIPPED ocr_adds_a_searchable_text_layer: Tesseract has no English language data");
+            return;
+        }
+        let (_serial, engine) = start();
+        let scanned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scanned.pdf");
+        open(&engine, 1, scanned);
+        assert!(search_pages(&engine, 1, "fox").is_empty(), "image-only pages have no text");
+
+        let result = run_ocr(&engine, 1, vec![0, 1], &exe, false);
+        let OcrOutcome::Done {
+            recognised: 2,
+            skipped: 0,
+            words,
+        } = result
+        else {
+            panic!("unexpected result {result:?}")
+        };
+        assert!(words > 20, "{words} words");
+
+        let hits = search_pages(&engine, 1, "fox");
+        assert_eq!(hits.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![0, 1]);
+        // "fox" sits about 173 pt from the left and 150 pt from the top of page 1.
+        let r = hits[0].1[0][0];
+        assert!((160.0..190.0).contains(&r.left) && (670.0..710.0).contains(&r.bottom), "{r:?}");
+        assert!(r.right - r.left > r.top - r.bottom, "horizontal: {r:?}");
+        // Page 2 is stored landscape with /Rotate 90: the text runs up the page.
+        let r = hits[1].1[0][0];
+        assert!(r.top - r.bottom > r.right - r.left, "rotated with the page: {r:?}");
+
+        // Words are separated, lines broken.
+        engine.send(Request::PageText { doc: 1, page: 0 });
+        let text = recv_until(&engine, |r| match r {
+            Response::PageText { text, .. } => Some(text.chars.iter().map(|c| c.ch).collect::<String>()),
+            _ => None,
+        });
+        assert!(text.contains("Invoice number 4711"), "{text:?}");
+        assert!(text.contains("brown fox"), "{text:?}");
+
+        // Pages with text are skipped the second time.
+        assert_eq!(run_ocr(&engine, 1, vec![0], &exe, false), OcrOutcome::Done {
+            recognised: 0,
+            skipped: 1,
+            words: 0
+        });
+
+        // One undo step removes the whole layer.
+        engine.send(Request::Undo { doc: 1 });
+        assert!(search_pages(&engine, 1, "fox").is_empty());
+        engine.send(Request::Redo { doc: 1 });
+        assert_eq!(search_pages(&engine, 1, "fox").len(), 2);
+
+        // Forcing replaces the earlier layer instead of adding a second one.
+        run_ocr(&engine, 1, vec![0], &exe, true);
+        let hits = search_pages(&engine, 1, "fox");
+        assert_eq!(hits[0].1.len(), 1, "one hit on page 1");
+
+        let dir = std::env::temp_dir().join(format!("magic-pdf-ocr-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("ocr.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let size = std::fs::metadata(&out).unwrap().len();
+        eprintln!("saved with text layer: {size} bytes");
+        open(&engine, 2, out);
+        assert_eq!(search_pages(&engine, 2, "4711").len(), 2, "text survives save and reopen");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

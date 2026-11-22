@@ -32,6 +32,12 @@ pub enum PageOp {
         /// Number of pages inserted; filled in by the engine.
         count: usize,
     },
+    /// Adds recognised words (OCR) as invisible text to pages. `replace` first
+    /// removes invisible text the pages already have (an earlier recognition).
+    TextLayer {
+        pages: Vec<(usize, Vec<super::ocr::OcrWord>)>,
+        replace: bool,
+    },
 }
 
 /// How page numbers change with an operation.
@@ -77,6 +83,7 @@ impl PageOp {
             PageOp::Rotate { .. } => "Rotate pages",
             PageOp::InsertBlank { .. } => "Insert blank page",
             PageOp::InsertFile { .. } => "Insert pages",
+            PageOp::TextLayer { .. } => "Recognise text",
         }
     }
 
@@ -107,6 +114,7 @@ impl PageOp {
                 Ok(())
             }
             PageOp::Rotate { pages, .. } => in_range(pages),
+            PageOp::TextLayer { pages, .. } => in_range(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::InsertBlank { at, .. } | PageOp::InsertFile { at, .. } => {
                 if *at > count {
                     Err("insert position is out of range".into())
@@ -158,6 +166,11 @@ impl PageOp {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: sorted_unique(pages),
+            },
+            PageOp::TextLayer { pages, .. } => PageMapping {
+                map: (0..count).map(Some).collect(),
+                new_count: count,
+                changed: sorted_unique(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             },
             PageOp::InsertBlank { at, .. } => insert_mapping(count, *at, 1),
             PageOp::InsertFile { at, count: n, .. } => insert_mapping(count, *at, *n),
