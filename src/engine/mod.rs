@@ -989,4 +989,52 @@ mod tests {
         assert!(red_at(&engine, 3, 200.0, 400.0));
         assert!(!red_at(&engine, 3, 302.0, 400.0));
     }
+
+    #[test]
+    fn colours_survive_saving_and_reopening() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-colours-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        engine.send(Request::AddAnnot {
+            doc: 1,
+            page: 0,
+            annot: NewAnnot {
+                kind: AnnotKind::Square,
+                rect: PdfBox {
+                    left: 100.0,
+                    bottom: 600.0,
+                    right: 200.0,
+                    top: 700.0,
+                },
+                color: [0, 110, 230],
+                interior: Some([255, 255, 255]),
+                width: 10.0,
+                contents: String::new(),
+                author: String::new(),
+                quads: Vec::new(),
+                ink: Vec::new(),
+                font_size: 12.0,
+                text_color: [0, 0, 0],
+            },
+        });
+        recv_until(&engine, |r| matches!(r, Response::AnnotAdded { .. }).then_some(()));
+        // Rendering makes PDFium generate (and store) the appearance.
+        render(&engine, 1, 0, Rotation::R0, 1);
+        let out = dir.join("c.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let list = recv_until(&engine, |r| match r {
+            Response::PageAnnots { doc: 2, page: 0, annots, .. } => Some(annots),
+            _ => None,
+        });
+        let sq = list.iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        assert_eq!(sq.color, Some([0, 110, 230]), "border colour after reopening");
+        assert_eq!(sq.interior, Some([255, 255, 255]), "fill after reopening");
+        assert!((sq.width - 10.0).abs() < 0.01);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

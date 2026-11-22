@@ -790,12 +790,34 @@ impl<'d> Page<'d> {
             };
             let (mut hr, mut vr, mut w) = (0.0, 0.0, 1.0);
             unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut w) };
+            let (mut color, mut interior) = (self.annot_color(&a, COLORTYPE_COLOR), self.annot_color(&a, COLORTYPE_INTERIOR));
+            if color.is_none() || interior.is_none() {
+                // PDFium hides colours once an annotation has an appearance stream;
+                // read them from the drawing instructions instead.
+                let ap = read_utf16(|buf, len| unsafe {
+                    lib.FPDFAnnot_GetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, buf as *mut FPDF_WCHAR, len)
+                });
+                let (stroke, fill) = appearance_colors(&ap);
+                const FPDF_OBJECT_STRING: FPDF_OBJECT_TYPE = 3;
+                // A string /IC is magic-pdf's "no fill" marker.
+                let no_fill = unsafe { lib.FPDFAnnot_GetValueType(a.handle, "IC") } == FPDF_OBJECT_STRING;
+                if kind.has_interior() {
+                    color = color.or(stroke);
+                    if !no_fill {
+                        interior = interior.or(fill);
+                    }
+                } else if matches!(kind, AnnotKind::Highlight | AnnotKind::Note) {
+                    color = color.or(fill).or(stroke);
+                } else {
+                    color = color.or(stroke).or(fill);
+                }
+            }
             out.push(AnnotInfo {
                 index,
                 kind,
                 rect: to_box(&r),
-                color: self.annot_color(&a, COLORTYPE_COLOR),
-                interior: self.annot_color(&a, COLORTYPE_INTERIOR),
+                color,
+                interior,
                 width: w,
                 contents: string("Contents"),
                 author: string("T"),
@@ -1360,5 +1382,56 @@ mod transform_tests {
         for (x, y) in [(back.left, a.left), (back.bottom, a.bottom), (back.right, a.right), (back.top, a.top)] {
             assert!((x - y).abs() < 1e-3);
         }
+    }
+}
+
+
+/// Stroke and fill colours used for drawing in a content stream (the first of each
+/// that is actually painted with). Understands RG/rg, G/g and K/k colour operators.
+pub fn appearance_colors(content: &str) -> (Option<Rgb>, Option<Rgb>) {
+    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut nums: Vec<f32> = Vec::new();
+    let (mut stroke, mut fill): (Option<Rgb>, Option<Rgb>) = (Some([0, 0, 0]), Some([0, 0, 0]));
+    let (mut used_stroke, mut used_fill) = (None, None);
+    for tok in content.split_ascii_whitespace() {
+        if let Ok(n) = tok.parse::<f32>() {
+            nums.push(n);
+            continue;
+        }
+        let last = |k: usize| (nums.len() >= k).then(|| nums[nums.len() - k..].to_vec());
+        let cmyk = |v: &[f32]| [0, 1, 2].map(|i| to_u8((1.0 - v[i]) * (1.0 - v[3])));
+        match tok {
+            "RG" => stroke = last(3).map(|v| [to_u8(v[0]), to_u8(v[1]), to_u8(v[2])]),
+            "rg" => fill = last(3).map(|v| [to_u8(v[0]), to_u8(v[1]), to_u8(v[2])]),
+            "G" => stroke = last(1).map(|v| [to_u8(v[0]); 3]),
+            "g" => fill = last(1).map(|v| [to_u8(v[0]); 3]),
+            "K" => stroke = last(4).map(|v| cmyk(&v)),
+            "k" => fill = last(4).map(|v| cmyk(&v)),
+            "S" | "s" => used_stroke = used_stroke.or(stroke),
+            "f" | "F" | "f*" => used_fill = used_fill.or(fill),
+            "B" | "B*" | "b" | "b*" => {
+                used_stroke = used_stroke.or(stroke);
+                used_fill = used_fill.or(fill);
+            }
+            _ => {}
+        }
+        nums.clear();
+    }
+    (used_stroke, used_fill)
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::appearance_colors;
+
+    #[test]
+    fn reads_painted_colours() {
+        let ap = "q 1 1 1 rg 0 0.431 0.902 RG 10 w 105 605 90 90 re B Q";
+        assert_eq!(appearance_colors(ap), (Some([0, 110, 230]), Some([255, 255, 255])));
+        // Set but never used for painting: not reported.
+        assert_eq!(appearance_colors("1 0 0 rg 0 0 1 RG 0 0 m 10 10 l S"), (Some([0, 0, 255]), None));
+        assert_eq!(appearance_colors("0.5 g 0 0 5 5 re f"), (None, Some([128, 128, 128])));
+        assert_eq!(appearance_colors("0 1 1 0 K 0 0 m 1 1 l S"), (Some([255, 0, 0]), None));
+        assert_eq!(appearance_colors(""), (None, None));
     }
 }
