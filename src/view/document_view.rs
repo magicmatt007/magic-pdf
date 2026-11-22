@@ -1373,19 +1373,16 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                             ui.end_row();
                         }
                     });
-                    if annot.kind.has_border_width() {
-                        let mut w = annot.width;
-                        let r = ui.add(egui::Slider::new(&mut w, 0.0..=12.0).text("Width"));
-                        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                            change.width = Some(w);
-                        }
+                    if annot.kind.has_border_width()
+                        && let Some(w) = slider_field(ui, "Width", annot.width, 0.0..=12.0, 0.5)
+                    {
+                        change.width = Some(w);
                     }
                 }
                 if annot.kind == AnnotKind::FreeText {
                     // A text box's "comment" is its visible text, edited on the page.
-                    let mut size = annot.font_size.unwrap_or(12.0);
-                    let r = ui.add(egui::Slider::new(&mut size, 6.0..=48.0).step_by(1.0).text("Size"));
-                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    // Scales all text proportionally (individual sizes keep their ratio).
+                    if let Some(size) = slider_field(ui, "Size", annot.font_size.unwrap_or(12.0), 4.0..=96.0, 1.0) {
                         change.font_size = Some(size);
                     }
                     if ui.button("Edit text (double-click the box)").clicked() {
@@ -1436,6 +1433,30 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
             change,
         });
     }
+}
+
+/// A slider with a number field next to it. Returns the new value once it is final:
+/// when a drag ends, or when a typed value is confirmed (Enter or leaving the field).
+/// Typed values are not applied per keystroke, so "14" does not go through "1".
+fn slider_field(ui: &mut Ui, label: &str, value: f32, range: std::ops::RangeInclusive<f32>, step: f64) -> Option<f32> {
+    let mut v = value;
+    let mut done = false;
+    ui.horizontal(|ui| {
+        let slider = ui.add(egui::Slider::new(&mut v, range.clone()).step_by(step).show_value(false));
+        done |= slider.drag_stopped() || (slider.changed() && !slider.dragged());
+        let field = ui.add(
+            egui::DragValue::new(&mut v)
+                .range(range)
+                .speed(0.1)
+                .suffix(" pt")
+                .update_while_editing(false),
+        );
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(Id::unique(("test_number_field", label)), field.rect));
+        done |= field.drag_stopped() || (field.changed() && !field.dragged());
+        ui.label(label);
+    });
+    (done && (v - value).abs() > f32::EPSILON).then_some(v)
 }
 
 /// Edits a text box's text in place: an editor drawn over the box with the same fonts,
@@ -1523,8 +1544,15 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     }
                     let mut size = current.size;
                     if ui
-                        .add(egui::DragValue::new(&mut size).range(4.0..=96.0).speed(0.2).suffix(" pt"))
-                        .on_hover_text("Font size")
+                        .add(
+                            egui::DragValue::new(&mut size)
+                                .range(4.0..=96.0)
+                                .speed(0.2)
+                                .suffix(" pt")
+                                // Typed values apply on Enter, not per keystroke.
+                                .update_while_editing(false),
+                        )
+                        .on_hover_text("Font size (drag, or click and type)")
                         .changed()
                     {
                         apply(re, &|s| s.size = size);
@@ -2227,5 +2255,39 @@ mod tests {
         let rich = finish(&ctx, &mut tab, &mut cache);
         assert_eq!(rich.text(), "xy");
         assert!(rich.spans.last().unwrap().style.bold, "typed after clicking B: {rich:?}");
+    }
+
+    #[test]
+    fn typing_a_font_size_applies_once_on_enter() {
+        let (ctx, mut tab, mut cache) = setup(AnnotKind::FreeText);
+        tab.select_annot(0, 4);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        let field: Rect = ctx
+            .data(|d| d.get_temp(Id::unique(("test_number_field", "Size"))))
+            .expect("size field shown");
+        tab.outbox.clear();
+        click(&ctx, &mut tab, &mut cache, field.center(), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let none = egui::Modifiers::NONE;
+        // Replace the shown value with "14".
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::A, egui::Modifiers::COMMAND), Tool::Hand);
+        for t in ["1", "4"] {
+            frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text(t.into())], Tool::Hand);
+        }
+        let sizes = |tab: &DocTab| -> Vec<f32> {
+            tab.outbox
+                .iter()
+                .filter_map(|r| match r {
+                    Request::UpdateAnnot { change, .. } => change.font_size,
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(sizes(&tab).is_empty(), "nothing applied while typing: {:?}", sizes(&tab));
+        frame_with(&ctx, &mut tab, &mut cache, key(egui::Key::Enter, none), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        assert_eq!(sizes(&tab), vec![14.0]);
     }
 }

@@ -991,15 +991,7 @@ impl<'d> Page<'d> {
                     Some(text) => RichText::plain(text, old.first_style(CharStyle::default())),
                     None => old.clone(),
                 });
-                // Whole-box size or colour changes apply to every character.
-                for span in &mut new.spans {
-                    if let Some(size) = change.font_size {
-                        span.style.size = size;
-                    }
-                    if let Some(color) = change.text_color {
-                        span.style.color = color;
-                    }
-                }
+                textbox::restyle_whole_box(&mut new, change.font_size, change.text_color);
                 self.write_rich(&a, &new);
                 undo.rich = Some(old);
             }

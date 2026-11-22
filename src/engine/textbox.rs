@@ -232,6 +232,25 @@ pub fn appearance(rect: PdfBox, rich: &RichText, style: &BoxStyle, fonts: &dyn F
     (r, s)
 }
 
+/// Whole-box style changes from the annotation popup. The box's size is the first
+/// character's: a new size scales every character by the same factor (so larger or
+/// smaller words keep their proportions). A new colour replaces the box's main colour
+/// (the first character's) and leaves differently coloured words alone.
+pub fn restyle_whole_box(rich: &mut RichText, size: Option<f32>, color: Option<Rgb>) {
+    let base = rich.first_style(CharStyle::default());
+    for span in &mut rich.spans {
+        if let Some(size) = size {
+            let scaled = span.style.size * size / base.size.max(0.1);
+            span.style.size = ((scaled * 2.0).round() / 2.0).clamp(1.0, 400.0);
+        }
+        if let Some(color) = color
+            && span.style.color == base.color
+        {
+            span.style.color = color;
+        }
+    }
+}
+
 /// The /DA (default appearance) string other PDF editors use to restyle the box.
 pub fn default_appearance(size: f32, color: Rgb) -> String {
     format!("/Helv {size:.1} Tf {} rg", rgb(color))
@@ -381,6 +400,33 @@ mod tests {
         let (_, s) = appearance(rect, &u, &style, &fonts());
         // 1.2 pt below the baseline (486.75), 0.6 pt thick.
         assert!(s.contains("104.00 485.25 5.00 0.60 re f"), "{s}");
+    }
+
+    #[test]
+    fn whole_box_changes_keep_individual_styles() {
+        let red = [220, 30, 30];
+        let mut rich = RichText {
+            spans: vec![
+                Span {
+                    text: "normal ".into(),
+                    style: CharStyle::default(),
+                },
+                Span {
+                    text: "big red".into(),
+                    style: CharStyle {
+                        size: 18.0,
+                        color: red,
+                        ..Default::default()
+                    },
+                },
+            ],
+            align: Align::Left,
+        };
+        restyle_whole_box(&mut rich, Some(24.0), Some([0, 0, 255]));
+        assert_eq!(rich.spans[0].style.size, 24.0);
+        assert_eq!(rich.spans[1].style.size, 36.0, "keeps its 1.5x size");
+        assert_eq!(rich.spans[0].style.color, [0, 0, 255]);
+        assert_eq!(rich.spans[1].style.color, red, "accent colour kept");
     }
 
     #[test]
