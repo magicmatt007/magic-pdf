@@ -23,13 +23,17 @@ pub fn width_bucket(px: f32, aspect_h_over_w: f32) -> u32 {
 }
 
 /// Ordering key for [`TextureCache::best`] (higher is better).
-fn rank(k: &RenderKey, want_width: u32, version: u32) -> (bool, bool, i64) {
+///
+/// Versions only grow, so among sharp renders the newest content wins (the current
+/// version if it has arrived, otherwise the latest stale one, never an older one,
+/// which would make the page jump back while typing). Ties are broken by size.
+fn rank(k: &RenderKey, want_width: u32, version: u32) -> (bool, i64, i64) {
     let sharp = k.width_px as f32 >= want_width as f32 * 0.9;
-    let current = k.version == version;
+    let age = -(version.saturating_sub(k.version) as i64);
     if sharp {
-        (true, current, -(k.width_px as i64))
+        (true, age, -(k.width_px as i64))
     } else {
-        (false, current, k.width_px as i64)
+        (false, k.width_px as i64, age)
     }
 }
 
@@ -194,6 +198,19 @@ mod tests {
         assert_eq!(best(&mut cache, 1000, 1), key(1000, 1));
         // The thumbnail view itself gets the small current render.
         assert_eq!(best(&mut cache, 130, 1), key(130, 1));
+    }
+
+    #[test]
+    fn newest_sharp_render_wins_while_typing() {
+        let ctx = egui::Context::default();
+        let mut cache = TextureCache::new(usize::MAX);
+        // Renders from earlier keystrokes, all equally sharp; version 6 is still pending.
+        for v in [0, 3, 5, 1, 4, 2] {
+            insert(&mut cache, &ctx, key(1000, v));
+        }
+        for _ in 0..20 {
+            assert_eq!(best(&mut cache, 1000, 6), key(1000, 5));
+        }
     }
 
     #[test]
