@@ -17,7 +17,8 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 
 - Annotations: highlight, underline, strikeout, sticky notes, text boxes typed
   directly on the page, freehand drawing, rectangles and ellipses (with separate
-  fill colours); colours, line widths, comments, a Comments sidebar, undo/redo,
+  fill colours); any colour (70-colour palette, recent colours, custom colour or
+  hex code), line widths, comments, a Comments sidebar, undo/redo,
   Save / Save As (deleted annotations are removed from the file)
 
 - Form filling: text fields, checkboxes, radio buttons, combo and list boxes

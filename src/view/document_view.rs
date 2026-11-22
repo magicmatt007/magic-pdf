@@ -13,6 +13,7 @@ use crate::engine::{
 };
 use crate::settings::AnnotStyle;
 use crate::view::cache::{TextureCache, width_bucket};
+use crate::view::color_picker;
 use crate::view::layout::{GAP, LayoutMode, geom_box_to_local, geom_local_to_pdf, geom_pdf_to_local};
 use crate::view::viewport::{FitMode, Viewport};
 
@@ -97,41 +98,10 @@ impl Tool {
     }
 }
 
-pub const PALETTE: [Rgb; 10] = [
-    [255, 230, 0],
-    [255, 150, 0],
-    [220, 30, 30],
-    [230, 60, 160],
-    [140, 70, 200],
-    [0, 110, 230],
-    [0, 170, 200],
-    [40, 170, 60],
-    [120, 120, 120],
-    [0, 0, 0],
-];
-
-/// Fill colours: light tints that keep page content readable, plus white and the
-/// strong colours.
-pub const FILL_PALETTE: [Rgb; 10] = [
-    [255, 255, 255],
-    [255, 245, 170],
-    [255, 214, 170],
-    [255, 190, 190],
-    [220, 200, 245],
-    [190, 215, 255],
-    [190, 240, 210],
-    [220, 220, 220],
-    [220, 30, 30],
-    [0, 110, 230],
-];
-
-/// A light tint of `c`, the default fill for a shape with border colour `c`.
-pub fn tint(c: Rgb) -> Rgb {
-    c.map(|v| (v as f32 + (255.0 - v as f32) * 0.75).round() as u8)
-}
-
 pub struct ViewContext<'a> {
     pub cache: &'a mut TextureCache,
+    /// Recently picked colours (shared by all colour pickers).
+    pub recent_colors: &'a mut Vec<Rgb>,
     pub tool: Tool,
     pub night: bool,
     pub style: &'a AnnotStyle,
@@ -189,7 +159,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
 
     paint_pages(ui, tab, view, &mut cx);
     selection_toolbar(ui, tab, view, &cx);
-    annotation_popup(ui, tab, view);
+    annotation_popup(ui, tab, view, cx.recent_colors);
 }
 
 fn centered_text(ui: &Ui, view: Rect, text: &str) {
@@ -1067,7 +1037,7 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
 }
 
 /// Properties popup for the selected annotation.
-fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
+fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>) {
     let Some(sel) = tab.selected_annot.clone() else { return };
     let Some(annot) = tab.annot(sel.page, sel.index).cloned() else {
         // Deleted (or not loaded yet).
@@ -1125,50 +1095,40 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
                     ui.weak(meta);
                 }
                 if annot.kind.style_editable() {
-                    ui.horizontal_wrapped(|ui| {
-                        for c in PALETTE {
-                            if color_swatch(ui, c, annot.color == Some(c)).clicked() {
-                                change.color = Some(c);
+                    let is_box = annot.kind == AnnotKind::FreeText;
+                    egui::Grid::new(("annot_style", tab.id)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label(if is_box { "Border" } else { "Colour" });
+                        if let Some(Some(c)) = color_picker::color_button(ui, "annot_color", annot.color, false, recent) {
+                            change.color = Some(c);
+                        }
+                        ui.end_row();
+                        if annot.kind.has_interior() {
+                            ui.label("Fill");
+                            if let Some(c) = color_picker::color_button(ui, "annot_fill", annot.interior, true, recent) {
+                                change.interior = Some(c);
                             }
+                            ui.end_row();
+                        }
+                        if is_box {
+                            ui.label("Text");
+                            if let Some(Some(c)) =
+                                color_picker::color_button(ui, "annot_text", annot.text_color, false, recent)
+                            {
+                                change.text_color = Some(c);
+                            }
+                            ui.end_row();
                         }
                     });
                     if annot.kind.has_border_width() {
                         let mut w = annot.width;
-                        let r = ui.add(egui::Slider::new(&mut w, 0.5..=12.0).text("Width"));
+                        let r = ui.add(egui::Slider::new(&mut w, 0.0..=12.0).text("Width"));
                         if r.drag_stopped() || (r.changed() && !r.dragged()) {
                             change.width = Some(w);
-                        }
-                    }
-                    if annot.kind.has_interior() {
-                        let mut filled = annot.interior.is_some();
-                        let fill_box = ui.checkbox(&mut filled, "Fill");
-                        #[cfg(test)]
-                        ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_fill_box"), fill_box.rect));
-                        if fill_box.changed() {
-                            change.interior = Some(filled.then(|| tint(annot.color.unwrap_or([0, 0, 0]))));
-                        }
-                        if let Some(current) = annot.interior {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.weak("Fill");
-                                for c in FILL_PALETTE {
-                                    if color_swatch(ui, c, current == c).clicked() {
-                                        change.interior = Some(Some(c));
-                                    }
-                                }
-                            });
                         }
                     }
                 }
                 if annot.kind == AnnotKind::FreeText {
                     // A text box's "comment" is its visible text, edited on the page.
-                    ui.horizontal_wrapped(|ui| {
-                        ui.weak("Text");
-                        for c in TEXT_PALETTE {
-                            if color_swatch(ui, c, annot.text_color == Some(c)).clicked() {
-                                change.text_color = Some(c);
-                            }
-                        }
-                    });
                     let mut size = annot.font_size.unwrap_or(12.0);
                     let r = ui.add(egui::Slider::new(&mut size, 6.0..=48.0).step_by(1.0).text("Size"));
                     if r.drag_stopped() || (r.changed() && !r.dragged()) {
@@ -1223,9 +1183,6 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
         });
     }
 }
-
-/// Text colours offered for text boxes.
-pub const TEXT_PALETTE: [Rgb; 6] = [[0, 0, 0], [80, 80, 80], [220, 30, 30], [0, 110, 230], [40, 140, 60], [140, 70, 200]];
 
 /// Edits a text box's text in place: an editor drawn over the box, using the same
 /// font (egui's proportional font is the one the box is drawn with), size and colours.
@@ -1285,20 +1242,6 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect) {
             tab.outbox.push(req);
         }
     }
-}
-
-pub fn color_swatch(ui: &mut Ui, c: Rgb, selected: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-    ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(3), rgb(c));
-    if selected || resp.hovered() {
-        ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(3),
-            Stroke::new(2.0, ui.visuals().strong_text_color()),
-            StrokeKind::Inside,
-        );
-    }
-    resp
 }
 
 /// `D:20261122101500Z` -> `2026-11-22 10:15`.
@@ -1399,6 +1342,7 @@ mod tests {
                     tab,
                     ViewContext {
                         cache: &mut *cache,
+                        recent_colors: &mut Vec::new(),
                         tool,
                         night: false,
                         style: &style,
@@ -1613,14 +1557,20 @@ mod tests {
         for _ in 0..3 {
             frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
         }
-        let fill: Rect = ctx.data(|d| d.get_temp(Id::unique("test_fill_box"))).expect("fill checkbox shown");
-        tab.outbox.clear();
+        // The fill swatch is the last colour button in a shape's popup.
+        let fill: Rect = ctx.data(|d| d.get_temp(Id::unique("test_color_button"))).expect("fill button shown");
         click(&ctx, &mut tab, &mut cache, fill.center(), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        let cell: Rect = ctx
+            .data(|d| d.get_temp(Id::unique(("test_palette_cell", 1usize, 2usize))))
+            .expect("colour picker open");
+        tab.outbox.clear();
+        click(&ctx, &mut tab, &mut cache, cell.center(), Tool::Hand);
         let interior = tab.outbox.iter().find_map(|r| match r {
             Request::UpdateAnnot { change, .. } => change.interior,
             _ => None,
         });
-        assert!(matches!(interior, Some(Some(_))), "ticking Fill sent {interior:?}");
+        assert_eq!(interior, Some(Some(color_picker::palette()[1][2])), "picking a fill colour");
         assert!(tab.selected_annot.is_some(), "popup stays open");
     }
 

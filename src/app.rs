@@ -11,7 +11,8 @@ use crate::icons;
 use crate::engine::{DocId, Engine, FormKey, PageOp, PrintJob, Request, Response, SearchQuery, form_mods, move_target};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
-use crate::view::document_view::{self, PALETTE, Tool, ViewContext, color_swatch};
+use crate::view::color_picker;
+use crate::view::document_view::{self, Tool, ViewContext};
 use crate::view::layout::LayoutMode;
 use crate::view::sidebar::{self, PageAction, SidebarTab};
 use crate::view::viewport::FitMode;
@@ -215,6 +216,13 @@ impl App {
             update_events: std::sync::mpsc::channel(),
             pending_installer: None,
         };
+        if app.screenshot_to.is_some() {
+            // Debug aid for screenshots: start with a given tool selected.
+            let wanted = std::env::var("MAGIC_PDF_TOOL").unwrap_or_default();
+            if let Some(t) = Tool::ANNOTATION_TOOLS.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted)) {
+                app.tool = *t;
+            }
+        }
         let day = 24 * 60 * 60;
         if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
             app.check_for_updates(false);
@@ -1642,7 +1650,6 @@ impl App {
                 ui.selectable_value(&mut self.tool, tool, tool.icon())
                     .on_hover_text(tool.label());
             }
-            self.tool_style(ui);
             ui.separator();
 
             let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -1780,59 +1787,59 @@ impl App {
         });
     }
 
-    /// Colour (and width) picker for the active annotation tool.
-    fn tool_style(&mut self, ui: &mut Ui) {
+    /// Settings for new annotations of the active tool, shown in a bar under the
+    /// toolbar while an annotation tool is selected.
+    fn tool_options(&mut self, ui: &mut Ui) {
         let tool = self.tool;
         let style = &mut self.settings.annot_style;
-        let Some(color) = tool.color(style).copied() else { return };
+        let recent = &mut self.settings.recent_colors;
         let mut changed = false;
-        let resp = color_swatch(ui, color, false).on_hover_text("Colour for new annotations");
-        egui::Popup::from_toggle_button_response(&resp)
-            // Stay open while ticking Fill or picking colours.
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-            ui.horizontal(|ui| {
-                for c in PALETTE {
-                    if color_swatch(ui, c, c == color).clicked()
-                        && let Some(slot) = tool.color(style)
-                    {
-                        *slot = c;
-                        changed = true;
-                    }
-                }
-            });
+        let width = |ui: &mut Ui, w: &mut f32| ui.add(egui::Slider::new(w, 0.5..=12.0).text("pt")).changed();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tool.label()).strong());
+            ui.separator();
             if let Some(slot) = tool.color(style) {
-                changed |= ui.color_edit_button_srgb(slot).changed();
+                ui.label(if tool == Tool::TextBox { "Border" } else { "Colour" });
+                if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
+                    *slot = c;
+                    changed = true;
+                }
             }
             match tool {
                 Tool::Ink => {
-                    changed |= ui
-                        .add(egui::Slider::new(&mut style.ink_width, 0.5..=12.0).text("Width"))
-                        .changed();
+                    ui.label("Width");
+                    changed |= width(ui, &mut style.ink_width);
                 }
                 Tool::Rect | Tool::Ellipse => {
-                    changed |= ui
-                        .add(egui::Slider::new(&mut style.shape_width, 0.5..=12.0).text("Width"))
-                        .changed();
-                    let mut fill = style.shape_fill.is_some();
-                    if ui.checkbox(&mut fill, "Fill").changed() {
-                        style.shape_fill = fill.then(|| document_view::tint(style.shape));
+                    ui.label("Width");
+                    changed |= width(ui, &mut style.shape_width);
+                    ui.label("Fill");
+                    if let Some(f) = color_picker::color_button(ui, "tool_shape_fill", style.shape_fill, true, recent) {
+                        style.shape_fill = f;
                         changed = true;
                     }
-                    if let Some(f) = &mut style.shape_fill {
-                        ui.horizontal(|ui| {
-                            for c in document_view::FILL_PALETTE {
-                                if color_swatch(ui, c, *f == c).clicked() {
-                                    *f = c;
-                                    changed = true;
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Fill colour");
-                            changed |= ui.color_edit_button_srgb(f).changed();
-                        });
+                }
+                Tool::TextBox => {
+                    ui.label("Width");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut style.textbox_border_width, 0.0..=6.0).text("pt"))
+                        .changed();
+                    ui.label("Fill");
+                    if let Some(f) = color_picker::color_button(ui, "tool_box_fill", style.textbox_fill, true, recent) {
+                        style.textbox_fill = f;
+                        changed = true;
                     }
+                    ui.label("Text");
+                    if let Some(Some(c)) =
+                        color_picker::color_button(ui, "tool_box_text", Some(style.textbox_text), false, recent)
+                    {
+                        style.textbox_text = c;
+                        changed = true;
+                    }
+                    ui.label("Size");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut style.textbox_font_size).range(6.0..=72.0).suffix(" pt"))
+                        .changed();
                 }
                 _ => {}
             }
@@ -2233,6 +2240,9 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        if Tool::ANNOTATION_TOOLS.contains(&self.tool) {
+            egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
+        }
         if !self.tabs.is_empty() {
             egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
         }
@@ -2286,6 +2296,7 @@ impl eframe::App for App {
                 .show(ui, |ui| sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions));
         }
 
+        let recent_before = self.settings.recent_colors.clone();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if self.tabs.is_empty() {
                 self.welcome(ui);
@@ -2297,6 +2308,7 @@ impl eframe::App for App {
                 tab,
                 ViewContext {
                     cache: &mut self.cache,
+                    recent_colors: &mut self.settings.recent_colors,
                     tool: self.tool,
                     night: self.settings.night_mode,
                     style: &self.settings.annot_style,
@@ -2305,6 +2317,9 @@ impl eframe::App for App {
             );
         });
 
+        if self.settings.recent_colors != recent_before {
+            self.settings.save();
+        }
         for a in page_actions {
             self.page_action(a);
         }

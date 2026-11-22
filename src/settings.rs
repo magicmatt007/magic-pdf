@@ -87,6 +87,8 @@ pub struct Settings {
     pub last_update_check: u64,
     /// A release the user chose to skip.
     pub skipped_version: Option<String>,
+    /// Colours picked most recently (shown in the colour picker).
+    pub recent_colors: Vec<Rgb>,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -103,6 +105,7 @@ impl Default for Settings {
             check_updates: true,
             last_update_check: 0,
             skipped_version: None,
+            recent_colors: Vec::new(),
             files: HashMap::new(),
         }
     }
