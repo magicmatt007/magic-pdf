@@ -173,8 +173,14 @@ pub enum AnnotKind {
     Square,
     Circle,
     FreeText,
+    /// A line annotation from another application (not editable here).
     Line,
     Stamp,
+    /// Shapes drawn with magic-pdf (stored as ink with a private shape key).
+    DrawnLine,
+    Arrow,
+    Polygon,
+    Cloud,
     Other,
 }
 
@@ -192,6 +198,10 @@ impl AnnotKind {
             AnnotKind::FreeText => "Text box",
             AnnotKind::Line => "Line",
             AnnotKind::Stamp => "Stamp",
+            AnnotKind::DrawnLine => "Line",
+            AnnotKind::Arrow => "Arrow",
+            AnnotKind::Polygon => "Polygon",
+            AnnotKind::Cloud => "Cloud",
             AnnotKind::Other => "Annotation",
         }
     }
@@ -209,32 +219,58 @@ impl AnnotKind {
                 | AnnotKind::Square
                 | AnnotKind::Circle
                 | AnnotKind::FreeText
-        )
+        ) || self.shape().is_some()
+    }
+
+    /// The magic-pdf shape behind a kind.
+    pub fn shape(self) -> Option<super::shapes::Shape> {
+        use super::shapes::Shape;
+        match self {
+            AnnotKind::DrawnLine => Some(Shape::Line),
+            AnnotKind::Arrow => Some(Shape::Arrow),
+            AnnotKind::Polygon => Some(Shape::Polygon),
+            AnnotKind::Cloud => Some(Shape::Cloud),
+            _ => None,
+        }
+    }
+
+    pub fn from_shape(shape: super::shapes::Shape) -> AnnotKind {
+        use super::shapes::Shape;
+        match shape {
+            Shape::Line => AnnotKind::DrawnLine,
+            Shape::Arrow => AnnotKind::Arrow,
+            Shape::Polygon => AnnotKind::Polygon,
+            Shape::Cloud => AnnotKind::Cloud,
+        }
     }
 
     /// Kinds that can be moved by dragging (text markup stays on its text).
     pub fn movable(self) -> bool {
         matches!(
             self,
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::Note | AnnotKind::FreeText
-        )
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::Note | AnnotKind::FreeText | AnnotKind::Stamp
+        ) || self.shape().is_some()
     }
 
     /// How the kind can be resized.
     pub fn resize(self) -> Resize {
         match self {
             // A text box can be made larger than its text, never smaller.
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::FreeText => Resize::Free,
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::FreeText | AnnotKind::Stamp => Resize::Free,
+            k if k.shape().is_some() => Resize::Free,
             _ => Resize::None,
         }
     }
 
     pub fn has_border_width(self) -> bool {
-        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
+        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText) || self.shape().is_some()
     }
 
     pub fn has_interior(self) -> bool {
-        matches!(self, AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
+        matches!(
+            self,
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText | AnnotKind::Polygon | AnnotKind::Cloud
+        )
     }
 }
 
@@ -262,6 +298,80 @@ pub struct NewAnnot {
     /// Text boxes: font size and text colour.
     pub font_size: f32,
     pub text_color: Rgb,
+    /// Text boxes: styled text (instead of plain `contents` in `font_size`/`text_color`).
+    pub rich: Option<super::rich::RichText>,
+    /// Lines, arrows, polygons and clouds: their points.
+    pub vertices: Vec<(f32, f32)>,
+    /// Stamps: what they show.
+    pub stamp: Option<StampSpec>,
+    /// Comment thread and review status.
+    pub replies: Vec<Reply>,
+    pub status: String,
+}
+
+/// What a new stamp shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StampSpec {
+    /// A framed title such as APPROVED with an optional smaller line (author, date).
+    Text { title: String, subtitle: String },
+    /// An image (e.g. a scanned signature), RGBA pixels.
+    Image { width: u32, height: u32, rgba: Vec<u8> },
+}
+
+/// A reply in a comment thread.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Reply {
+    pub author: String,
+    /// PDF date string.
+    pub date: String,
+    pub text: String,
+}
+
+/// Review status of a comment (as in Acrobat's review state model).
+pub const STATUSES: [&str; 5] = ["None", "Accepted", "Rejected", "Cancelled", "Completed"];
+
+impl NewAnnot {
+    /// A new annotation of `kind` with defaults for everything else.
+    pub fn new(kind: AnnotKind, rect: PdfBox, color: Rgb) -> NewAnnot {
+        NewAnnot {
+            kind,
+            rect,
+            color,
+            interior: None,
+            width: 1.0,
+            contents: String::new(),
+            author: String::new(),
+            quads: Vec::new(),
+            ink: Vec::new(),
+            font_size: 12.0,
+            text_color: [0, 0, 0],
+            rich: None,
+            vertices: Vec::new(),
+            stamp: None,
+            replies: Vec::new(),
+            status: String::new(),
+        }
+    }
+
+    /// Moves everything by (dx, dy).
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.rect = PdfBox {
+            left: self.rect.left + dx,
+            bottom: self.rect.bottom + dy,
+            right: self.rect.right + dx,
+            top: self.rect.top + dy,
+        };
+        for q in &mut self.quads {
+            for i in 0..4 {
+                q[2 * i] += dx;
+                q[2 * i + 1] += dy;
+            }
+        }
+        for p in self.ink.iter_mut().flatten().chain(self.vertices.iter_mut()) {
+            p.0 += dx;
+            p.1 += dy;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -281,6 +391,16 @@ pub struct AnnotInfo {
     pub text_color: Option<Rgb>,
     /// Text boxes: the styled text.
     pub rich: Option<super::rich::RichText>,
+    /// Shapes: their points.
+    pub vertices: Vec<(f32, f32)>,
+    /// Comment thread written in magic-pdf.
+    pub replies: Vec<Reply>,
+    /// Replies written in other applications (read-only here).
+    pub other_replies: Vec<Reply>,
+    /// Review status ("" or one of `STATUSES`).
+    pub status: String,
+    /// A reply written in another application (shown in its parent's thread).
+    pub in_reply_to: Option<usize>,
 }
 
 /// Property changes; `None` leaves a property untouched.
@@ -299,6 +419,9 @@ pub struct AnnotChange {
     /// Move or resize as an exact transform `[sx, sy, tx, ty]` (x' = sx*x + tx); used
     /// for undo/redo so the result does not depend on the current rectangle.
     pub transform: Option<[f32; 4]>,
+    /// Comment thread (magic-pdf's own replies) and review status.
+    pub replies: Option<Vec<Reply>>,
+    pub status: Option<String>,
 }
 
 /// A form field widget (interactive AcroForm field).
@@ -399,6 +522,19 @@ pub enum Request {
         doc: DocId,
         page: usize,
         index: usize,
+    },
+    /// Copy an annotation to the annotation clipboard (kept by the engine).
+    CopyAnnot {
+        doc: DocId,
+        page: usize,
+        index: usize,
+    },
+    /// Paste the copied annotation on `page`, centred on `at` (PDF space), or next to
+    /// the original when `at` is None.
+    PasteAnnot {
+        doc: DocId,
+        page: usize,
+        at: Option<(f32, f32)>,
     },
     Undo {
         doc: DocId,

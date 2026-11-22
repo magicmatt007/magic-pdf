@@ -47,7 +47,41 @@ pub struct AnnotStyle {
     pub textbox_text: Rgb,
     pub textbox_font_size: f32,
     pub textbox_fill: Option<Rgb>,
+    /// Stamp tool: the chosen stamp (a text, or an image when `stamp_image` is set).
+    pub stamp_text: String,
+    pub stamp_color: Rgb,
+    /// Add "author, date" under the stamp text.
+    pub stamp_details: bool,
+    pub stamp_image: Option<PathBuf>,
+    /// Stamps the user made: texts and image files.
+    pub custom_stamps: Vec<String>,
+    pub image_stamps: Vec<PathBuf>,
+    /// Signature tool: the chosen saved signature and the ink colour of drawn ones.
+    pub signature: usize,
+    pub signature_color: Rgb,
 }
+
+/// A saved signature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Signature {
+    /// Drawn with the mouse: strokes with x in 0..1 and y downwards in 0..height/width.
+    Drawn(Vec<Vec<[f32; 2]>>),
+    /// A picture file (e.g. a scanned signature).
+    Image(PathBuf),
+}
+
+/// The built-in stamps and their colours.
+pub const STAMPS: [(&str, Rgb); 9] = [
+    ("APPROVED", [0, 140, 60]),
+    ("REVIEWED", [0, 90, 200]),
+    ("FINAL", [0, 140, 60]),
+    ("DRAFT", [0, 90, 200]),
+    ("FOR COMMENT", [0, 90, 200]),
+    ("CONFIDENTIAL", [200, 0, 0]),
+    ("NOT APPROVED", [200, 0, 0]),
+    ("VOID", [200, 0, 0]),
+    ("COMPLETED", [0, 140, 60]),
+];
 
 impl Default for AnnotStyle {
     fn default() -> Self {
@@ -66,6 +100,14 @@ impl Default for AnnotStyle {
             textbox_text: [0, 0, 0],
             textbox_font_size: 12.0,
             textbox_fill: Some([255, 255, 255]),
+            stamp_text: "APPROVED".into(),
+            stamp_color: [0, 140, 60],
+            stamp_details: true,
+            stamp_image: None,
+            custom_stamps: Vec::new(),
+            image_stamps: Vec::new(),
+            signature: 0,
+            signature_color: [10, 40, 140],
         }
     }
 }
@@ -100,6 +142,7 @@ pub struct Settings {
     pub session_active: usize,
     /// Recent files kept at the top of the list (never pushed out).
     pub pinned: Vec<PathBuf>,
+    pub signatures: Vec<Signature>,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -123,6 +166,7 @@ impl Default for Settings {
             session: Vec::new(),
             session_active: 0,
             pinned: Vec::new(),
+            signatures: Vec::new(),
             files: HashMap::new(),
         }
     }

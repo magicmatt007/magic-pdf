@@ -112,6 +112,8 @@ struct Worker {
     wake: Box<dyn Fn() + Send>,
     /// Fonts for text box appearances, loaded on first use.
     text_font: Option<FontFamily>,
+    /// The annotation copied last (document, page, annotation).
+    clip: Option<(DocId, usize, NewAnnot)>,
 }
 
 /// Binds and initialises PDFium once per process; it stays loaded until exit.
@@ -180,6 +182,7 @@ pub(super) fn run(
         tx,
         wake,
         text_font: None,
+        clip: None,
     };
 
     loop {
@@ -248,6 +251,19 @@ impl Worker {
             Request::AddAnnot { doc, page, annot } => self.add_annot(doc, page, &annot),
             Request::UpdateAnnot { doc, page, index, change } => self.update_annot(doc, page, index, change),
             Request::DeleteAnnot { doc, page, index } => self.delete_annot(doc, page, index),
+            Request::CopyAnnot { doc, page, index } => {
+                let clip = self
+                    .docs
+                    .get(&doc)
+                    .and_then(|od| od.doc.page(page))
+                    .ok_or_else(|| "page not found".to_string())
+                    .and_then(|p| p.annot_clip(index));
+                match clip {
+                    Ok(n) => self.clip = Some((doc, page, n)),
+                    Err(e) => self.error(doc, e),
+                }
+            }
+            Request::PasteAnnot { doc, page, at } => self.paste_annot(doc, page, at),
             Request::Undo { doc } => self.undo_redo(doc, true),
             Request::Redo { doc } => self.undo_redo(doc, false),
             Request::Save { doc, path } => self.save(doc, &path),
@@ -727,23 +743,43 @@ impl Worker {
         self.error(doc, "Native printing is only available on Windows");
     }
 
-    /// Redraws a text box annotation (after creating or changing it).
-    fn refresh_text_box(&mut self, doc: DocId, page_index: usize, index: usize) {
+    fn paste_annot(&mut self, doc: DocId, page: usize, at: Option<(f32, f32)>) {
+        let Some((from_doc, from_page, mut n)) = self.clip.clone() else { return };
+        let (dx, dy) = match at {
+            Some((x, y)) => (
+                x - (n.rect.left + n.rect.right) / 2.0,
+                y - (n.rect.bottom + n.rect.top) / 2.0,
+            ),
+            // Next to the original, or at the same place on another page.
+            None if from_doc == doc && from_page == page => (12.0, -12.0),
+            None => (0.0, 0.0),
+        };
+        n.translate(dx, dy);
+        self.add_annot(doc, page, &n);
+    }
+
+    fn fonts(&mut self, doc: DocId) -> Option<&FontFamily> {
         if self.text_font.is_none() {
             match FontFamily::load_noto_sans(self.lib) {
                 Ok(f) => self.text_font = Some(f),
                 Err(e) => {
                     self.error(doc, e);
-                    return;
+                    return None;
                 }
             }
         }
+        self.text_font.as_ref()
+    }
+
+    /// Redraws annotations magic-pdf draws itself (after creating or changing them).
+    fn refresh_text_box(&mut self, doc: DocId, page_index: usize, index: usize) {
+        if self.fonts(doc).is_none() {
+            return;
+        }
         let (Some(od), Some(font)) = (self.docs.get(&doc), self.text_font.as_ref()) else { return };
         let Some(page) = od.doc.page(page_index) else { return };
-        if page.annot_is_text_box(index)
-            && let Err(e) = page.refresh_text_box(index, font)
-        {
-            log::warn!("text box: {e}");
+        if let Err(e) = page.refresh_appearance(index, font) {
+            log::warn!("appearance: {e}");
         }
     }
 
@@ -780,6 +816,25 @@ impl Worker {
     }
 
     fn add_annot(&mut self, doc: DocId, page_index: usize, annot: &NewAnnot) {
+        // A text stamp placed with a click gets its natural size around that point.
+        let sized;
+        let annot = match &annot.stamp {
+            Some(StampSpec::Text { title, subtitle }) if annot.rect.right - annot.rect.left < 1.0 => {
+                let Some(fonts) = self.fonts(doc) else { return };
+                let (w, h) = super::shapes::stamp_size(title, subtitle, 20.0, fonts);
+                let (cx, cy) = (annot.rect.left, annot.rect.top);
+                let mut n = annot.clone();
+                n.rect = PdfBox {
+                    left: cx - w / 2.0,
+                    bottom: cy - h / 2.0,
+                    right: cx + w / 2.0,
+                    top: cy + h / 2.0,
+                };
+                sized = n;
+                &sized
+            }
+            _ => annot,
+        };
         let Some(od) = self.docs.get_mut(&doc) else { return };
         let result = od
             .doc

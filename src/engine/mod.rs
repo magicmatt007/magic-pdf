@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod pages;
 pub mod rich;
+pub mod shapes;
 pub mod textbox;
 mod pdf;
 #[cfg(windows)]
@@ -17,7 +18,7 @@ use crossbeam_channel::{Receiver, Sender};
 pub use commands::*;
 pub use pages::{PageMapping, PageOp, move_target};
 pub use rich::{Align, CharStyle, RichText};
-pub use pdf::FIELD_TEXT;
+pub use pdf::{FIELD_TEXT, pdf_date_now};
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -282,6 +283,7 @@ mod tests {
             ink: Vec::new(),
             font_size: 12.0,
             text_color: [0, 0, 0],
+            ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
         };
         let mut hl = new(AnnotKind::Highlight, heading);
         hl.quads = vec![[
@@ -563,6 +565,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 0],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         recv_until(&engine, |r| matches!(r, Response::AnnotAdded { .. }).then_some(()));
@@ -729,6 +732,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 0],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -814,6 +818,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 255],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -913,6 +918,7 @@ mod tests {
                     ink,
                     font_size: 12.0,
                     text_color: [0, 0, 0],
+                    ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
                 },
             });
             recv_until(&engine, |r| match r {
@@ -1021,6 +1027,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 0],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         recv_until(&engine, |r| matches!(r, Response::AnnotAdded { .. }).then_some(()));
@@ -1070,6 +1077,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 0],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -1185,6 +1193,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 12.0,
                 text_color: [0, 0, 0],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -1248,6 +1257,7 @@ mod tests {
                 ink: Vec::new(),
                 font_size: 20.0,
                 text_color: [0, 110, 230],
+                ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
             },
         });
         let index = recv_until(&engine, |r| match r {
@@ -1260,5 +1270,252 @@ mod tests {
         assert_eq!(tb.text_color, Some([0, 110, 230]), "colour from the tool options");
         let first = tb.rich.as_ref().unwrap().first_style(CharStyle::default());
         assert_eq!((first.size, first.color), (20.0, [0, 110, 230]), "typing starts in that style");
+    }
+
+    /// Discards responses until the engine has been quiet for a moment.
+    fn drain(engine: &Engine) {
+        while engine.rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+    }
+
+    fn add(engine: &Engine, doc: DocId, annot: NewAnnot) -> usize {
+        engine.send(Request::AddAnnot { doc, page: 0, annot });
+        recv_until(engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        })
+    }
+
+    fn pdf_box(left: f32, bottom: f32, right: f32, top: f32) -> PdfBox {
+        PdfBox {
+            left,
+            bottom,
+            right,
+            top,
+        }
+    }
+
+    /// Fraction of pixels in a region (fractions of the page, top-left origin) that
+    /// are mostly `channel` (0 red, 2 blue).
+    fn coloured(size: [usize; 2], rgba: &[u8], region: (f32, f32, f32, f32), channel: usize) -> usize {
+        let (x0, y0, x1, y1) = region;
+        let mut n = 0;
+        for y in (y0 * size[1] as f32) as usize..(y1 * size[1] as f32) as usize {
+            for x in (x0 * size[0] as f32) as usize..(x1 * size[0] as f32) as usize {
+                let p = &rgba[(y * size[0] + x) * 4..][..4];
+                if p[channel] > 180 && p[(channel + 1) % 3] < 90 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn save_and_reopen(engine: &Engine, doc: DocId, name: &str) -> Vec<AnnotInfo> {
+        let out = std::env::temp_dir().join(format!("magic-pdf-{name}-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc, path: out.clone() });
+        recv_until(engine, |r| match r {
+            Response::Saved { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        if let Some(dir) = std::env::var_os("MAGIC_PDF_KEEP_DIR") {
+            std::fs::copy(&out, PathBuf::from(dir).join(format!("{name}.pdf"))).unwrap();
+        }
+        open(engine, doc + 100, out.clone());
+        engine.send(Request::ScanAnnots { doc: doc + 100 });
+        let list = annots(engine, doc + 100);
+        std::fs::remove_file(out).ok();
+        list
+    }
+
+    #[test]
+    fn arrows_polygons_and_clouds_draw_move_and_survive_saving() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let mut arrow = NewAnnot::new(AnnotKind::Arrow, pdf_box(0.0, 0.0, 0.0, 0.0), [230, 0, 0]);
+        arrow.width = 3.0;
+        arrow.vertices = vec![(100.0, 400.0), (300.0, 400.0)];
+        let a = add(&engine, 1, arrow);
+        let mut cloud = NewAnnot::new(AnnotKind::Cloud, pdf_box(0.0, 0.0, 0.0, 0.0), [0, 0, 230]);
+        cloud.vertices = vec![(350.0, 100.0), (500.0, 100.0), (500.0, 250.0), (350.0, 250.0)];
+        cloud.interior = Some([0, 0, 255]);
+        let c = add(&engine, 1, cloud);
+        let list = annots(&engine, 1);
+        let info = |i: usize| list.iter().find(|x| x.index == i).unwrap().clone();
+        assert_eq!(info(a).kind, AnnotKind::Arrow);
+        assert_eq!(info(a).vertices, vec![(100.0, 400.0), (300.0, 400.0)]);
+        assert_eq!(info(a).color, Some([230, 0, 0]));
+        let r = info(a).rect;
+        assert!(r.left < 100.0 && r.right > 300.0 && r.top > 405.0, "rect covers the head: {r:?}");
+        assert_eq!(info(c).kind, AnnotKind::Cloud);
+        assert_eq!(info(c).interior, Some([0, 0, 255]));
+
+        // Page 1 is A4 (595 x 842); the arrow is red around y = 400 (52% from the top).
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        assert!(coloured(size, &rgba, (0.17, 0.5, 0.5, 0.55), 0) > 20, "red arrow drawn");
+        assert!(coloured(size, &rgba, (0.62, 0.72, 0.82, 0.86), 2) > 100, "filled blue cloud drawn");
+
+        // Moving the arrow moves its points.
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: a,
+            change: AnnotChange {
+                transform: Some([1.0, 1.0, 0.0, -100.0]),
+                ..Default::default()
+            },
+        });
+        let list = annots(&engine, 1);
+        let moved = list.iter().find(|x| x.index == a).unwrap();
+        assert_eq!(moved.vertices, vec![(100.0, 300.0), (300.0, 300.0)]);
+        assert_eq!(moved.color, Some([230, 0, 0]), "style kept");
+
+        let list = save_and_reopen(&engine, 1, "shapes");
+        assert!(list.iter().any(|x| x.kind == AnnotKind::Arrow && x.vertices == vec![(100.0, 300.0), (300.0, 300.0)]));
+        assert!(list.iter().any(|x| x.kind == AnnotKind::Cloud));
+    }
+
+    #[test]
+    fn stamps_size_themselves_scale_and_copy() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        // A text stamp placed with a click (zero-size rect) gets its natural size.
+        let mut stamp = NewAnnot::new(AnnotKind::Stamp, pdf_box(200.0, 0.0, 200.0, 600.0), [200, 0, 0]);
+        stamp.stamp = Some(StampSpec::Text {
+            title: "APPROVED".into(),
+            subtitle: "matthias, 2026-11-22".into(),
+        });
+        let s = add(&engine, 1, stamp);
+        // A half-transparent 2x1 image: left pixel blue, right pixel transparent.
+        let mut image = NewAnnot::new(AnnotKind::Stamp, pdf_box(100.0, 100.0, 200.0, 150.0), [0, 0, 0]);
+        image.stamp = Some(StampSpec::Image {
+            width: 2,
+            height: 1,
+            rgba: vec![0, 0, 255, 255, 0, 0, 0, 0],
+        });
+        let i = add(&engine, 1, image);
+        let list = annots(&engine, 1);
+        let info = |list: &[AnnotInfo], i: usize| list.iter().find(|x| x.index == i).unwrap().clone();
+        let r = info(&list, s).rect;
+        assert!((r.left + r.right) / 2.0 - 200.0 < 0.5 && (r.top + r.bottom) / 2.0 - 600.0 < 0.5, "centred: {r:?}");
+        assert!(r.right - r.left > 100.0 && r.top - r.bottom > 20.0, "natural size: {r:?}");
+        assert_eq!(info(&list, s).contents, "APPROVED");
+
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let stamp_region = (r.left / 595.0, 1.0 - r.top / 842.0, r.right / 595.0, 1.0 - r.bottom / 842.0);
+        assert!(coloured(size, &rgba, stamp_region, 0) > 20, "red stamp drawn");
+        // Image stamp: page y 100..150 is 82%..88% from the top; x 100..150 blue, 150..200 transparent.
+        assert!(coloured(size, &rgba, (0.17, 0.83, 0.25, 0.87), 2) > 50, "blue half");
+        assert_eq!(coloured(size, &rgba, (0.26, 0.83, 0.33, 0.87), 2), 0, "transparent half");
+
+        // Enlarging the image stamp scales its picture.
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: i,
+            change: AnnotChange {
+                rect: Some(pdf_box(100.0, 100.0, 400.0, 150.0)),
+                ..Default::default()
+            },
+        });
+        drain(&engine);
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 2);
+        assert!(coloured(size, &rgba, (0.17, 0.83, 0.42, 0.87), 2) > 200, "blue half now 150 pt wide");
+
+        let dark = |size: [usize; 2], rgba: &[u8]| {
+            let (x0, x1, y0, y1) = ((0.44 * size[0] as f32) as usize, (0.66 * size[0] as f32) as usize, (0.62 * size[1] as f32) as usize, (0.66 * size[1] as f32) as usize);
+            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| rgba[(y * size[0] + x) * 4..][..3].iter().all(|&c| c < 60)).count()
+        };
+        let dark_before = dark(size, &rgba);
+        // Copy the image stamp and paste it elsewhere: the picture comes along.
+        engine.send(Request::CopyAnnot { doc: 1, page: 0, index: i });
+        engine.send(Request::PasteAnnot {
+            doc: 1,
+            page: 0,
+            at: Some((250.0, 300.0)),
+        });
+        let pasted = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        let list = annots(&engine, 1);
+        let p = info(&list, pasted).rect;
+        assert_eq!(((p.left + p.right) / 2.0, (p.top + p.bottom) / 2.0), (250.0, 300.0));
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 3);
+        // y 275..325 is 61%..67% from the top; x 100..250 blue, 250..400 transparent.
+        assert!(coloured(size, &rgba, (0.18, 0.62, 0.41, 0.66), 2) > 200, "pasted picture");
+        assert_eq!(coloured(size, &rgba, (0.44, 0.62, 0.66, 0.66), 2), 0, "pasted transparency");
+        assert_eq!(dark(size, &rgba), dark_before, "the transparent half stays see-through");
+
+        let list = save_and_reopen(&engine, 1, "stamps");
+        assert_eq!(list.iter().filter(|x| x.kind == AnnotKind::Stamp).count(), 3);
+    }
+
+    #[test]
+    fn copied_text_boxes_keep_their_formatting_and_paste_next_to_the_original() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let mut tb = NewAnnot::new(AnnotKind::FreeText, pdf_box(100.0, 600.0, 300.0, 640.0), [0, 0, 0]);
+        let mut rich = RichText::plain("Hello world", CharStyle::default());
+        rich.spans[0].style.bold = true;
+        tb.rich = Some(rich.clone());
+        let t = add(&engine, 1, tb);
+        engine.send(Request::CopyAnnot { doc: 1, page: 0, index: t });
+        engine.send(Request::PasteAnnot { doc: 1, page: 0, at: None });
+        let pasted = recv_until(&engine, |r| match r {
+            Response::AnnotAdded { index, .. } => Some(index),
+            _ => None,
+        });
+        let list = annots(&engine, 1);
+        let (orig, copy) = (
+            list.iter().find(|x| x.index == t).unwrap(),
+            list.iter().find(|x| x.index == pasted).unwrap(),
+        );
+        assert_eq!(copy.rich.as_ref().unwrap().text(), "Hello world");
+        assert!(copy.rich.as_ref().unwrap().spans[0].style.bold);
+        assert_eq!((copy.rect.left - orig.rect.left, copy.rect.top - orig.rect.top), (12.0, -12.0));
+        // Undo removes the pasted copy.
+        engine.send(Request::Undo { doc: 1 });
+        let list = annots(&engine, 1);
+        assert!(!list.iter().any(|x| x.index == pasted));
+    }
+
+    #[test]
+    fn comment_replies_and_status_are_undoable_and_saved() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let mut note = NewAnnot::new(AnnotKind::Note, pdf_box(100.0, 700.0, 120.0, 720.0), [255, 200, 0]);
+        note.contents = "Check this".into();
+        let n = add(&engine, 1, note);
+        drain(&engine);
+        let replies = vec![Reply {
+            author: "Ann".into(),
+            date: "D:20261122120000".into(),
+            text: "Done".into(),
+        }];
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: n,
+            change: AnnotChange {
+                replies: Some(replies.clone()),
+                status: Some("Completed".into()),
+                ..Default::default()
+            },
+        });
+        let list = annots(&engine, 1);
+        let got = list.iter().find(|x| x.index == n).unwrap();
+        assert_eq!((got.replies.clone(), got.status.as_str()), (replies.clone(), "Completed"));
+        engine.send(Request::Undo { doc: 1 });
+        let list = annots(&engine, 1);
+        let got = list.iter().find(|x| x.index == n).unwrap();
+        assert!(got.replies.is_empty() && got.status.is_empty(), "{got:?}");
+        engine.send(Request::Redo { doc: 1 });
+        drain(&engine);
+        let list = save_and_reopen(&engine, 1, "replies");
+        let got = list.iter().find(|x| x.contents == "Check this").unwrap();
+        assert_eq!((got.replies.clone(), got.status.as_str()), (replies, "Completed"));
     }
 }

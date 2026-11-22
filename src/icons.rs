@@ -42,6 +42,13 @@ pub const ALIGN_CENTER: &str = "\u{e480}";
 pub const ALIGN_RIGHT: &str = "\u{e486}";
 pub const SIDEBAR: &str = "\u{ec24}";
 pub const PUSH_PIN: &str = "\u{e3e2}";
+pub const LINE: &str = "\u{e32a}";
+pub const ARROW: &str = "\u{e092}";
+pub const POLYGON: &str = "\u{ec7e}";
+pub const CLOUD: &str = "\u{e1aa}";
+pub const STAMP: &str = "\u{ea48}";
+pub const SIGNATURE: &str = "\u{e3ac}"; // pen-nib
+pub const FUNNEL: &str = "\u{e266}";
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

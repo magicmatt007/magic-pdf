@@ -12,7 +12,8 @@ use crate::engine::{
     Align, AnnotChange, CharStyle, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Resize, Rgb,
     form_mods,
 };
-use crate::settings::AnnotStyle;
+use crate::engine::StampSpec;
+use crate::settings::{AnnotStyle, Signature};
 use crate::keys::kb;
 use crate::view::cache::{TextureCache, width_bucket};
 use crate::view::color_picker;
@@ -32,10 +33,16 @@ pub enum Tool {
     Rect,
     Ellipse,
     TextBox,
+    Line,
+    Arrow,
+    Polygon,
+    Cloud,
+    Stamp,
+    Signature,
 }
 
 impl Tool {
-    pub const ANNOTATION_TOOLS: [Tool; 8] = [
+    pub const ANNOTATION_TOOLS: [Tool; 14] = [
         Tool::Highlight,
         Tool::Underline,
         Tool::StrikeOut,
@@ -44,7 +51,29 @@ impl Tool {
         Tool::Ink,
         Tool::Rect,
         Tool::Ellipse,
+        Tool::Line,
+        Tool::Arrow,
+        Tool::Polygon,
+        Tool::Cloud,
+        Tool::Stamp,
+        Tool::Signature,
     ];
+
+    /// The annotation kind a shape tool draws.
+    pub fn shape_kind(self) -> Option<AnnotKind> {
+        match self {
+            Tool::Line => Some(AnnotKind::DrawnLine),
+            Tool::Arrow => Some(AnnotKind::Arrow),
+            Tool::Polygon => Some(AnnotKind::Polygon),
+            Tool::Cloud => Some(AnnotKind::Cloud),
+            _ => None,
+        }
+    }
+
+    /// Tools that draw by dragging on the page.
+    fn draws(self) -> bool {
+        matches!(self, Tool::Ink | Tool::Rect | Tool::Ellipse | Tool::TextBox) || self.shape_kind().is_some()
+    }
 
     pub fn markup_kind(self) -> Option<AnnotKind> {
         match self {
@@ -67,6 +96,12 @@ impl Tool {
             Tool::Rect => icons::RECTANGLE,
             Tool::Ellipse => icons::CIRCLE,
             Tool::TextBox => icons::TEXTBOX,
+            Tool::Line => icons::LINE,
+            Tool::Arrow => icons::ARROW,
+            Tool::Polygon => icons::POLYGON,
+            Tool::Cloud => icons::CLOUD,
+            Tool::Stamp => icons::STAMP,
+            Tool::Signature => icons::SIGNATURE,
         })
     }
 
@@ -82,6 +117,12 @@ impl Tool {
             Tool::Rect => "Rectangle (R)",
             Tool::Ellipse => "Ellipse (E)",
             Tool::TextBox => "Text box (T): click or drag, then type",
+            Tool::Line => "Line (L), Shift: 45° steps",
+            Tool::Arrow => "Arrow (A), Shift: 45° steps",
+            Tool::Polygon => "Polygon (P): click the corners, double-click or Enter to finish; or drag a rectangle",
+            Tool::Cloud => "Cloud (C): click the corners, double-click or Enter to finish; or drag a rectangle",
+            Tool::Stamp => "Stamp (K): click to place",
+            Tool::Signature => "Signature (G): click to place",
         }
     }
 
@@ -93,8 +134,11 @@ impl Tool {
             Tool::StrikeOut => Some(&mut style.strikeout),
             Tool::Note => Some(&mut style.note),
             Tool::Ink => Some(&mut style.ink),
-            Tool::Rect | Tool::Ellipse => Some(&mut style.shape),
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Polygon | Tool::Cloud => Some(&mut style.shape),
             Tool::TextBox => Some(&mut style.textbox_border),
+            Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
+            Tool::Signature => Some(&mut style.signature_color),
+            Tool::Stamp => None,
             Tool::Hand | Tool::SelectText => None,
         }
     }
@@ -108,6 +152,12 @@ pub struct ViewContext<'a> {
     pub night: bool,
     pub style: &'a AnnotStyle,
     pub author: &'a str,
+    /// What the stamp tool places (None: nothing chosen or the image is missing).
+    pub stamp: Option<&'a StampSpec>,
+    /// What the signature tool places.
+    pub signature: Option<&'a Signature>,
+    /// The picture of an image signature.
+    pub signature_image: Option<&'a StampSpec>,
 }
 
 const SEARCH_COLOR: Color32 = Color32::from_rgba_premultiplied(120, 100, 0, 90);
@@ -231,6 +281,7 @@ fn annot_at(tab: &DocTab, page: usize, p: Pos2) -> Option<&AnnotInfo> {
         .get(&page)?
         .iter()
         .rev()
+        .filter(|a| a.in_reply_to.is_none())
         .find(|a| a.rect.expand(2.0).contains(p.x, p.y))
 }
 
@@ -315,7 +366,12 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     });
 
     // Drawing tools.
-    if matches!(tool, Tool::Ink | Tool::Rect | Tool::Ellipse | Tool::TextBox) && !middle_down {
+    if let Some((page, p)) = pointer.filter(|p| view.contains(*p)).and_then(|pt| screen_to_pdf(tab, pt, view, None)) {
+        tab.hover_pdf = Some((page, (p.x, p.y)));
+    } else if hovered {
+        tab.hover_pdf = None;
+    }
+    if tool.draws() && !middle_down {
         draw_tool_input(ui, tab, response, view, cx, pointer);
         if hovered {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
@@ -373,6 +429,15 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         tab.request_text(page);
     }
     let Some((_, pdf_pt)) = screen_to_pdf(tab, pointer, view, Some(page)) else { return };
+
+    // Stamps and signatures: a click places them.
+    if matches!(tool, Tool::Stamp | Tool::Signature) {
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        if response.clicked() {
+            place_stamp(tab, page, pdf_pt, cx);
+        }
+        return;
+    }
 
     // Sticky notes.
     if tool == Tool::Note {
@@ -609,8 +674,57 @@ fn draw_tool_input(
     cx: &mut ViewContext<'_>,
     pointer: Option<Pos2>,
 ) {
-    let _ = ui;
     let Some(pointer) = pointer else { return };
+    let poly_tool = matches!(cx.tool, Tool::Polygon | Tool::Cloud);
+    if poly_tool {
+        // Clicks add corners; double-click, Enter or a click on the first corner finish.
+        let at = screen_to_pdf(tab, pointer, view, match &tab.draft {
+            Some(Draft::Poly { page, .. }) => Some(*page),
+            _ => None,
+        });
+        if let (Some(Draft::Poly { hover, .. }), Some((_, p))) = (&mut tab.draft, at) {
+            *hover = Some(p);
+        }
+        let finish = ui.input(|i| i.key_pressed(egui::Key::Enter)) || response.double_clicked();
+        if response.clicked() && !response.double_clicked() {
+            let current = match &tab.draft {
+                Some(Draft::Poly { page, points, .. }) => Some((*page, points[0], points.len())),
+                _ => None,
+            };
+            match (current, at) {
+                (Some((page, first, count)), Some((pg, p))) if page == pg => {
+                    let first = pdf_to_screen(tab, pg, first, view);
+                    let points = vec![(); count];
+                    let closes = points.len() >= 3 && first.is_some_and(|f| (f - pointer).length() < 8.0);
+                    if closes {
+                        finish_poly(tab, cx);
+                        return;
+                    }
+                    if let Some(Draft::Poly { points, .. }) = &mut tab.draft
+                        && points.last().is_none_or(|l| (*l - p).length() > 1.0)
+                    {
+                        points.push(p);
+                    }
+                }
+                (_, Some((page, p))) => {
+                    tab.deselect_annot();
+                    tab.draft = Some(Draft::Poly {
+                        page,
+                        points: vec![p],
+                        hover: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if finish {
+            finish_poly(tab, cx);
+            return;
+        }
+        if matches!(tab.draft, Some(Draft::Poly { .. })) {
+            return;
+        }
+    }
     if response.drag_started_by(egui::PointerButton::Primary) {
         let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
         let doc_pt = tab.viewport.to_doc(press, view);
@@ -631,9 +745,10 @@ fn draw_tool_input(
         }
     } else if response.dragged_by(egui::PointerButton::Primary) {
         let page = match &tab.draft {
-            Some(Draft::Ink { page, .. } | Draft::Shape { page, .. }) => *page,
+            Some(Draft::Ink { page, .. } | Draft::Shape { page, .. } | Draft::Poly { page, .. }) => *page,
             None => return,
         };
+        let shift = ui.input(|i| i.modifiers.shift);
         if let Some((_, p)) = screen_to_pdf(tab, pointer, view, Some(page)) {
             match &mut tab.draft {
                 Some(Draft::Ink { points, .. }) => {
@@ -641,8 +756,10 @@ fn draw_tool_input(
                         points.push(p);
                     }
                 }
-                Some(Draft::Shape { end, .. }) => *end = p,
-                None => {}
+                Some(Draft::Shape { start, end, .. }) => {
+                    *end = if shift && matches!(cx.tool, Tool::Line | Tool::Arrow) { snap_45(*start, p) } else { p };
+                }
+                Some(Draft::Poly { .. }) | None => {}
             }
         }
     } else if response.drag_stopped() || (tab.draft.is_some() && !response.dragged()) {
@@ -664,6 +781,18 @@ fn draw_tool_input(
                     .expand(w);
                 let stroke = points.iter().map(|p| (p.x, p.y)).collect();
                 create(tab, page, cx, AnnotKind::Ink, rect, style.ink, Vec::new(), vec![stroke]);
+            }
+            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Line | Tool::Arrow) => {
+                if (end - start).length() >= 3.0 {
+                    create_shape(tab, page, cx, vec![(start.x, start.y), (end.x, end.y)]);
+                }
+            }
+            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Polygon | Tool::Cloud) => {
+                // A dragged rectangle.
+                if (end.x - start.x).abs() >= 3.0 && (end.y - start.y).abs() >= 3.0 {
+                    let pts = vec![(start.x, start.y), (end.x, start.y), (end.x, end.y), (start.x, end.y)];
+                    create_shape(tab, page, cx, pts);
+                }
             }
             Draft::Shape { page, start, end } if cx.tool == Tool::TextBox => {
                 // The drag sets position and width; the height follows the text.
@@ -720,23 +849,108 @@ fn create(
         AnnotKind::FreeText => (style.textbox_border_width, style.textbox_fill),
         _ => (1.0, None),
     };
-    tab.outbox.push(Request::AddAnnot {
-        doc: tab.id,
-        page,
-        annot: NewAnnot {
-            kind,
-            rect,
-            color,
-            interior,
-            width,
-            contents: String::new(),
-            author: cx.author.to_string(),
-            quads,
-            ink,
-            font_size: style.textbox_font_size,
-            text_color: style.textbox_text,
+    let mut annot = NewAnnot::new(kind, rect, color);
+    annot.interior = interior;
+    annot.width = width;
+    annot.author = cx.author.to_string();
+    annot.quads = quads;
+    annot.ink = ink;
+    annot.font_size = style.textbox_font_size;
+    annot.text_color = style.textbox_text;
+    tab.outbox.push(Request::AddAnnot { doc: tab.id, page, annot });
+}
+
+/// Rounds the direction from `a` to `b` to a multiple of 45°.
+fn snap_45(a: Pos2, b: Pos2) -> Pos2 {
+    let d = b - a;
+    let angle = (d.y.atan2(d.x) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
+    a + vec2(angle.cos(), angle.sin()) * d.length()
+}
+
+/// Creates the line, arrow, polygon or cloud of the current tool.
+fn create_shape(tab: &mut DocTab, page: usize, cx: &ViewContext<'_>, vertices: Vec<(f32, f32)>) {
+    let Some(kind) = cx.tool.shape_kind() else { return };
+    let style = cx.style;
+    let mut annot = NewAnnot::new(kind, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, style.shape);
+    annot.width = style.shape_width;
+    annot.interior = if kind.has_interior() { style.shape_fill } else { None };
+    annot.author = cx.author.to_string();
+    annot.vertices = vertices;
+    tab.outbox.push(Request::AddAnnot { doc: tab.id, page, annot });
+}
+
+/// Finishes a polygon or cloud being clicked together.
+fn finish_poly(tab: &mut DocTab, cx: &ViewContext<'_>) {
+    if let Some(Draft::Poly { page, points, .. }) = tab.draft.take()
+        && points.len() >= 3
+    {
+        create_shape(tab, page, cx, points.iter().map(|p| (p.x, p.y)).collect());
+    }
+}
+
+/// Places the chosen stamp or signature centred on `at` (PDF space).
+fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
+    let point = PdfBox {
+        left: at.x,
+        bottom: at.y,
+        right: at.x,
+        top: at.y,
+    };
+    let centred = |w: f32, h: f32| PdfBox {
+        left: at.x - w / 2.0,
+        bottom: at.y - h / 2.0,
+        right: at.x + w / 2.0,
+        top: at.y + h / 2.0,
+    };
+    let style = cx.style;
+    let annot = match cx.tool {
+        Tool::Stamp => {
+            let Some(spec) = cx.stamp else {
+                tab.error_message = Some("Choose a stamp in the tool options bar first.".into());
+                return;
+            };
+            let rect = match spec {
+                // The engine sizes text stamps to their text.
+                StampSpec::Text { .. } => point,
+                StampSpec::Image { width, height, .. } => {
+                    let w = 150.0_f32;
+                    centred(w, w * *height as f32 / (*width).max(1) as f32)
+                }
+            };
+            let mut a = NewAnnot::new(AnnotKind::Stamp, rect, style.stamp_color);
+            a.stamp = Some(spec.clone());
+            a
+        }
+        _ => match (cx.signature, cx.signature_image) {
+            (Some(Signature::Drawn(strokes)), _) => {
+                // 150 pt wide, keeping the drawing's proportions.
+                let w = 150.0_f32;
+                let h = strokes.iter().flatten().map(|p| p[1]).fold(0.0_f32, f32::max).max(0.05) * w;
+                let r = centred(w, h);
+                let ink: Vec<Vec<(f32, f32)>> = strokes
+                    .iter()
+                    .map(|s| s.iter().map(|p| (r.left + p[0] * w, r.top - p[1] * w)).collect())
+                    .collect();
+                let mut a = NewAnnot::new(AnnotKind::Ink, r.expand(2.0), style.signature_color);
+                a.width = 1.5;
+                a.ink = ink;
+                a
+            }
+            (Some(Signature::Image(_)), Some(spec @ StampSpec::Image { width, height, .. })) => {
+                let w = 150.0_f32;
+                let mut a = NewAnnot::new(AnnotKind::Stamp, centred(w, w * *height as f32 / (*width).max(1) as f32), [0, 0, 0]);
+                a.stamp = Some(spec.clone());
+                a
+            }
+            _ => {
+                tab.error_message = Some("Create a signature first (tool options bar: Signatures…).".into());
+                return;
+            }
         },
-    });
+    };
+    let mut annot = annot;
+    annot.author = cx.author.to_string();
+    tab.outbox.push(Request::AddAnnot { doc: tab.id, page, annot });
 }
 
 /// Turns the current text selection into a text markup annotation.
@@ -980,6 +1194,29 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
                 .collect();
             let stroke = Stroke::new(cx.style.ink_width * zoom, rgb(cx.style.ink));
             painter.add(Shape::line(pts, stroke));
+        }
+        Some(Draft::Poly { page, points, hover }) => {
+            let mut pts: Vec<Pos2> = points.iter().filter_map(|p| pdf_to_screen(tab, *page, *p, view)).collect();
+            if let Some(h) = hover.and_then(|h| pdf_to_screen(tab, *page, h, view)) {
+                pts.push(h);
+            }
+            let stroke = Stroke::new(cx.style.shape_width * zoom, rgb(cx.style.shape));
+            for p in &pts[..points.len().min(pts.len())] {
+                painter.circle_filled(*p, 3.0, rgb(cx.style.shape));
+            }
+            painter.add(Shape::line(pts, stroke));
+        }
+        Some(Draft::Shape { page, start, end }) if matches!(cx.tool, Tool::Line | Tool::Arrow) => {
+            let (Some(a), Some(b)) = (pdf_to_screen(tab, *page, *start, view), pdf_to_screen(tab, *page, *end, view))
+            else {
+                return;
+            };
+            let stroke = Stroke::new(cx.style.shape_width * zoom, rgb(cx.style.shape));
+            if cx.tool == Tool::Arrow {
+                painter.arrow(a, b - a, stroke);
+            } else {
+                painter.line_segment([a, b], stroke);
+            }
         }
         Some(Draft::Shape { page, start, end }) => {
             let (Some(a), Some(b)) = (pdf_to_screen(tab, *page, *start, view), pdf_to_screen(tab, *page, *end, view))
@@ -1766,6 +2003,22 @@ mod tests {
         events: Vec<egui::Event>,
         tool: Tool,
     ) {
+        TEST_STAMP.with(|s| frame_full(ctx, tab, cache, events, tool, s.borrow().as_ref()));
+    }
+
+    thread_local! {
+        /// What the stamp tool places in tests.
+        static TEST_STAMP: std::cell::RefCell<Option<StampSpec>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn frame_full(
+        ctx: &egui::Context,
+        tab: &mut DocTab,
+        cache: &mut TextureCache,
+        events: Vec<egui::Event>,
+        tool: Tool,
+        stamp: Option<&StampSpec>,
+    ) {
         let style = AnnotStyle::default();
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
@@ -1784,6 +2037,9 @@ mod tests {
                         night: false,
                         style: &style,
                         author: "me",
+                        stamp,
+                        signature: None,
+                        signature_image: None,
                     },
                 );
             });
@@ -1864,6 +2120,11 @@ mod tests {
                 font_size: None,
                 text_color: None,
                 rich: None,
+                vertices: Vec::new(),
+                replies: Vec::new(),
+                status: String::new(),
+                other_replies: Vec::new(),
+                in_reply_to: None,
             }],
         );
         tab.select_annot(0, 3);
@@ -1926,6 +2187,11 @@ mod tests {
                 font_size: None,
                 text_color: None,
                 rich: None,
+                vertices: Vec::new(),
+                replies: Vec::new(),
+                status: String::new(),
+                other_replies: Vec::new(),
+                in_reply_to: None,
             }],
         );
         // A big text field under where the popup appears.
@@ -1990,6 +2256,11 @@ mod tests {
                 font_size: None,
                 text_color: None,
                 rich: None,
+                vertices: Vec::new(),
+                replies: Vec::new(),
+                status: String::new(),
+                other_replies: Vec::new(),
+                in_reply_to: None,
             }],
         );
         tab.select_annot(0, 5);
@@ -2054,6 +2325,11 @@ mod tests {
                 font_size: Some(12.0),
                 text_color: Some([0, 0, 0]),
                 rich: None,
+                vertices: Vec::new(),
+                replies: Vec::new(),
+                status: String::new(),
+                other_replies: Vec::new(),
+                in_reply_to: None,
             }],
         );
         focus_annot(&mut tab, 0, 7, true);
@@ -2094,6 +2370,11 @@ mod tests {
             font_size: Some(12.0),
             text_color: Some([0, 0, 0]),
             rich: None,
+            vertices: Vec::new(),
+            replies: Vec::new(),
+            status: String::new(),
+            other_replies: Vec::new(),
+            in_reply_to: None,
         }
     }
 
@@ -2335,4 +2616,95 @@ mod tests {
         assert!((r.bottom - (600.0 - 50.0 / z)).abs() < 0.5, "{r:?}");
         assert_eq!((r.left, r.right, r.top), (100.0, 200.0, 700.0));
     }
+
+    fn added(tab: &DocTab) -> Vec<NewAnnot> {
+        tab.outbox
+            .iter()
+            .filter_map(|r| match r {
+                Request::AddAnnot { annot, .. } => Some(annot.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ready(tool: Tool) -> (egui::Context, DocTab, TextureCache, Rect) {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), tool);
+        }
+        tab.outbox.clear();
+        let page = tab.viewport.rect_to_screen(tab.layout.page_rect(0).unwrap(), tab.view_rect);
+        (ctx, tab, cache, page)
+    }
+
+    #[test]
+    fn arrow_tool_drags_an_arrow_and_shift_snaps_it() {
+        let (ctx, mut tab, mut cache, page) = ready(Tool::Arrow);
+        let from = page.center();
+        drag(&ctx, &mut tab, &mut cache, from, from + vec2(100.0, 8.0), Tool::Arrow);
+        let a = added(&tab);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].kind, AnnotKind::Arrow);
+        let v = &a[0].vertices;
+        assert_eq!(v.len(), 2);
+        assert!(v[1].0 > v[0].0 && (v[1].1 - v[0].1).abs() > 0.5, "not snapped: {v:?}");
+    }
+
+    #[test]
+    fn polygon_tool_clicks_corners_and_enter_finishes() {
+        let (ctx, mut tab, mut cache, page) = ready(Tool::Polygon);
+        let c = page.center();
+        for p in [c, c + vec2(80.0, 0.0), c + vec2(40.0, 60.0)] {
+            click(&ctx, &mut tab, &mut cache, p, Tool::Polygon);
+            // Clicks far apart in time (no double-click).
+            ctx.input_mut(|i| i.time += 1.0);
+        }
+        assert!(added(&tab).is_empty(), "still open");
+        let enter = vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        frame_with(&ctx, &mut tab, &mut cache, enter, Tool::Polygon);
+        let a = added(&tab);
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0].kind, a[0].vertices.len()), (AnnotKind::Polygon, 3));
+        assert!(tab.draft.is_none());
+    }
+
+    #[test]
+    fn cloud_tool_drag_makes_a_rectangular_cloud() {
+        let (ctx, mut tab, mut cache, page) = ready(Tool::Cloud);
+        let from = page.center();
+        drag(&ctx, &mut tab, &mut cache, from, from + vec2(120.0, 80.0), Tool::Cloud);
+        let a = added(&tab);
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0].kind, a[0].vertices.len()), (AnnotKind::Cloud, 4));
+    }
+
+    #[test]
+    fn stamp_tool_places_the_chosen_stamp_or_asks_for_one() {
+        let (ctx, mut tab, mut cache, page) = ready(Tool::Stamp);
+        click(&ctx, &mut tab, &mut cache, page.center(), Tool::Stamp);
+        assert!(added(&tab).is_empty());
+        assert!(tab.error_message.take().is_some(), "asks to choose a stamp");
+        let spec = StampSpec::Text {
+            title: "DRAFT".into(),
+            subtitle: String::new(),
+        };
+        TEST_STAMP.with(|s| *s.borrow_mut() = Some(spec.clone()));
+        ctx.input_mut(|i| i.time += 1.0);
+        click(&ctx, &mut tab, &mut cache, page.center(), Tool::Stamp);
+        TEST_STAMP.with(|s| *s.borrow_mut() = None);
+        let a = added(&tab);
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0].kind, a[0].stamp.clone()), (AnnotKind::Stamp, Some(spec)));
+        assert_eq!(a[0].rect.left, a[0].rect.right, "the engine sizes text stamps");
+    }
 }
+

@@ -61,10 +61,40 @@ impl Selection {
 }
 
 /// An annotation being drawn with the mouse (PDF page coordinates).
+/// Which annotations the Comments sidebar lists.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CommentFilter {
+    pub text: String,
+    pub kind: Option<AnnotKind>,
+    pub author: Option<String>,
+    /// "" lists comments without a status.
+    pub status: Option<String>,
+}
+
+impl CommentFilter {
+    pub fn active(&self) -> bool {
+        *self != CommentFilter::default()
+    }
+
+    pub fn matches(&self, a: &AnnotInfo) -> bool {
+        let text = self.text.trim().to_lowercase();
+        let status = if a.status == "None" { "" } else { a.status.as_str() };
+        (text.is_empty()
+            || a.contents.to_lowercase().contains(&text)
+            || a.author.to_lowercase().contains(&text)
+            || a.replies.iter().chain(&a.other_replies).any(|r| r.text.to_lowercase().contains(&text)))
+            && self.kind.is_none_or(|k| k == a.kind)
+            && self.author.as_ref().is_none_or(|w| *w == a.author)
+            && self.status.as_ref().is_none_or(|s| s == status)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Draft {
     Ink { page: usize, points: Vec<Pos2> },
     Shape { page: usize, start: Pos2, end: Pos2 },
+    /// A polygon or cloud being clicked together; `hover` is where the next corner would go.
+    Poly { page: usize, points: Vec<Pos2>, hover: Option<Pos2> },
 }
 
 /// Which part of an annotation is being dragged.
@@ -235,6 +265,13 @@ pub struct DocTab {
     pub thumbs_follow_page: Option<usize>,
     /// Pages (partly) on screen in the document view, for the thumbnails.
     pub visible_pages: Vec<usize>,
+    /// The page and PDF position under the mouse (where Ctrl+V pastes).
+    pub hover_pdf: Option<(usize, (f32, f32))>,
+    /// A message for the user raised by the document view.
+    pub error_message: Option<String>,
+    /// Comments sidebar: filters and the reply being written.
+    pub comment_filter: CommentFilter,
+    pub reply_draft: String,
 }
 
 impl DocTab {
@@ -293,6 +330,10 @@ impl DocTab {
             last_wanted: HashSet::new(),
             thumbs_follow_page: None,
             visible_pages: Vec::new(),
+            hover_pdf: None,
+            error_message: None,
+            comment_filter: CommentFilter::default(),
+            reply_draft: String::new(),
         };
         if let Some(s) = saved {
             tab.mode = s.mode;
@@ -706,4 +747,53 @@ mod tests {
         let e = RichEdit::new(&rich);
         assert_eq!(e.to_rich("ab"), rich);
     }
+
+    #[test]
+    fn comment_filters_combine() {
+        let note = |author: &str, text: &str, status: &str| AnnotInfo {
+            index: 0,
+            kind: AnnotKind::Note,
+            rect: PdfBox {
+                left: 0.0,
+                bottom: 0.0,
+                right: 1.0,
+                top: 1.0,
+            },
+            color: None,
+            interior: None,
+            width: 1.0,
+            contents: text.into(),
+            author: author.into(),
+            modified: String::new(),
+            font_size: None,
+            text_color: None,
+            rich: None,
+            vertices: Vec::new(),
+            replies: vec![crate::engine::Reply {
+                author: "Bob".into(),
+                date: String::new(),
+                text: "fixed in v2".into(),
+            }],
+            other_replies: Vec::new(),
+            status: status.into(),
+            in_reply_to: None,
+        };
+        let a = note("Ann", "Typo here", "Accepted");
+        let b = note("Carl", "Wrong figure", "");
+        let mut f = CommentFilter::default();
+        assert!(!f.active() && f.matches(&a) && f.matches(&b));
+        f.text = "typo".into();
+        assert!(f.matches(&a) && !f.matches(&b));
+        f.text = "V2".into();
+        assert!(f.matches(&a) && f.matches(&b), "searches replies too");
+        f.text.clear();
+        f.status = Some(String::new());
+        assert!(!f.matches(&a) && f.matches(&b), "no status");
+        f.status = Some("Accepted".into());
+        f.author = Some("Ann".into());
+        assert!(f.matches(&a) && !f.matches(&b));
+        f.kind = Some(AnnotKind::Highlight);
+        assert!(!f.matches(&a));
+    }
 }
+

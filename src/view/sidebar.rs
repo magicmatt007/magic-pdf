@@ -3,7 +3,8 @@
 use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::document::DocTab;
-use crate::engine::{OutlineItem, RenderKey};
+use crate::engine::{AnnotChange, AnnotInfo, AnnotKind, OutlineItem, RenderKey, Reply, Request, STATUSES, pdf_date_now};
+use crate::icons;
 #[cfg(test)]
 use crate::engine::PageOp;
 use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
@@ -41,12 +42,13 @@ pub fn show(
     cache: &mut TextureCache,
     actions: &mut Vec<PageAction>,
     thumb_width: &mut f32,
+    author: &str,
 ) {
     // Wraps onto several lines in a narrow sidebar instead of keeping it wide.
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
         ui.selectable_value(sidebar, SidebarTab::Outline, "Outline");
-        let n: usize = tab.annots.values().map(Vec::len).sum();
+        let n: usize = tab.annots.values().flatten().filter(|a| a.in_reply_to.is_none()).count();
         let label = if n == 0 { "Comments".to_string() } else { format!("Comments ({n})") };
         ui.selectable_value(sidebar, SidebarTab::Comments, label);
         let label = if tab.search.hits.is_empty() {
@@ -60,7 +62,7 @@ pub fn show(
     match sidebar {
         SidebarTab::Pages => thumbnails(ui, tab, cache, actions, thumb_width),
         SidebarTab::Outline => outline(ui, tab),
-        SidebarTab::Comments => comments(ui, tab),
+        SidebarTab::Comments => comments(ui, tab, author),
         SidebarTab::Search => search_results(ui, tab),
     }
 }
@@ -482,7 +484,16 @@ fn outline_item(ui: &mut Ui, item: &OutlineItem, goto: &mut Option<usize>, index
     }
 }
 
-fn comments(ui: &mut Ui, tab: &mut DocTab) {
+/// Colour of a review status chip.
+fn status_color(status: &str) -> Color32 {
+    match status {
+        "Accepted" | "Completed" => Color32::from_rgb(30, 140, 70),
+        "Rejected" => Color32::from_rgb(200, 40, 40),
+        _ => Color32::GRAY,
+    }
+}
+
+fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
     let mut pages: Vec<usize> = tab.annots.iter().filter(|(_, v)| !v.is_empty()).map(|(p, _)| *p).collect();
     pages.sort_unstable();
     if pages.is_empty() {
@@ -496,20 +507,87 @@ fn comments(ui: &mut Ui, tab: &mut DocTab) {
         }
         return;
     }
+    // Filters.
+    let all = || tab.annots.values().flatten().filter(|a| a.in_reply_to.is_none());
+    let mut kinds: Vec<AnnotKind> = Vec::new();
+    let mut authors: Vec<String> = Vec::new();
+    for a in all() {
+        if !kinds.contains(&a.kind) {
+            kinds.push(a.kind);
+        }
+        if !a.author.is_empty() && !authors.contains(&a.author) {
+            authors.push(a.author.clone());
+        }
+    }
+    authors.sort();
+    let f = &mut tab.comment_filter;
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::FUNNEL).size(14.0)).on_hover_text("Filter the list");
+        ui.add(egui::TextEdit::singleline(&mut f.text).hint_text("Search comments").desired_width(f32::INFINITY));
+    });
+    ui.horizontal_wrapped(|ui| {
+        let any = "All";
+        egui::ComboBox::from_id_salt(("filter_kind", tab.id))
+            .selected_text(f.kind.map_or(any, |k| k.label()))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.kind, None, "All types");
+                for k in &kinds {
+                    ui.selectable_value(&mut f.kind, Some(*k), k.label());
+                }
+            });
+        egui::ComboBox::from_id_salt(("filter_author", tab.id))
+            .selected_text(f.author.as_deref().unwrap_or("Anyone"))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.author, None, "Anyone");
+                for a in &authors {
+                    ui.selectable_value(&mut f.author, Some(a.clone()), a);
+                }
+            });
+        egui::ComboBox::from_id_salt(("filter_status", tab.id))
+            .selected_text(match f.status.as_deref() {
+                None => "Any status",
+                Some("") => "No status",
+                Some(s) => s,
+            })
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.status, None, "Any status");
+                ui.selectable_value(&mut f.status, Some(String::new()), "No status");
+                for s in &STATUSES[1..] {
+                    ui.selectable_value(&mut f.status, Some(s.to_string()), *s);
+                }
+            });
+        if f.active() && ui.small_button("Clear").clicked() {
+            *f = Default::default();
+        }
+    });
+    ui.separator();
+
+    let filter = tab.comment_filter.clone();
     let mut clicked = None;
+    let mut update: Option<(usize, usize, AnnotChange)> = None;
+    let selected = tab.selected_annot.as_ref().map(|s| (s.page, s.index));
+    let mut shown = 0;
     egui::ScrollArea::vertical()
         .id_salt(("comments", tab.id))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for page in pages {
+                let list: Vec<&AnnotInfo> = tab.annots[&page]
+                    .iter()
+                    .filter(|a| a.in_reply_to.is_none() && filter.matches(a))
+                    .collect();
+                if list.is_empty() {
+                    continue;
+                }
                 ui.add_space(4.0);
                 ui.weak(format!("Page {}", page + 1));
-                for a in &tab.annots[&page] {
-                    let selected = tab
-                        .selected_annot
-                        .as_ref()
-                        .is_some_and(|s| s.page == page && s.index == a.index);
-                    let frame = egui::Frame::group(ui.style()).fill(if selected {
+                for a in list {
+                    shown += 1;
+                    let is_selected = selected == Some((page, a.index));
+                    let frame = egui::Frame::group(ui.style()).fill(if is_selected {
                         ui.visuals().selection.bg_fill.gamma_multiply(0.4)
                     } else {
                         Color32::TRANSPARENT
@@ -526,6 +604,14 @@ fn comments(ui: &mut Ui, tab: &mut DocTab) {
                                 );
                                 ui.strong(a.kind.label());
                                 ui.weak(format_pdf_date(&a.modified));
+                                if !a.status.is_empty() && a.status != "None" {
+                                    let chip = egui::RichText::new(&a.status).small().color(Color32::WHITE);
+                                    egui::Frame::new()
+                                        .fill(status_color(&a.status))
+                                        .corner_radius(CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(5, 1))
+                                        .show(ui, |ui| ui.label(chip));
+                                }
                             });
                             if !a.author.is_empty() {
                                 ui.weak(&a.author);
@@ -533,16 +619,92 @@ fn comments(ui: &mut Ui, tab: &mut DocTab) {
                             if !a.contents.is_empty() {
                                 ui.label(&a.contents);
                             }
+                            for r in a.other_replies.iter().chain(&a.replies) {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(10.0);
+                                    ui.weak("↳");
+                                    ui.strong(if r.author.is_empty() { "?" } else { r.author.as_str() });
+                                    ui.weak(format_pdf_date(&r.date));
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(22.0);
+                                    ui.label(&r.text);
+                                });
+                            }
                         })
                         .response
                         .interact(Sense::click());
                     if resp.clicked() {
                         clicked = Some((page, a.index));
                     }
+                    if is_selected {
+                        // Reply and status for the selected comment.
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            let status = if a.status.is_empty() { "None" } else { a.status.as_str() };
+                            egui::ComboBox::from_id_salt(("status", tab.id))
+                                .selected_text(format!("Status: {status}"))
+                                .show_ui(ui, |ui| {
+                                    for s in STATUSES {
+                                        if ui.selectable_label(status == s, s).clicked() && status != s {
+                                            let change = AnnotChange {
+                                                status: Some(if s == "None" { String::new() } else { s.to_string() }),
+                                                ..Default::default()
+                                            };
+                                            update = Some((page, a.index, change));
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            let edit = ui.add(
+                                egui::TextEdit::multiline(&mut tab.reply_draft)
+                                    .hint_text("Reply…")
+                                    .desired_rows(1)
+                                    .desired_width(ui.available_width() - 60.0),
+                            );
+                            let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+                            let text = tab.reply_draft.trim().to_string();
+                            if (ui.add_enabled(!text.is_empty(), egui::Button::new("Reply")).clicked() || enter) && !text.is_empty() {
+                                let mut replies = a.replies.clone();
+                                replies.push(Reply {
+                                    author: author.to_string(),
+                                    date: pdf_date_now(),
+                                    text,
+                                });
+                                update = Some((
+                                    page,
+                                    a.index,
+                                    AnnotChange {
+                                        replies: Some(replies),
+                                        ..Default::default()
+                                    },
+                                ));
+                            }
+                        });
+                    }
                 }
             }
+            if shown == 0 {
+                ui.weak("No comments match the filter.");
+            }
         });
+    if let Some((page, index, change)) = update {
+        if change.replies.is_some() {
+            tab.reply_draft.clear();
+        }
+        tab.outbox.push(Request::UpdateAnnot {
+            doc: tab.id,
+            page,
+            index,
+            change,
+        });
+    }
     if let Some((page, index)) = clicked {
+        if selected != Some((page, index)) {
+            tab.reply_draft.clear();
+        }
         focus_annot(tab, page, index, false);
     }
 }
@@ -627,7 +789,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions, thumb_width));
+            egui::CentralPanel::default().show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions, thumb_width, "Tester"));
         });
         out.textures_delta.clear();
         actions
@@ -747,7 +909,7 @@ mod tests {
                     .resizable(true)
                     .default_size(MIN_WIDTH)
                     .size_range(MIN_WIDTH..=900.0)
-                    .show(ui, |ui| show(ui, &mut tab, &mut side, &mut cache, &mut actions, &mut 150.0));
+                    .show(ui, |ui| show(ui, &mut tab, &mut side, &mut cache, &mut actions, &mut 150.0, ""));
                 width = panel.response.rect.width();
             });
             out.textures_delta.clear();

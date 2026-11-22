@@ -88,6 +88,13 @@ pub struct App {
     tab_drag: Option<usize>,
     /// Other windows, listed in a tab's "Move to window" menu.
     tab_menu_peers: Vec<(crate::ipc::Peer, String)>,
+    /// Stamp and signature tool state.
+    stamps: crate::view::stamps::StampState,
+    /// The shape tool shown in the toolbar's shape group.
+    last_shape: Tool,
+    /// Text put on the clipboard when an annotation was copied: pasting exactly this
+    /// text pastes the annotation.
+    annot_clip_text: Option<String>,
     /// Tabs being moved to another window, waiting for their export.
     moves: HashMap<DocId, MoveTarget>,
     /// Temporary files of tabs received from other windows, deleted once opened.
@@ -217,6 +224,9 @@ impl App {
             ipc: None,
             tab_drag: None,
             tab_menu_peers: Vec::new(),
+            stamps: Default::default(),
+            last_shape: Tool::Rect,
+            annot_clip_text: None,
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
@@ -1368,6 +1378,12 @@ impl App {
                 (Key::R, Tool::Rect),
                 (Key::E, Tool::Ellipse),
                 (Key::T, Tool::TextBox),
+                (Key::L, Tool::Line),
+                (Key::A, Tool::Arrow),
+                (Key::P, Tool::Polygon),
+                (Key::C, Tool::Cloud),
+                (Key::K, Tool::Stamp),
+                (Key::G, Tool::Signature),
             ] {
                 if shortcut(Modifiers::NONE, key) {
                     self.tool = tool;
@@ -1384,6 +1400,12 @@ impl App {
         }
 
         let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let pasted = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(t) => Some(t.clone()),
+                _ => None,
+            })
+        });
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
 
         if !typing
@@ -1391,6 +1413,44 @@ impl App {
             && let Some(text) = tab.selected_text()
         {
             ctx.copy_text(text);
+            self.annot_clip_text = None;
+        } else if !typing
+            && copy
+            && tab.form_focus.is_none()
+            && let Some(sel) = &tab.selected_annot
+        {
+            // Copy the annotation. The clipboard gets a text too (its comment), and
+            // pasting that same text pastes the annotation.
+            tab.outbox.push(Request::CopyAnnot {
+                doc: tab.id,
+                page: sel.page,
+                index: sel.index,
+            });
+            let kind = tab
+                .annots
+                .get(&sel.page)
+                .and_then(|v| v.iter().find(|a| a.index == sel.index))
+                .map(|a| a.kind.label())
+                .unwrap_or("Annotation");
+            let text = if sel.committed.trim().is_empty() {
+                format!("[{kind}]")
+            } else {
+                sel.committed.clone()
+            };
+            ctx.copy_text(text.clone());
+            self.annot_clip_text = Some(text);
+            self.notice = Some((format!("{kind} copied (Ctrl+V pastes it under the mouse)"), ctx.input(|i| i.time)));
+        }
+        if !typing
+            && tab.form_focus.is_none()
+            && let Some(text) = pasted
+            && self.annot_clip_text.as_deref().map(|t| t.replace("\r\n", "\n")) == Some(text)
+        {
+            let (page, at) = match tab.hover_pdf {
+                Some((page, at)) => (page, Some(at)),
+                None => (tab.current_page, None),
+            };
+            tab.outbox.push(Request::PasteAnnot { doc: tab.id, page, at });
         }
         if !typing && shortcut(cmd, Key::A) {
             tab.select_all_on_page();
@@ -1549,6 +1609,21 @@ impl App {
                 {
                     self.delete_selected_annot();
                 }
+                if ui
+                    .add_enabled(has_sel, egui::Button::new(kb("Copy annotation\tCtrl+C")))
+                    .clicked()
+                {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestCopy);
+                }
+                if ui
+                    .add_enabled(self.annot_clip_text.is_some() && has_tab, egui::Button::new(kb("Paste annotation\tCtrl+V")))
+                    .clicked()
+                    && let Some(tab) = self.tabs.get_mut(self.active)
+                {
+                    // From the menu: next to the original (or at the same place on this page).
+                    let page = tab.current_page;
+                    tab.outbox.push(Request::PasteAnnot { doc: tab.id, page, at: None });
+                }
                 ui.separator();
                 if ui.button(kb("Settings…\tCtrl+,")).clicked() {
                     self.show_settings = true;
@@ -1693,9 +1768,35 @@ impl App {
                     .on_hover_text(tool.label());
             }
             ui.separator();
+            const SHAPES: [Tool; 6] = [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Polygon, Tool::Cloud];
+            if SHAPES.contains(&self.tool) {
+                self.last_shape = self.tool;
+            }
             for tool in Tool::ANNOTATION_TOOLS {
+                if SHAPES.contains(&tool) && tool != self.last_shape {
+                    continue;
+                }
                 ui.selectable_value(&mut self.tool, tool, tool.icon())
                     .on_hover_text(tool.label());
+                if tool == self.last_shape {
+                    // The other shapes in a drop-down next to the current one.
+                    let menu = ui.menu_button(icons::text(icons::CARET_DOWN).size(11.0), |ui| {
+                        for shape in SHAPES {
+                            let picked = ui
+                                .horizontal(|ui| {
+                                    let icon = ui.selectable_label(self.tool == shape, shape.icon());
+                                    let text = ui.selectable_label(self.tool == shape, shape.label());
+                                    icon.clicked() || text.clicked()
+                                })
+                                .inner;
+                            if picked {
+                                self.tool = shape;
+                                ui.close();
+                            }
+                        }
+                    });
+                    menu.response.on_hover_text("More shapes");
+                }
             }
             ui.separator();
 
@@ -1838,6 +1939,34 @@ impl App {
     /// toolbar while an annotation tool is selected.
     fn tool_options(&mut self, ui: &mut Ui) {
         let tool = self.tool;
+        if matches!(tool, Tool::Stamp | Tool::Signature) {
+            use crate::view::stamps;
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tool.label()).strong());
+                ui.separator();
+                changed |= if tool == Tool::Stamp {
+                    stamps::stamp_options(ui, &mut self.stamps, &mut self.settings)
+                } else {
+                    stamps::signature_options(ui, &mut self.stamps, &mut self.settings)
+                };
+                let recent = &mut self.settings.recent_colors;
+                if let Some(slot) = tool.color(&mut self.settings.annot_style) {
+                    ui.label("Colour");
+                    if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
+                        *slot = c;
+                        changed = true;
+                    }
+                }
+                if let Some(e) = self.stamps.image_error(&self.settings) {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+            });
+            if changed {
+                self.settings.save();
+            }
+            return;
+        }
         let style = &mut self.settings.annot_style;
         let recent = &mut self.settings.recent_colors;
         let mut changed = false;
@@ -1857,7 +1986,11 @@ impl App {
                     ui.label("Width");
                     changed |= width(ui, &mut style.ink_width);
                 }
-                Tool::Rect | Tool::Ellipse => {
+                Tool::Line | Tool::Arrow => {
+                    ui.label("Width");
+                    changed |= width(ui, &mut style.shape_width);
+                }
+                Tool::Rect | Tool::Ellipse | Tool::Polygon | Tool::Cloud => {
                     ui.label("Width");
                     changed |= width(ui, &mut style.shape_width);
                     ui.label("Fill");
@@ -2162,6 +2295,9 @@ impl App {
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
                         ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
+                        ("L / A / P / C", "Line, arrow, polygon, cloud (Enter or double-click finishes)"),
+                        ("K / G", "Stamp, signature"),
+                        ("Ctrl+C / Ctrl+V on an annotation", "Copy it, paste it under the mouse"),
                         ("Del", "Delete the selected annotation or thumbnail pages"),
                         ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
                         ("Ctrl / Shift + click thumbnail", "Select several pages"),
@@ -2476,12 +2612,13 @@ impl eframe::App for App {
         if self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
             let tab = &mut self.tabs[self.active];
             let thumb_width = &mut self.settings.thumb_width;
+            let author = &self.settings.author;
             let panel = egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(self.settings.sidebar_width)
                 .size_range(sidebar::MIN_WIDTH..=900.0)
                 .show(ui, |ui| {
-                    sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width)
+                    sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width, author)
                 });
             // Remembered for the next start (dragging the edge resizes it).
             self.settings.sidebar_width = panel.response.rect.width();
@@ -2493,7 +2630,11 @@ impl eframe::App for App {
                 self.welcome(ui);
                 return;
             }
+            if matches!(self.tool, Tool::Stamp | Tool::Signature) {
+                self.stamps.prepare(&self.settings);
+            }
             let tab = &mut self.tabs[self.active];
+            let signature = self.settings.signatures.get(self.settings.annot_style.signature);
             document_view::show(
                 ui,
                 tab,
@@ -2504,9 +2645,18 @@ impl eframe::App for App {
                     night: self.settings.night_mode,
                     style: &self.settings.annot_style,
                     author: &self.settings.author,
+                    stamp: self.stamps.stamp(&self.settings.annot_style),
+                    signature,
+                    signature_image: self.stamps.signature_image(&self.settings.annot_style, &self.settings.signatures),
                 },
             );
+            if let Some(e) = tab.error_message.take() {
+                self.error = Some(e);
+            }
         });
+        if crate::view::stamps::signatures_window(&ctx, &mut self.stamps, &mut self.settings) {
+            self.settings.save();
+        }
 
         if self.settings.recent_colors != recent_before {
             self.settings.save();

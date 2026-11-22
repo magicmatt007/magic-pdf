@@ -10,7 +10,12 @@ use pdfium_render::prelude::*;
 
 use super::commands::*;
 use super::rich::{CharStyle, RichText};
+use super::shapes::{self, POINTS_KEY, SHAPE_KEY, STAMP_KEY, Shape};
 use super::textbox::{self, BoxStyle, FontSet, GlyphSource};
+
+/// Private keys for comment threads and review status.
+const REPLIES_KEY: &str = "MagicPdfReplies";
+const STATUS_KEY: &str = "MagicPdfStatus";
 
 pub type Lib = &'static dyn PdfiumLibraryBindings;
 
@@ -774,7 +779,10 @@ impl<'d> Page<'d> {
                 SUBTYPE_SQUIGGLY => AnnotKind::Squiggly,
                 SUBTYPE_STRIKEOUT => AnnotKind::StrikeOut,
                 SUBTYPE_STAMP => AnnotKind::Stamp,
-                SUBTYPE_INK => AnnotKind::Ink,
+                SUBTYPE_INK => match Shape::parse(&self.annot_string(&a, SHAPE_KEY)) {
+                    Some(shape) => AnnotKind::from_shape(shape),
+                    None => AnnotKind::Ink,
+                },
                 _ => AnnotKind::Other,
             };
             let mut r = FS_RECTF {
@@ -826,6 +834,15 @@ impl<'d> Page<'d> {
                 font_size: None,
                 text_color: None,
                 rich: None,
+                vertices: if kind.shape().is_some() {
+                    shapes::decode_points(&string(POINTS_KEY))
+                } else {
+                    Vec::new()
+                },
+                replies: serde_json::from_str(&string(REPLIES_KEY)).unwrap_or_default(),
+                status: string(STATUS_KEY),
+                other_replies: Vec::new(),
+                in_reply_to: self.reply_parent(&a),
             });
             if kind == AnnotKind::FreeText
                 && let Some(last) = out.last_mut()
@@ -837,7 +854,250 @@ impl<'d> Page<'d> {
                 last.rich = Some(rich);
             }
         }
+        // Replies and review states written by other applications join their parent's
+        // thread.
+        let threads: Vec<(usize, usize)> = out
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| Some((i, out.iter().position(|p| Some(p.index) == a.in_reply_to)?)))
+            .collect();
+        for (child, parent) in threads {
+            let Some(a) = self.annot(out[child].index) else { continue };
+            let state = self.annot_string(&a, "State");
+            let c = out[child].clone();
+            let p = &mut out[parent];
+            if !state.is_empty() && self.annot_string(&a, "StateModel") != "Marked" {
+                if p.status.is_empty() || p.status == "None" {
+                    p.status = state;
+                }
+            } else {
+                p.other_replies.push(Reply {
+                    author: c.author,
+                    date: c.modified,
+                    text: c.contents,
+                });
+            }
+        }
         out
+    }
+
+    fn annot_string(&self, a: &Annot, key: &str) -> String {
+        let lib = self.lib();
+        read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len) })
+    }
+
+    /// Index of the annotation `a` replies to (/IRT), if any.
+    fn reply_parent(&self, a: &Annot) -> Option<usize> {
+        let lib = self.lib();
+        if !lib.is_true(unsafe { lib.FPDFAnnot_HasKey(a.handle, "IRT") }) {
+            return None;
+        }
+        let handle = unsafe { lib.FPDFAnnot_GetLinkedAnnot(a.handle, "IRT") };
+        if handle.is_null() {
+            return None;
+        }
+        let parent = Annot { lib, handle };
+        let index = unsafe { lib.FPDFPage_GetAnnotIndex(self.handle, parent.handle) };
+        usize::try_from(index).ok()
+    }
+
+    fn annot_rect(&self, a: &Annot) -> PdfBox {
+        let mut r = FS_RECTF {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        };
+        unsafe { self.lib().FPDFAnnot_GetRect(a.handle, &mut r) };
+        to_box(&r)
+    }
+
+    fn set_rect(&self, a: &Annot, b: PdfBox) {
+        let r = FS_RECTF {
+            left: b.left,
+            top: b.top,
+            right: b.right,
+            bottom: b.bottom,
+        };
+        unsafe { self.lib().FPDFAnnot_SetRect(a.handle, &r) };
+    }
+
+    /// Adds an image filling the annotation rectangle (stamps).
+    fn append_image(&self, a: &Annot, rect: PdfBox, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+        let lib = self.lib();
+        if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
+            return Err("invalid image".into());
+        }
+        unsafe {
+            let bmp = lib.FPDFBitmap_Create(width as c_int, height as c_int, 1);
+            if bmp.is_null() {
+                return Err("out of memory for the image".into());
+            }
+            let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
+            let buf = lib.FPDFBitmap_GetBuffer(bmp) as *mut u8;
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let s = &rgba[(y * width as usize + x) * 4..][..4];
+                    let d = buf.add(y * stride + x * 4);
+                    *d = s[2];
+                    *d.add(1) = s[1];
+                    *d.add(2) = s[0];
+                    *d.add(3) = s[3];
+                }
+            }
+            let img = lib.FPDFPageObj_NewImageObj(self.doc.handle);
+            let ok = lib.is_true(lib.FPDFImageObj_SetBitmap(ptr::null_mut(), 0, img, bmp));
+            lib.FPDFBitmap_Destroy(bmp);
+            if !ok {
+                lib.FPDFPageObj_Destroy(img);
+                return Err("PDFium could not store the image".into());
+            }
+            let (w, h) = ((rect.right - rect.left) as f64, (rect.top - rect.bottom) as f64);
+            let m = FS_MATRIX {
+                a: w as f32,
+                b: 0.0,
+                c: 0.0,
+                d: h as f32,
+                e: rect.left,
+                f: rect.bottom,
+            };
+            lib.FPDFPageObj_SetMatrix(img, &m);
+            if !lib.is_true(lib.FPDFAnnot_AppendObject(a.handle, img)) {
+                lib.FPDFPageObj_Destroy(img);
+                return Err("PDFium could not add the image to the stamp".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The first image of a stamp as RGBA pixels.
+    fn stamp_image(&self, a: &Annot) -> Option<(u32, u32, Vec<u8>)> {
+        const FPDF_PAGEOBJ_IMAGE: c_int = 3;
+        let lib = self.lib();
+        unsafe {
+            let n = lib.FPDFAnnot_GetObjectCount(a.handle);
+            let obj = (0..n)
+                .map(|i| lib.FPDFAnnot_GetObject(a.handle, i))
+                .find(|o| !o.is_null() && lib.FPDFPageObj_GetType(*o) == FPDF_PAGEOBJ_IMAGE)?;
+            // Rendering the image (with its transparency mask) at its own pixel size: the
+            // rendered size follows the object's matrix, so set that to the pixel size
+            // for a moment.
+            let (mut pw, mut ph) = (0, 0);
+            lib.FPDFImageObj_GetImagePixelSize(obj, &mut pw, &mut ph);
+            let mut saved = FS_MATRIX {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            };
+            lib.FPDFPageObj_GetMatrix(obj, &mut saved);
+            let native = FS_MATRIX {
+                a: pw.max(1) as f32,
+                b: 0.0,
+                c: 0.0,
+                d: ph.max(1) as f32,
+                e: 0.0,
+                f: 0.0,
+            };
+            lib.FPDFPageObj_SetMatrix(obj, &native);
+            let mut bmp = lib.FPDFImageObj_GetRenderedBitmap(self.doc.handle, self.handle, obj);
+            lib.FPDFPageObj_SetMatrix(obj, &saved);
+            if bmp.is_null() {
+                bmp = lib.FPDFImageObj_GetBitmap(obj);
+            }
+            if bmp.is_null() {
+                return None;
+            }
+            let (w, h) = (lib.FPDFBitmap_GetWidth(bmp) as usize, lib.FPDFBitmap_GetHeight(bmp) as usize);
+            let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
+            let format = lib.FPDFBitmap_GetFormat(bmp);
+            let buf = lib.FPDFBitmap_GetBuffer(bmp) as *const u8;
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    let px = |bpp: usize, i: usize| *buf.add(y * stride + x * bpp + i);
+                    let [r, g, b, al] = match format {
+                        1 => {
+                            let v = px(1, 0);
+                            [v, v, v, 255]
+                        }
+                        2 => [px(3, 2), px(3, 1), px(3, 0), 255],
+                        3 => [px(4, 2), px(4, 1), px(4, 0), 255],
+                        _ => [px(4, 2), px(4, 1), px(4, 0), px(4, 3)],
+                    };
+                    out.extend([r, g, b, al]);
+                }
+            }
+            lib.FPDFBitmap_Destroy(bmp);
+            Some((w as u32, h as u32, out))
+        }
+    }
+
+    /// Everything needed to recreate an annotation elsewhere (copy and paste).
+    pub fn annot_clip(&self, index: usize) -> Result<NewAnnot, String> {
+        let lib = self.lib();
+        let info = self
+            .annots(|i| i != index)
+            .into_iter()
+            .next()
+            .ok_or("this annotation cannot be copied")?;
+        let a = self.annot(index).ok_or("annotation not found")?;
+        if matches!(info.kind, AnnotKind::Other | AnnotKind::Line) {
+            return Err(format!("{} annotations cannot be copied", info.kind.label()));
+        }
+        let mut n = NewAnnot::new(info.kind, info.rect, info.color.unwrap_or([0, 0, 0]));
+        n.interior = info.interior;
+        n.width = info.width;
+        n.contents = info.contents.clone();
+        n.vertices = info.vertices.clone();
+        n.status = info.status.clone();
+        n.replies = serde_json::from_str(&self.annot_string(&a, REPLIES_KEY)).unwrap_or_default();
+        if let Some(rich) = info.rich {
+            n.font_size = info.font_size.unwrap_or(12.0);
+            n.text_color = info.text_color.unwrap_or([0, 0, 0]);
+            n.rich = Some(rich);
+        }
+        unsafe {
+            for i in 0..lib.FPDFAnnot_CountAttachmentPoints(a.handle) {
+                let mut q = FS_QUADPOINTSF {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 0.0,
+                    y2: 0.0,
+                    x3: 0.0,
+                    y3: 0.0,
+                    x4: 0.0,
+                    y4: 0.0,
+                };
+                if lib.is_true(lib.FPDFAnnot_GetAttachmentPoints(a.handle, i, &mut q)) {
+                    n.quads.push([q.x1, q.y1, q.x2, q.y2, q.x3, q.y3, q.x4, q.y4]);
+                }
+            }
+            if info.kind == AnnotKind::Ink {
+                for i in 0..lib.FPDFAnnot_GetInkListCount(a.handle) {
+                    let len = lib.FPDFAnnot_GetInkListPath(a.handle, i, ptr::null_mut(), 0);
+                    let mut pts = vec![FS_POINTF { x: 0.0, y: 0.0 }; len as usize];
+                    lib.FPDFAnnot_GetInkListPath(a.handle, i, pts.as_mut_ptr(), len);
+                    n.ink.push(pts.iter().map(|p| (p.x, p.y)).collect());
+                }
+            }
+        }
+        if info.kind == AnnotKind::Stamp {
+            let text = self.annot_string(&a, STAMP_KEY);
+            n.stamp = if !text.is_empty() {
+                let (title, subtitle) = text.split_once('\n').unwrap_or((&text, ""));
+                Some(StampSpec::Text {
+                    title: title.to_string(),
+                    subtitle: subtitle.to_string(),
+                })
+            } else {
+                let (width, height, rgba) = self.stamp_image(&a).ok_or("this stamp cannot be copied")?;
+                Some(StampSpec::Image { width, height, rgba })
+            };
+        }
+        Ok(n)
     }
 
     fn annot_color(&self, a: &Annot, kind: FPDFANNOT_COLORTYPE) -> Option<Rgb> {
@@ -866,6 +1126,8 @@ impl<'d> Page<'d> {
             AnnotKind::Square => SUBTYPE_SQUARE,
             AnnotKind::Circle => SUBTYPE_CIRCLE,
             AnnotKind::FreeText => SUBTYPE_FREETEXT,
+            AnnotKind::Stamp => SUBTYPE_STAMP,
+            k if k.shape().is_some() => SUBTYPE_INK,
             other => return Err(format!("creating {} annotations is not supported", other.label())),
         };
         let handle = unsafe { lib.FPDFPage_CreateAnnot(self.handle, subtype) };
@@ -904,7 +1166,9 @@ impl<'d> Page<'d> {
                 };
                 lib.FPDFAnnot_AppendAttachmentPoints(a.handle, &qp);
             }
-            for stroke in &n.ink {
+            let shape = n.kind.shape();
+            let shape_ink = shape.map(|s| shapes::ink_strokes(s, &n.vertices, n.width));
+            for stroke in shape_ink.as_ref().unwrap_or(&n.ink) {
                 let pts: Vec<FS_POINTF> = stroke.iter().map(|&(x, y)| FS_POINTF { x, y }).collect();
                 if !pts.is_empty() {
                     lib.FPDFAnnot_AddInkStroke(a.handle, pts.as_ptr(), pts.len() as _);
@@ -926,7 +1190,36 @@ impl<'d> Page<'d> {
                     color: n.text_color,
                     ..Default::default()
                 };
-                self.write_rich(&a, &RichText::plain(&n.contents, style));
+                let rich = n.rich.clone().unwrap_or_else(|| RichText::plain(&n.contents, style));
+                self.write_rich(&a, &rich);
+            }
+            if let Some(shape) = shape {
+                lib.FPDFAnnot_SetStringValue_str(a.handle, SHAPE_KEY, shape.name());
+                lib.FPDFAnnot_SetStringValue_str(a.handle, POINTS_KEY, &shapes::encode_points(&n.vertices));
+            }
+            if !n.replies.is_empty() {
+                let json = serde_json::to_string(&n.replies).unwrap_or_default();
+                lib.FPDFAnnot_SetStringValue_str(a.handle, REPLIES_KEY, &json);
+            }
+            if !n.status.is_empty() {
+                lib.FPDFAnnot_SetStringValue_str(a.handle, STATUS_KEY, &n.status);
+            }
+            match &n.stamp {
+                Some(StampSpec::Text { title, subtitle }) => {
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, STAMP_KEY, &format!("{title}\n{subtitle}"));
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, "Name", "magic-pdf");
+                    if n.contents.is_empty() {
+                        lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", title);
+                    }
+                }
+                Some(StampSpec::Image { width, height, rgba }) => {
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, "Name", "magic-pdf-image");
+                    if let Err(e) = self.append_image(&a, n.rect, *width, *height, rgba) {
+                        lib.FPDFPage_RemoveAnnot(self.handle, index);
+                        return Err(e);
+                    }
+                }
+                None => {}
             }
         }
         if index < 0 {
@@ -951,8 +1244,13 @@ impl<'d> Page<'d> {
             || change.font_size.is_some()
             || change.text_color.is_some()
             || change.rich.is_some();
+        let subtype = unsafe { lib.FPDFAnnot_GetSubtype(a.handle) };
+        // Stamps other than magic-pdf's text stamps keep their appearance: it is scaled
+        // to the new rectangle when moved or resized (images cannot be redrawn).
+        let keep_ap = subtype == SUBTYPE_STAMP && self.annot_string(&a, STAMP_KEY).is_empty();
+        let shape = Shape::parse(&self.annot_string(&a, SHAPE_KEY)).filter(|_| subtype == SUBTYPE_INK);
         unsafe {
-            if restyle {
+            if restyle && !keep_ap {
                 // PDFium refuses colour access while an appearance stream exists. Drop it;
                 // PDFium regenerates it from the new style when the page is rendered.
                 lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
@@ -1010,8 +1308,15 @@ impl<'d> Page<'d> {
                     (None, None) => unreachable!(),
                 };
                 undo.transform = Some(invert_transform(t));
-                if lib.FPDFAnnot_GetSubtype(a.handle) == SUBTYPE_INK {
+                if subtype == SUBTYPE_INK {
                     self.transform_ink(&a, t);
+                }
+                if shape.is_some() {
+                    let pts: Vec<(f32, f32)> = shapes::decode_points(&string(POINTS_KEY))
+                        .into_iter()
+                        .map(|(x, y)| (t[0] * x + t[2], t[1] * y + t[3]))
+                        .collect();
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, POINTS_KEY, &shapes::encode_points(&pts));
                 }
                 let new = apply_transform_box(t, current);
                 let nr = FS_RECTF {
@@ -1021,6 +1326,15 @@ impl<'d> Page<'d> {
                     bottom: new.bottom,
                 };
                 lib.FPDFAnnot_SetRect(a.handle, &nr);
+            }
+            if let Some(replies) = &change.replies {
+                undo.replies = Some(serde_json::from_str(&string(REPLIES_KEY)).unwrap_or_default());
+                let json = if replies.is_empty() { String::new() } else { serde_json::to_string(replies).unwrap_or_default() };
+                lib.FPDFAnnot_SetStringValue_str(a.handle, REPLIES_KEY, &json);
+            }
+            if let Some(status) = &change.status {
+                undo.status = Some(string(STATUS_KEY));
+                lib.FPDFAnnot_SetStringValue_str(a.handle, STATUS_KEY, status);
             }
             if let Some(text) = change.contents.as_ref().filter(|_| !is_box) {
                 undo.contents = Some(string("Contents"));
@@ -1054,9 +1368,46 @@ impl<'d> Page<'d> {
         }
     }
 
-    pub fn annot_is_text_box(&self, index: usize) -> bool {
-        self.annot(index)
-            .is_some_and(|a| unsafe { self.lib().FPDFAnnot_GetSubtype(a.handle) } == SUBTYPE_FREETEXT)
+    /// Draws the appearance of annotations magic-pdf renders itself (text boxes,
+    /// shapes, text stamps) after they were created or changed.
+    pub fn refresh_appearance(&self, index: usize, fonts: &dyn FontSet) -> Result<(), String> {
+        let lib = self.lib();
+        let a = self.annot(index).ok_or("annotation not found")?;
+        let subtype = unsafe { lib.FPDFAnnot_GetSubtype(a.handle) };
+        let set_ap = |content: &str| -> Result<(), String> {
+            let content = wide(content);
+            let ok = unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, content.as_ptr()) };
+            if lib.is_true(ok) { Ok(()) } else { Err("PDFium could not set the appearance".into()) }
+        };
+        match subtype {
+            SUBTYPE_FREETEXT => {
+                drop(a);
+                self.refresh_text_box(index, fonts)
+            }
+            SUBTYPE_INK => {
+                let Some(shape) = Shape::parse(&self.annot_string(&a, SHAPE_KEY)) else { return Ok(()) };
+                unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null()) };
+                let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
+                unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width) };
+                let color = self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]);
+                let fill = if shape.closed() { self.annot_color(&a, COLORTYPE_INTERIOR) } else { None };
+                let pts = shapes::decode_points(&self.annot_string(&a, POINTS_KEY));
+                let (rect, content) = shapes::appearance(shape, &pts, color, width, fill);
+                self.set_rect(&a, rect);
+                set_ap(&content)
+            }
+            SUBTYPE_STAMP => {
+                let text = self.annot_string(&a, STAMP_KEY);
+                if text.is_empty() {
+                    return Ok(());
+                }
+                unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null()) };
+                let color = self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([200, 0, 0]);
+                let (title, subtitle) = text.split_once('\n').unwrap_or((&text, ""));
+                set_ap(&shapes::stamp_appearance(self.annot_rect(&a), title, subtitle, color, fonts))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Re-lays out a text box from its stored text and style and sets its appearance
