@@ -23,6 +23,11 @@ env_logger = "0.11"
 # Embeds the icon into Windows builds; unused elsewhere.
 winresource = "0.1"
 
+# GNOME/Wayland: windows draw their own title bar. eframe only enables winit's
+# proper one (with the window title) among its default features, which we turn off.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
