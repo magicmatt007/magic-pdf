@@ -693,7 +693,7 @@ impl App {
     fn undo(&mut self, redo: bool) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             let doc = tab.id;
-            tab.selected_annot = None;
+            tab.deselect_annot();
             self.send(if redo { Request::Redo { doc } } else { Request::Undo { doc } });
         }
     }
@@ -821,7 +821,7 @@ impl App {
         }
         if shortcut(Modifiers::NONE, Key::Escape) {
             tab.selection = None;
-            tab.selected_annot = None;
+            tab.deselect_annot();
             tab.draft = None;
         }
         let horizontal = tab.mode.is_horizontal();

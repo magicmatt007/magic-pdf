@@ -337,7 +337,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         }
         if response.clicked() {
             tab.selection = None;
-            tab.selected_annot = None;
+            tab.deselect_annot();
         }
         return;
     };
@@ -416,7 +416,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
                 tab.select_annot(page, index);
                 return;
             }
-            _ => tab.selected_annot = None,
+            _ => tab.deselect_annot(),
         }
     }
 
@@ -447,7 +447,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
                 head: i,
             });
             tab.selecting = true;
-            tab.selected_annot = None;
+            tab.deselect_annot();
         }
     } else if response.dragged_by(egui::PointerButton::Primary) && primary_down {
         if let Some(sel) = &mut tab.selection
@@ -501,7 +501,8 @@ fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> b
     let widget = tab
         .widgets
         .get(&page)
-        .and_then(|ws| ws.iter().find(|w| w.rect.contains(p.x, p.y)));
+        .and_then(|ws| ws.iter().find(|w| w.rect.contains(p.x, p.y)))
+        .cloned();
     let focused_here = tab.form_focus == Some(page);
     let (pressed, released, double, moved, mods) = ui.input(|i| {
         let m = &i.modifiers;
@@ -524,7 +525,7 @@ fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> b
         }
         return false;
     }
-    if let Some(w) = widget {
+    if let Some(w) = &widget {
         ui.ctx().set_cursor_icon(if w.field_type == crate::engine::FIELD_TEXT {
             CursorIcon::Text
         } else {
@@ -556,7 +557,7 @@ fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> b
     }
     if pressed {
         tab.selection = None;
-        tab.selected_annot = None;
+        tab.deselect_annot();
     }
     // Hovering a field without focus only changes the cursor; other tools still work
     // for drags that start elsewhere.
@@ -581,7 +582,7 @@ fn draw_tool_input(
                 tab.request_text(page);
             }
             if let Some((page, p)) = screen_to_pdf(tab, press, view, Some(page)) {
-                tab.selected_annot = None;
+                tab.deselect_annot();
                 tab.draft = Some(match cx.tool {
                     Tool::Ink => Draft::Ink {
                         page,
@@ -1059,16 +1060,21 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect) {
                         .desired_rows(3)
                         .desired_width(f32::INFINITY),
                 );
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_comment_box"), edit.rect));
                 if focus {
                     edit.request_focus();
                     focus = false;
                 }
-                if edit.lost_focus() && contents != annot.contents {
+                if edit.lost_focus() && contents != sel.committed {
                     change.contents = Some(contents.clone());
                 }
             });
         });
     if let Some(s) = &mut tab.selected_annot {
+        if change.contents.is_some() {
+            s.committed = contents.clone();
+        }
         s.contents = contents;
         s.focus_contents = focus;
     }
@@ -1173,6 +1179,16 @@ mod tests {
     }
 
     fn frame(ctx: &egui::Context, tab: &mut DocTab, cache: &mut TextureCache, events: Vec<egui::Event>) {
+        frame_with(ctx, tab, cache, events, Tool::SelectText);
+    }
+
+    fn frame_with(
+        ctx: &egui::Context,
+        tab: &mut DocTab,
+        cache: &mut TextureCache,
+        events: Vec<egui::Event>,
+        tool: Tool,
+    ) {
         let style = AnnotStyle::default();
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
@@ -1186,7 +1202,7 @@ mod tests {
                     tab,
                     ViewContext {
                         cache: &mut *cache,
-                        tool: Tool::SelectText,
+                        tool,
                         night: false,
                         style: &style,
                         author: "me",
@@ -1236,5 +1252,70 @@ mod tests {
         });
         assert!(created, "clicking Highlight did not create an annotation");
         assert!(tab.selection.is_none(), "selection is consumed by the highlight");
+    }
+
+    fn click(ctx: &egui::Context, tab: &mut DocTab, cache: &mut TextureCache, at: Pos2, tool: Tool) {
+        frame_with(ctx, tab, cache, vec![egui::Event::PointerMoved(at)], tool);
+        frame_with(ctx, tab, cache, vec![button(at, true)], tool);
+        frame_with(ctx, tab, cache, vec![button(at, false)], tool);
+    }
+
+    #[test]
+    fn comment_is_saved_when_clicking_elsewhere() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let rect = PdfBox {
+            left: 100.0,
+            bottom: 700.0,
+            right: 140.0,
+            top: 715.0,
+        };
+        tab.annots.insert(
+            0,
+            vec![AnnotInfo {
+                index: 3,
+                kind: AnnotKind::Underline,
+                rect,
+                color: Some([0, 110, 230]),
+                interior: None,
+                width: 1.0,
+                contents: String::new(),
+                author: "me".into(),
+                modified: String::new(),
+            }],
+        );
+        tab.select_annot(0, 3);
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        let comment: Rect = ctx
+            .data(|d| d.get_temp(Id::unique("test_comment_box")))
+            .expect("annotation popup is shown");
+        click(&ctx, &mut tab, &mut cache, comment.center(), Tool::Hand);
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("Check this".into())], Tool::Hand);
+        assert!(tab.outbox.is_empty(), "nothing is saved while still typing");
+
+        // Click on an empty part of the page to finish.
+        let page = tab.layout.page_rect(0).unwrap();
+        let empty = tab.viewport.rect_to_screen(page, tab.view_rect).center_bottom() - vec2(0.0, 40.0);
+        click(&ctx, &mut tab, &mut cache, empty, Tool::Hand);
+
+        let saved = tab.outbox.iter().any(|r| {
+            matches!(
+                r,
+                Request::UpdateAnnot { page: 0, index: 3, change, .. }
+                    if change.contents.as_deref() == Some("Check this")
+            )
+        });
+        assert!(saved, "comment was lost: {:?}", tab.outbox.len());
+        let saves = tab
+            .outbox
+            .iter()
+            .filter(|r| matches!(r, Request::UpdateAnnot { .. }))
+            .count();
+        assert_eq!(saves, 1, "comment saved more than once");
+        assert!(tab.selected_annot.is_none());
     }
 }

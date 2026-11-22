@@ -70,6 +70,8 @@ pub struct AnnotSelection {
     pub page: usize,
     pub index: usize,
     pub contents: String,
+    /// The comment as last saved (or loaded), to avoid saving the same text twice.
+    pub committed: String,
     pub focus_contents: bool,
 }
 
@@ -214,11 +216,37 @@ impl DocTab {
         self.annots.get(&page)?.iter().find(|a| a.index == index)
     }
 
+    /// Ends editing the selected annotation, saving its comment if it was changed.
+    pub fn deselect_annot(&mut self) {
+        let Some(sel) = self.selected_annot.take() else { return };
+        let changed = self.annot(sel.page, sel.index).is_some() && sel.contents != sel.committed;
+        if changed {
+            self.outbox.push(Request::UpdateAnnot {
+                doc: self.id,
+                page: sel.page,
+                index: sel.index,
+                change: crate::engine::AnnotChange {
+                    contents: Some(sel.contents),
+                    ..Default::default()
+                },
+            });
+        }
+    }
+
     pub fn select_annot(&mut self, page: usize, index: usize) {
+        if self
+            .selected_annot
+            .as_ref()
+            .is_some_and(|s| s.page == page && s.index == index)
+        {
+            return;
+        }
+        self.deselect_annot();
         let contents = self.annot(page, index).map(|a| a.contents.clone()).unwrap_or_default();
         self.selected_annot = Some(AnnotSelection {
             page,
             index,
+            committed: contents.clone(),
             contents,
             focus_contents: false,
         });
