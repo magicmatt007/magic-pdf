@@ -305,6 +305,13 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     });
     let tool = cx.tool;
 
+    // Only use the pointer for page interaction when the page is what is under it,
+    // not a popup or menu drawn on top (e.g. the annotation popup over a form field).
+    // A drag that started on the page keeps going even if it passes under a popup.
+    let pointer = pointer.filter(|p| {
+        response.dragged() || response.drag_stopped() || ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
+    });
+
     // Drawing tools.
     if matches!(tool, Tool::Ink | Tool::Rect | Tool::Ellipse) && !middle_down {
         draw_tool_input(ui, tab, response, view, cx, pointer);
@@ -1317,5 +1324,67 @@ mod tests {
             .count();
         assert_eq!(saves, 1, "comment saved more than once");
         assert!(tab.selected_annot.is_none());
+    }
+
+    #[test]
+    fn clicking_the_comment_box_over_a_form_field_keeps_the_popup() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let rect = PdfBox {
+            left: 100.0,
+            bottom: 700.0,
+            right: 140.0,
+            top: 715.0,
+        };
+        tab.annots.insert(
+            0,
+            vec![AnnotInfo {
+                index: 3,
+                kind: AnnotKind::Underline,
+                rect,
+                color: Some([0, 110, 230]),
+                interior: None,
+                width: 1.0,
+                contents: String::new(),
+                author: "me".into(),
+                modified: String::new(),
+            }],
+        );
+        // A big text field under where the popup appears.
+        tab.widgets.insert(
+            0,
+            vec![crate::engine::WidgetInfo {
+                rect: PdfBox {
+                    left: 0.0,
+                    bottom: 0.0,
+                    right: 595.0,
+                    top: 690.0,
+                },
+                field_type: crate::engine::FIELD_TEXT,
+                name: "name".into(),
+                value: String::new(),
+                checked: false,
+            }],
+        );
+        tab.select_annot(0, 3);
+        let mut cache = TextureCache::new(usize::MAX);
+        for tool in [Tool::Hand, Tool::SelectText] {
+            for _ in 0..3 {
+                frame_with(&ctx, &mut tab, &mut cache, Vec::new(), tool);
+            }
+            let comment: Rect = ctx
+                .data(|d| d.get_temp(Id::unique("test_comment_box")))
+                .expect("annotation popup is shown");
+            tab.outbox.clear();
+            click(&ctx, &mut tab, &mut cache, comment.center(), tool);
+            assert!(tab.selected_annot.is_some(), "{tool:?}: popup closed on click");
+            assert!(
+                !tab.outbox.iter().any(|r| matches!(r, Request::FormMouse { .. })),
+                "{tool:?}: click went through the popup to the form field"
+            );
+            frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("ok".into())], tool);
+            assert!(tab.selected_annot.as_ref().unwrap().contents.ends_with("ok"));
+        }
     }
 }
