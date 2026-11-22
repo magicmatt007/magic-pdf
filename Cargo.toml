@@ -1,0 +1,27 @@
+[package]
+name = "magic-pdf"
+version = "0.1.0"
+edition = "2024"
+description = "Lightweight cross-platform PDF viewer with horizontal page layout"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "system_fonts", "glow", "wayland", "x11", "clipboard", "links", "accesskit"] }
+pdfium-render = { version = "0.9.6", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+crossbeam-channel = "0.5"
+rfd = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+directories = "6"
+open = "5"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 2
