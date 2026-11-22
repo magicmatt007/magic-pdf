@@ -6,6 +6,9 @@ mod engine;
 mod fonts;
 mod icons;
 mod ipc;
+mod keys;
+#[cfg(target_os = "macos")]
+mod macos;
 mod print;
 mod settings;
 mod update;
@@ -73,6 +76,9 @@ fn main() -> eframe::Result {
     if !args.new_window && !args.files.is_empty() && hand_to_running_instance(&args.files) {
         return Ok(());
     }
+
+    #[cfg(target_os = "macos")]
+    macos::install();
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("magic-pdf")

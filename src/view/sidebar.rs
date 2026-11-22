@@ -7,6 +7,7 @@ use crate::engine::{OutlineItem, RenderKey};
 #[cfg(test)]
 use crate::engine::PageOp;
 use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
+use crate::keys::kb;
 use crate::view::cache::{TextureCache, width_bucket};
 use crate::view::layout::rotated_size;
 
@@ -441,7 +442,7 @@ fn search_results(ui: &mut Ui, tab: &mut DocTab) {
     let s = &tab.search;
     match (&s.submitted, s.running) {
         (None, _) => {
-            ui.weak("Use the search box (Ctrl+F) to search the document.");
+            ui.weak(kb("Use the search box (Ctrl+F) to search the document."));
             return;
         }
         (Some(q), true) => {

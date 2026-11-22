@@ -6,6 +6,7 @@ Outputs (committed, so builds need no Python):
   magic-pdf.ico        Windows exe / installer / file association icon
   magic-pdf-256.png    for docs and stores
   magic-pdf-64.rgba    raw 64x64 RGBA pixels for the window icon
+  magic-pdf.icns       macOS app icon (16 to 1024 px)
 """
 import os
 from PIL import Image, ImageDraw
@@ -32,7 +33,8 @@ def sparkle(cx, cy, r, n=48):
 
 
 def render(size: int) -> Image.Image:
-    big = size * S
+    # Supersample 8x, but keep very large renders (macOS 1024 px) affordable.
+    big = size * max(2, min(S, 4096 // size))
     k = big / 512.0  # the design uses a 512x512 grid (magic-* icon family)
 
     def r(*v):
@@ -71,6 +73,8 @@ def main():
     big.save(os.path.join(HERE, "magic-pdf.ico"), sizes=[(s, s) for s in sizes])
     with open(os.path.join(HERE, "magic-pdf-64.rgba"), "wb") as f:
         f.write(render(64).tobytes())
+    # Pillow writes all .icns sizes from the largest image.
+    render(1024).save(os.path.join(HERE, "magic-pdf.icns"))
     print("icons written to", HERE)
 
 

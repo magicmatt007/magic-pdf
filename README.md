@@ -1,6 +1,6 @@
 # magic-pdf
 
-A lightweight, cross-platform PDF viewer (Linux, Windows, later macOS) built for wide
+A lightweight, cross-platform PDF viewer (Linux, Windows, macOS) built for wide
 monitors: its default **horizontal layout** puts every page side by side, fitted to the
 window height, and the mouse wheel scrolls left and right through the document.
 
@@ -53,6 +53,14 @@ default PDF viewer (also available later under Help). The installer is not code-
 so Windows SmartScreen may ask for confirmation: *More info* → *Run anyway*. A portable
 zip is available too.
 
+**macOS** (11 or later, Apple Silicon and Intel): download `magic-pdf-<version>-macos.dmg`
+from the same release, open it and drag magic-pdf into Applications. The app is not
+notarised by Apple, so macOS blocks the first start: click *Done*, then open *System
+Settings → Privacy & Security* and click *Open Anyway* next to magic-pdf (once). To make it
+your PDF viewer, select a PDF in Finder, *File → Get Info*, pick magic-pdf under *Open
+with* and click *Change All…*. To build the app yourself on a Mac:
+`packaging/macos/build-app.sh` (writes `dist/magic-pdf.app` and the `.dmg`).
+
 **Linux:** build from source and install for your user (see below):
 
 ```bash
@@ -85,15 +93,18 @@ This adds magic-pdf to the application menu and to "Open with" for PDF files. Us
 1. Set the new `version` in `Cargo.toml` and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
-The *Release* workflow then builds the Windows installer and portable zip and publishes
-them as a GitHub release. Running the workflow by hand (Actions → Release → Run
+The *Release* workflow then builds the Windows installer, the portable zip and the macOS
+disk image and publishes them as a GitHub release. Running the workflow by hand (Actions → Release → Run
 workflow) builds the same files as a downloadable artifact without publishing anything.
-CI runs clippy and the tests on Linux and Windows for every push.
+CI runs clippy and the tests on Linux, Windows and macOS for every push.
 
 ## Debugging
 
 `MAGIC_PDF_SCREENSHOT=out.ppm magic-pdf file.pdf` opens the file, saves a screenshot
-of the app's own window after three seconds and quits.
+of the app's own window after three seconds and quits (`MAGIC_PDF_TOOL=highlight`, `note`, … picks
+the starting tool). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
+file's page count to `out.txt` and quits; the release workflow uses it to smoke-test the
+macOS app bundle.
 
 ## Tests
 

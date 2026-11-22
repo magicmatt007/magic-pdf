@@ -13,6 +13,7 @@ use crate::engine::{
     form_mods,
 };
 use crate::settings::AnnotStyle;
+use crate::keys::kb;
 use crate::view::cache::{TextureCache, width_bucket};
 use crate::view::color_picker;
 use crate::view::layout::{GAP, LayoutMode, geom_box_to_local, geom_local_to_pdf, geom_pdf_to_local};
@@ -1254,7 +1255,7 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(icons::text(icons::COPY)).on_hover_text("Copy (Ctrl+C)").clicked() {
+                    if ui.button(icons::text(icons::COPY)).on_hover_text(kb("Copy (Ctrl+C)")).clicked() {
                         action = Some(None);
                     }
                     for (kind, tool) in [
@@ -1525,13 +1526,13 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     let toggle = |ui: &mut Ui, on: bool, icon: &str, tip: &str| {
                         ui.add(egui::Button::selectable(on, icons::text(icon))).on_hover_text(tip).clicked()
                     };
-                    if toggle(ui, current.bold, icons::TEXT_B, "Bold (Ctrl+B)") {
+                    if toggle(ui, current.bold, icons::TEXT_B, &kb("Bold (Ctrl+B)")) {
                         apply(re, &|s| s.bold = !current.bold);
                     }
-                    if toggle(ui, current.italic, icons::TEXT_ITALIC, "Italic (Ctrl+I)") {
+                    if toggle(ui, current.italic, icons::TEXT_ITALIC, &kb("Italic (Ctrl+I)")) {
                         apply(re, &|s| s.italic = !current.italic);
                     }
-                    if toggle(ui, current.underline, icons::TEXT_UNDERLINE, "Underline (Ctrl+U)") {
+                    if toggle(ui, current.underline, icons::TEXT_UNDERLINE, &kb("Underline (Ctrl+U)")) {
                         apply(re, &|s| s.underline = !current.underline);
                     }
                     if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, "Strikethrough") {

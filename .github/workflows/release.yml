@@ -1,6 +1,6 @@
-# Builds the Windows installer and a portable zip. A pushed version tag (v1.2.3)
-# publishes them as a GitHub release; a manual run ("Run workflow") only builds
-# them and keeps them as a workflow artifact for testing.
+# Builds the Windows installer, a portable zip and the macOS disk image. A pushed
+# version tag (v1.2.3) publishes them as a GitHub release; a manual run ("Run
+# workflow") only builds them and keeps them as workflow artifacts for testing.
 name: Release
 
 on:
@@ -71,16 +71,65 @@ jobs:
             dist/*.exe
             dist/*.zip
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Determine version
+        run: |
+          cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.ref_type }}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$cargo_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"; exit 1
+          fi
+          echo "VERSION=$cargo_version" >> "$GITHUB_ENV"
+
+      - name: Fetch PDFium
+        run: ./scripts/fetch-pdfium.sh
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build app and disk image
+        run: packaging/macos/build-app.sh
+
+      - name: Smoke test the app bundle
+        run: |
+          out="$RUNNER_TEMP/selftest.txt"
+          MAGIC_PDF_SELFTEST="$out" perl -e 'alarm 120; exec @ARGV' \
+            dist/magic-pdf.app/Contents/MacOS/magic-pdf "$PWD/tests/fixtures/sample.pdf"
+          cat "$out"
+          grep -q "40 pages" "$out"
+
+      - name: Keep the build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magic-pdf-macos
+          path: dist/*.dmg
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish release
-        if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = @"
+          version="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
           ## Windows
 
-          Download **magic-pdf-$env:VERSION-setup.exe** and run it. It installs for your user only
+          Download **magic-pdf-$version-setup.exe** and run it. It installs for your user only
           (no administrator rights needed) and adds magic-pdf to the Start menu and to "Open with"
           for PDF files. At the end it can open Windows Settings to make magic-pdf your default
           PDF viewer.
@@ -88,10 +137,21 @@ jobs:
           Windows may warn that the installer is from an unknown publisher, because it is not
           code-signed. Choose **More info**, then **Run anyway**.
 
-          No installer wanted? Unzip **magic-pdf-$env:VERSION-windows-portable.zip** anywhere and run
-          ``magic-pdf.exe``.
-          "@
-          gh release create "${{ github.ref_name }}" `
-            "dist\magic-pdf-$env:VERSION-setup.exe" `
-            "dist\magic-pdf-$env:VERSION-windows-portable.zip" `
-            --title "magic-pdf $env:VERSION" --notes $notes
+          No installer wanted? Unzip **magic-pdf-$version-windows-portable.zip** anywhere and run
+          \`magic-pdf.exe\`.
+
+          ## macOS (Apple Silicon and Intel, macOS 11 or later)
+
+          Open **magic-pdf-$version-macos.dmg** and drag magic-pdf into Applications.
+
+          The app is not notarised by Apple, so the first start is blocked ("cannot verify that it
+          is free of malware"). Click **Done**, then open **System Settings → Privacy & Security**,
+          scroll down and click **Open Anyway** next to magic-pdf. This is needed only once.
+
+          To make it your PDF viewer: select a PDF in Finder, **File → Get Info**, choose magic-pdf
+          under **Open with**, then **Change All…**.
+          EOF
+          sed -i 's/^          //' notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            dist/*.exe dist/*.zip dist/*.dmg \
+            --title "magic-pdf $version" --notes-file notes.md

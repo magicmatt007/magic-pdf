@@ -41,9 +41,11 @@ impl Release {
         self.tag_name.trim_start_matches('v')
     }
 
-    /// The Windows installer of this release.
+    /// The installer for this platform: the Windows setup program or the macOS disk
+    /// image.
     pub fn installer(&self) -> Option<&Asset> {
-        self.assets.iter().find(|a| a.name.ends_with("-setup.exe"))
+        let suffix = if cfg!(target_os = "macos") { "-macos.dmg" } else { "-setup.exe" };
+        self.assets.iter().find(|a| a.name.ends_with(suffix))
     }
 }
 
@@ -137,13 +139,19 @@ pub fn download_installer(asset: &Asset) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Starts the installer to update in place; it restarts magic-pdf when done.
+/// Starts the installer. Windows: updates in place and restarts magic-pdf. macOS:
+/// opens the disk image so the new app can be dragged to Applications.
 pub fn run_installer(path: &Path) -> Result<(), String> {
-    Command::new(path)
-        .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("could not start the installer: {e}"))
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(path);
+        c
+    } else {
+        let mut c = Command::new(path);
+        c.args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]);
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| format!("could not start the installer: {e}"))
 }
 
 #[cfg(test)]

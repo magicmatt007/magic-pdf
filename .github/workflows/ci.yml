@@ -1,4 +1,4 @@
-# Lints and tests on Linux and Windows for every push and pull request.
+# Lints and tests on Linux, Windows and macOS for every push and pull request.
 name: CI
 
 on:
@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,8 +35,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
-      - name: Fetch PDFium (Linux)
-        if: runner.os == 'Linux'
+      - name: Fetch PDFium (Linux, macOS)
+        if: runner.os != 'Windows'
         run: ./scripts/fetch-pdfium.sh
 
       - name: Fetch PDFium (Windows)

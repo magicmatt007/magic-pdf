@@ -8,6 +8,7 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Ui};
 
 use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
 use crate::icons;
+use crate::keys::kb;
 use crate::engine::{DocId, Engine, FormKey, PageOp, PrintJob, Request, Response, SearchQuery, form_mods, move_target};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
@@ -75,6 +76,9 @@ pub struct App {
     /// once pages have rendered, saves it and quits.
     screenshot_to: Option<PathBuf>,
     screenshot_requested: bool,
+    /// Debug aid for automated launch tests: with MAGIC_PDF_SELFTEST=<file> the app
+    /// writes the documents it opened (path and page count) to the file and quits.
+    selftest_to: Option<PathBuf>,
     /// Pages per file for the "Split document" dialog (None: dialog closed).
     split_every: Option<usize>,
     /// Connection to other magic-pdf windows.
@@ -206,6 +210,7 @@ impl App {
             print_results: std::sync::mpsc::channel(),
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             screenshot_requested: false,
+            selftest_to: std::env::var_os("MAGIC_PDF_SELFTEST").map(PathBuf::from),
             split_every: None,
             ipc: None,
             tab_drag: None,
@@ -227,6 +232,11 @@ impl App {
         let day = 24 * 60 * 60;
         if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
             app.check_for_updates(false);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let wake = app.ctx.clone();
+            crate::macos::set_wake(move || wake.request_repaint());
         }
         let wake = app.ctx.clone();
         match crate::ipc::Server::start(move || wake.request_repaint()) {
@@ -298,7 +308,7 @@ impl App {
                     });
                 }
                 ui.separator();
-                let can_install = cfg!(windows) && release.installer().is_some();
+                let can_install = cfg!(any(windows, target_os = "macos")) && release.installer().is_some();
                 match &self.update {
                     UpdateUi::Downloading(_) => {
                         ui.horizontal(|ui| {
@@ -307,7 +317,11 @@ impl App {
                         });
                     }
                     UpdateUi::Ready(..) => {
-                        ui.label("Ready. magic-pdf closes to install the update and then starts again.");
+                        ui.label(if cfg!(target_os = "macos") {
+                            "Ready. magic-pdf closes and opens the new version's disk image: drag magic-pdf to Applications."
+                        } else {
+                            "Ready. magic-pdf closes to install the update and then starts again."
+                        });
                         ui.horizontal(|ui| {
                             if ui.button("Install now").clicked() {
                                 action = Some("install");
@@ -460,6 +474,12 @@ impl App {
 
     /// Handles requests from other windows and tells them where this window is.
     fn handle_ipc(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        for path in crate::macos::take_opened() {
+            // Finder: double-click, Open With, or drop on the Dock icon.
+            self.open(&path);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         let Some(server) = &self.ipc else { return };
         let messages: Vec<_> = server.messages.try_iter().collect();
         let (rect, focused) = ctx.input(|i| {
@@ -1446,7 +1466,7 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             let has_tab = self.tabs.get(self.active).is_some_and(|t| t.info().is_some());
             ui.menu_button("File", |ui| {
-                if ui.button("Open…\tCtrl+O").clicked() {
+                if ui.button(kb("Open…\tCtrl+O")).clicked() {
                     self.open_dialog();
                 }
                 let recent = self.settings.recent.clone();
@@ -1460,27 +1480,27 @@ impl App {
                     });
                 });
                 ui.separator();
-                if ui.add_enabled(has_tab, egui::Button::new("Save\tCtrl+S")).clicked() {
+                if ui.add_enabled(has_tab, egui::Button::new(kb("Save\tCtrl+S"))).clicked() {
                     self.save_active(false);
                 }
                 if ui
-                    .add_enabled(has_tab, egui::Button::new("Save as…\tCtrl+Shift+S"))
+                    .add_enabled(has_tab, egui::Button::new(kb("Save as…\tCtrl+Shift+S")))
                     .clicked()
                 {
                     self.save_active(true);
                 }
-                if ui.add_enabled(has_tab, egui::Button::new("Print…\tCtrl+P")).clicked() {
+                if ui.add_enabled(has_tab, egui::Button::new(kb("Print…\tCtrl+P"))).clicked() {
                     self.print();
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(!self.tabs.is_empty(), egui::Button::new("Close tab\tCtrl+W"))
+                    .add_enabled(!self.tabs.is_empty(), egui::Button::new(kb("Close tab\tCtrl+W")))
                     .clicked()
                     && let Some(t) = self.tabs.get(self.active)
                 {
                     self.request_close(vec![t.id], false);
                 }
-                if ui.button("Quit\tCtrl+Q").clicked() {
+                if ui.button(kb("Quit\tCtrl+Q")).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -1490,10 +1510,10 @@ impl App {
                     .get(self.active)
                     .map(|t| (t.can_undo, t.can_redo, t.selected_annot.is_some()))
                     .unwrap_or_default();
-                if ui.add_enabled(can_undo, egui::Button::new("Undo\tCtrl+Z")).clicked() {
+                if ui.add_enabled(can_undo, egui::Button::new(kb("Undo\tCtrl+Z"))).clicked() {
                     self.undo(false);
                 }
-                if ui.add_enabled(can_redo, egui::Button::new("Redo\tCtrl+Y")).clicked() {
+                if ui.add_enabled(can_redo, egui::Button::new(kb("Redo\tCtrl+Y"))).clicked() {
                     self.undo(true);
                 }
                 ui.separator();
@@ -1538,7 +1558,7 @@ impl App {
                     if ui
                         .add_enabled(
                             has_tab,
-                            egui::Button::selectable(selected, format!("{}\tCtrl+{}", mode.label(), i + 1)),
+                            egui::Button::selectable(selected, kb(&format!("{}\tCtrl+{}", mode.label(), i + 1))),
                         )
                         .clicked()
                         && let Some(t) = self.active_tab()
@@ -1566,21 +1586,21 @@ impl App {
                         t.viewport.fit = fit;
                     }
                 }
-                if ui.add_enabled(has_tab, egui::Button::new("Actual size\tCtrl+0")).clicked()
+                if ui.add_enabled(has_tab, egui::Button::new(kb("Actual size\tCtrl+0"))).clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.set_zoom(ACTUAL_SIZE);
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(has_tab, egui::Button::new("Rotate clockwise\tCtrl+R"))
+                    .add_enabled(has_tab, egui::Button::new(kb("Rotate clockwise\tCtrl+R")))
                     .clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(true);
                 }
                 if ui
-                    .add_enabled(has_tab, egui::Button::new("Rotate counter-clockwise\tCtrl+Shift+R"))
+                    .add_enabled(has_tab, egui::Button::new(kb("Rotate counter-clockwise\tCtrl+Shift+R")))
                     .clicked()
                     && let Some(t) = self.active_tab()
                 {
@@ -1626,7 +1646,7 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text("Open a PDF (Ctrl+O)").clicked() {
+            if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text(kb("Open a PDF (Ctrl+O)")).clicked() {
                 self.open_dialog();
             }
             let (has_doc, dirty, can_undo, can_redo) = self
@@ -1636,28 +1656,28 @@ impl App {
                 .unwrap_or_default();
             if ui
                 .add_enabled(has_doc && dirty, egui::Button::new(icons::text(icons::FLOPPY_DISK)))
-                .on_hover_text("Save (Ctrl+S)")
+                .on_hover_text(kb("Save (Ctrl+S)"))
                 .clicked()
             {
                 self.save_active(false);
             }
             if ui
                 .add_enabled(has_doc, egui::Button::new(icons::text(icons::PRINTER)))
-                .on_hover_text("Print (Ctrl+P)")
+                .on_hover_text(kb("Print (Ctrl+P)"))
                 .clicked()
             {
                 self.print();
             }
             if ui
                 .add_enabled(can_undo, egui::Button::new(icons::text(icons::UNDO)))
-                .on_hover_text("Undo (Ctrl+Z)")
+                .on_hover_text(kb("Undo (Ctrl+Z)"))
                 .clicked()
             {
                 self.undo(false);
             }
             if ui
                 .add_enabled(can_redo, egui::Button::new(icons::text(icons::REDO)))
-                .on_hover_text("Redo (Ctrl+Y)")
+                .on_hover_text(kb("Redo (Ctrl+Y)"))
                 .clicked()
             {
                 self.undo(true);
@@ -1700,7 +1720,7 @@ impl App {
                 }
                 ui.separator();
 
-                if ui.button(icons::text(icons::ZOOM_OUT)).on_hover_text("Zoom out (Ctrl+-)").clicked() {
+                if ui.button(icons::text(icons::ZOOM_OUT)).on_hover_text(kb("Zoom out (Ctrl+-)")).clicked() {
                     tab.zoom_step(false);
                 }
                 let label = match tab.viewport.fit {
@@ -1723,7 +1743,7 @@ impl App {
                             }
                         }
                     });
-                if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text("Zoom in (Ctrl++)").clicked() {
+                if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text(kb("Zoom in (Ctrl++)")).clicked() {
                     tab.zoom_step(true);
                 }
                 ui.separator();
@@ -1778,7 +1798,7 @@ impl App {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut s.query)
                         .id(id)
-                        .hint_text("Search (Ctrl+F)")
+                        .hint_text(kb("Search (Ctrl+F)"))
                         .desired_width(160.0),
                 );
                 ui.label(icons::text(icons::MAGNIFYING_GLASS));
@@ -1921,7 +1941,7 @@ impl App {
                             ui.close();
                         }
                     });
-                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text("Close (Ctrl+W)").clicked() {
+                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb("Close (Ctrl+W)")).clicked() {
                         close = Some(tab.id);
                     }
                     ui.add_space(6.0);
@@ -2145,7 +2165,7 @@ impl App {
                         ("F9", "Toggle sidebar"),
                         ("Middle-drag", "Pan with any tool"),
                     ] {
-                        ui.strong(k);
+                        ui.strong(kb(k));
                         ui.label(v);
                         ui.end_row();
                     }
@@ -2223,6 +2243,36 @@ impl App {
             close_ctx.request_repaint();
         });
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
+    }
+
+    fn selftest(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.selftest_to.clone() else { return };
+        let time = ctx.input(|i| i.time);
+        let loaded = self.tabs.iter().all(|t| !matches!(t.state, LoadState::Loading));
+        // Files from Finder arrive shortly after launch: wait a moment for them.
+        if !(time > 3.0 && !self.tabs.is_empty() && loaded) && time < 30.0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            return;
+        }
+        let mut report = String::new();
+        for t in &self.tabs {
+            let state = match &t.state {
+                LoadState::Ready(info) => format!("{} pages", info.page_sizes.len()),
+                LoadState::Failed(e) => format!("failed: {e}"),
+                LoadState::Loading => "still loading".into(),
+                LoadState::NeedsPassword { .. } => "password required".into(),
+            };
+            report += &format!("{}\t{state}\n", t.path.display());
+        }
+        if self.tabs.is_empty() {
+            report += "no documents\n";
+        }
+        if let Err(e) = std::fs::write(&path, report) {
+            log::error!("selftest: {e}");
+        }
+        self.selftest_to = None;
+        self.allow_quit = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn welcome(&mut self, ui: &mut Ui) {
@@ -2362,6 +2412,7 @@ impl eframe::App for App {
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         self.self_screenshot(&ctx);
+        self.selftest(&ctx);
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
