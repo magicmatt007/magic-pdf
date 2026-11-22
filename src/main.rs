@@ -7,6 +7,7 @@ mod icons;
 mod ipc;
 mod print;
 mod settings;
+mod update;
 mod view;
 
 use std::ffi::OsString;

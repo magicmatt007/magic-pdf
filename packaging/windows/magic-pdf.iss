@@ -73,5 +73,7 @@ Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueNa
 
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; Updates from within magic-pdf run the installer silently: start magic-pdf again.
+Filename: "{app}\{#MyAppExe}"; Flags: nowait; Check: WizardSilent
 ; Windows does not let installers change the default app; this opens the right Settings page.
 Filename: "ms-settings:defaultapps?registeredAppUser={#MyAppName}"; Description: "Make magic-pdf the default PDF viewer (opens Windows Settings)"; Flags: shellexec nowait postinstall skipifsilent unchecked

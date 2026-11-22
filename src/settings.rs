@@ -81,6 +81,12 @@ pub struct Settings {
     /// Stored as the author (/T) of new annotations.
     pub author: String,
     pub annot_style: AnnotStyle,
+    /// Look for a new release at most once a day.
+    pub check_updates: bool,
+    /// Unix time of the last update check.
+    pub last_update_check: u64,
+    /// A release the user chose to skip.
+    pub skipped_version: Option<String>,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -94,6 +100,9 @@ impl Default for Settings {
             recent: Vec::new(),
             author: default_author(),
             annot_style: AnnotStyle::default(),
+            check_updates: true,
+            last_update_check: 0,
+            skipped_version: None,
             files: HashMap::new(),
         }
     }
@@ -109,7 +118,7 @@ fn default_author() -> String {
         .unwrap_or_default()
 }
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

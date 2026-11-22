@@ -87,6 +87,29 @@ pub struct App {
     /// Temporary files of tabs received from other windows, deleted once opened.
     temp_files: HashMap<DocId, PathBuf>,
     was_focused: bool,
+    update: UpdateUi,
+    update_events: (Sender<UpdateEvent>, Receiver<UpdateEvent>),
+    /// Installer to run when magic-pdf exits (after an update was accepted).
+    pending_installer: Option<PathBuf>,
+}
+
+/// Results from background update work.
+enum UpdateEvent {
+    Checked {
+        result: Result<Option<crate::update::Release>, String>,
+        manual: bool,
+    },
+    Downloaded(Result<PathBuf, String>),
+}
+
+/// State of the update notice.
+#[derive(Default)]
+enum UpdateUi {
+    #[default]
+    Hidden,
+    Available(crate::update::Release),
+    Downloading(crate::update::Release),
+    Ready(crate::update::Release, PathBuf),
 }
 
 /// Where a tab is moved.
@@ -188,7 +211,14 @@ impl App {
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
+            update: UpdateUi::Hidden,
+            update_events: std::sync::mpsc::channel(),
+            pending_installer: None,
         };
+        let day = 24 * 60 * 60;
+        if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
+            app.check_for_updates(false);
+        }
         let wake = app.ctx.clone();
         match crate::ipc::Server::start(move || wake.request_repaint()) {
             Ok(server) => app.ipc = Some(server),
@@ -201,6 +231,138 @@ impl App {
             app.take(t);
         }
         app
+    }
+
+    /// Looks for a new release in the background.
+    fn check_for_updates(&mut self, manual: bool) {
+        self.settings.last_update_check = crate::settings::now();
+        self.settings.save();
+        let tx = self.update_events.0.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateEvent::Checked {
+                result: crate::update::check(),
+                manual,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn update_ui(&mut self, ctx: &egui::Context) {
+        while let Ok(ev) = self.update_events.1.try_recv() {
+            match ev {
+                UpdateEvent::Checked { result, manual } => match result {
+                    Ok(Some(r)) if manual || self.settings.skipped_version.as_deref() != Some(r.version()) => {
+                        self.update = UpdateUi::Available(r);
+                    }
+                    Ok(_) if manual => self.notice(&format!("magic-pdf {} is up to date", env!("CARGO_PKG_VERSION"))),
+                    Err(e) if manual => self.error = Some(format!("Could not check for updates: {e}")),
+                    Err(e) => log::info!("update check failed: {e}"),
+                    _ => {}
+                },
+                UpdateEvent::Downloaded(result) => match (result, std::mem::take(&mut self.update)) {
+                    (Ok(path), UpdateUi::Downloading(r)) => self.update = UpdateUi::Ready(r, path),
+                    (Err(e), _) => self.error = Some(format!("The update could not be downloaded: {e}")),
+                    _ => {}
+                },
+            }
+        }
+        let release = match &self.update {
+            UpdateUi::Hidden => return,
+            UpdateUi::Available(r) | UpdateUi::Downloading(r) | UpdateUi::Ready(r, _) => r.clone(),
+        };
+        let mut action = None;
+        egui::Window::new("Update available")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(format!(
+                    "magic-pdf {} is available (you have {}).",
+                    release.version(),
+                    env!("CARGO_PKG_VERSION")
+                ));
+                if let Some(body) = release.body.as_deref().filter(|b| !b.trim().is_empty()) {
+                    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                        ui.weak(body.trim());
+                    });
+                }
+                ui.separator();
+                let can_install = cfg!(windows) && release.installer().is_some();
+                match &self.update {
+                    UpdateUi::Downloading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Downloading and verifying…");
+                        });
+                    }
+                    UpdateUi::Ready(..) => {
+                        ui.label("Ready. magic-pdf closes to install the update and then starts again.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Install now").clicked() {
+                                action = Some("install");
+                            }
+                            if ui.button("Later").clicked() {
+                                action = Some("later");
+                            }
+                        });
+                    }
+                    _ => {
+                        if !can_install {
+                            ui.weak("Update from source: git pull, then packaging/linux/install.sh");
+                        }
+                        ui.horizontal(|ui| {
+                            if can_install {
+                                if ui.button("Install").clicked() {
+                                    action = Some("download");
+                                }
+                            } else if ui.button("Open download page").clicked() {
+                                action = Some("page");
+                            }
+                            if ui.button("Later").clicked() {
+                                action = Some("later");
+                            }
+                            if ui.button("Skip this version").clicked() {
+                                action = Some("skip");
+                            }
+                        });
+                    }
+                }
+            });
+        match action {
+            Some("download") => {
+                let asset = release.installer().cloned();
+                self.update = UpdateUi::Downloading(release);
+                let tx = self.update_events.0.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = asset
+                        .ok_or_else(|| "no installer in this release".to_string())
+                        .and_then(|a| crate::update::download_installer(&a));
+                    let _ = tx.send(UpdateEvent::Downloaded(result));
+                    ctx.request_repaint();
+                });
+            }
+            Some("install") => {
+                if let UpdateUi::Ready(_, path) = std::mem::take(&mut self.update) {
+                    // Runs when magic-pdf exits (after any unsaved-changes question).
+                    self.pending_installer = Some(path);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Some("page") => {
+                let _ = open::that_detached(crate::update::RELEASES_PAGE);
+                self.update = UpdateUi::Hidden;
+            }
+            Some("skip") => {
+                self.settings.skipped_version = Some(release.version().to_string());
+                self.settings.save();
+                self.update = UpdateUi::Hidden;
+            }
+            Some(_) => self.update = UpdateUi::Hidden,
+            None => {}
+        }
     }
 
     /// Opens a tab handed over from another window.
@@ -1411,6 +1573,17 @@ impl App {
                 if cfg!(any(windows, target_os = "linux")) && ui.button("Make magic-pdf the default PDF viewer…").clicked() {
                     self.make_default_viewer();
                 }
+                if ui.button("Check for updates…").clicked() {
+                    self.check_for_updates(true);
+                    ui.close();
+                }
+                if ui
+                    .checkbox(&mut self.settings.check_updates, "Check for updates automatically")
+                    .changed()
+                {
+                    self.settings.save();
+                }
+                ui.separator();
                 if ui.button("Keyboard shortcuts").clicked() {
                     self.show_shortcuts = true;
                 }
@@ -1889,7 +2062,10 @@ impl App {
                 self.close_intent = None;
                 self.finish_close(&intent.docs, intent.quit);
             }
-            Some(2) => self.close_intent = None,
+            Some(2) => {
+                self.close_intent = None;
+                self.pending_installer = None;
+            }
             _ => {}
         }
     }
@@ -2136,6 +2312,7 @@ impl eframe::App for App {
         self.password_dialog(&ctx);
         self.unsaved_dialog(&ctx);
         self.print_dialog_ui(&ctx);
+        self.update_ui(&ctx);
         self.error_dialog(&ctx);
         self.info_windows(&ctx);
         self.flush_requests();
@@ -2160,6 +2337,11 @@ impl eframe::App for App {
             }
         }
         self.settings.save();
+        if let Some(installer) = self.pending_installer.take()
+            && let Err(e) = crate::update::run_installer(&installer)
+        {
+            log::error!("{e}");
+        }
     }
 }
 

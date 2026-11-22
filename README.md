@@ -15,9 +15,10 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Text selection and copy, internal and external links
 - Tabs, recent files, drag & drop, password-protected files, night mode
 
-- Annotations: highlight, underline, strikeout, sticky notes, freehand drawing,
-  rectangles and ellipses; colours, line widths, comments, a Comments sidebar,
-  undo/redo, Save / Save As (deleted annotations are removed from the file)
+- Annotations: highlight, underline, strikeout, sticky notes, text boxes typed
+  directly on the page, freehand drawing, rectangles and ellipses (with separate
+  fill colours); colours, line widths, comments, a Comments sidebar, undo/redo,
+  Save / Save As (deleted annotations are removed from the file)
 
 - Form filling: text fields, checkboxes, radio buttons, combo and list boxes
   (typing, Tab between fields, copy/paste, field undo); filled values are saved
@@ -28,6 +29,14 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   click), drag to reorder, rotate, delete, insert blank pages or pages from other
   PDFs (also by dropping files between thumbnails), extract to a new file, split
   into several files; all undoable and saved with the document
+
+- One window, many tabs: PDFs opened from the desktop join the running window;
+  drag a tab out to give it its own window, or onto another magic-pdf window to
+  move it there (unsaved changes included; on Wayland use the tab's right-click
+  menu, as Wayland does not report window positions)
+- Update notices: checks GitHub at most once a day (Help menu to turn off); on
+  Windows, *Install* downloads the new installer, verifies its SHA-256 checksum
+  and updates in place
 
 Document JavaScript is never executed.
 
@@ -101,7 +110,8 @@ cargo test                               # layout/viewport unit tests + PDFium e
 | Ctrl+1…5 | Horizontal, vertical, single, facing, grid |
 | Ctrl+R / Ctrl+Shift+R | Rotate |
 | H / S | Hand / text-select tool |
-| U / N / D / R / E | Highlight, note, draw, rectangle, ellipse |
+| U / N / T / D / R / E | Highlight, note, text box, draw, rectangle, ellipse |
+| Esc | Cancel what is in progress and return to the Hand tool |
 | Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+P | Print |
