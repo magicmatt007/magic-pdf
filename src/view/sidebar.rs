@@ -437,48 +437,188 @@ fn select_page(tab: &mut DocTab, page: usize, mods: egui::Modifiers) {
     }
 }
 
+/// Something done to a bookmark in the Outline tab.
+enum OutlineAction {
+    Goto(usize),
+    Rename(Vec<usize>),
+    Delete(Vec<usize>),
+    Shift(Vec<usize>, isize),
+    Indent(Vec<usize>),
+    Outdent(Vec<usize>),
+    SetPage(Vec<usize>),
+    AddAfter(Option<Vec<usize>>),
+}
+
 fn outline(ui: &mut Ui, tab: &mut DocTab) {
+    use crate::view::outline_edit as oe;
     let Some(info) = tab.info() else { return };
-    if info.outline.is_empty() {
-        ui.weak("This document has no outline.");
-        return;
-    }
     let items = info.outline.clone();
-    let mut goto = None;
+    let mut action = None;
+    ui.horizontal(|ui| {
+        if ui
+            .button("+ Bookmark")
+            .on_hover_text("Add a bookmark for the current page (named after the selected text, if any)")
+            .clicked()
+        {
+            action = Some(OutlineAction::AddAfter(None));
+        }
+        if !items.is_empty() {
+            ui.weak("Right-click to edit");
+        }
+    });
+    if items.is_empty() {
+        ui.weak("This document has no bookmarks.");
+    }
+    let mut commit_rename = None;
     egui::ScrollArea::both()
         .id_salt(("outline", tab.id))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, item) in items.iter().enumerate() {
-                outline_item(ui, item, &mut goto, i, 0);
+                outline_item(ui, tab, item, vec![i], &mut action, &mut commit_rename);
             }
         });
-    if let Some(page) = goto {
-        tab.goto_page(page);
+
+    let current = tab.current_page;
+    let mut outline = items.clone();
+    let mut changed = false;
+    if let Some((path, title)) = commit_rename {
+        if let Some(it) = oe::get_mut(&mut outline, &path)
+            && it.title != title
+        {
+            it.title = title;
+            changed = true;
+        }
+        tab.outline_rename = None;
+    }
+    match action {
+        Some(OutlineAction::Goto(p)) => tab.goto_page(p),
+        Some(OutlineAction::Rename(path)) => {
+            let title = oe::get(&outline, &path).map(|i| i.title.clone()).unwrap_or_default();
+            tab.outline_rename = Some((path, title));
+        }
+        Some(OutlineAction::Delete(path)) => changed |= oe::remove(&mut outline, &path).is_some(),
+        Some(OutlineAction::Shift(path, by)) => changed |= oe::shift(&mut outline, &path, by).is_some(),
+        Some(OutlineAction::Indent(path)) => changed |= oe::indent(&mut outline, &path).is_some(),
+        Some(OutlineAction::Outdent(path)) => changed |= oe::outdent(&mut outline, &path).is_some(),
+        Some(OutlineAction::SetPage(path)) => {
+            if let Some(it) = oe::get_mut(&mut outline, &path) {
+                it.page = Some(current);
+                changed = true;
+            }
+        }
+        Some(OutlineAction::AddAfter(after)) => {
+            let title = tab
+                .selected_text()
+                .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|t| !t.is_empty())
+                .map(|t| t.chars().take(80).collect())
+                .unwrap_or_else(|| format!("Page {}", current + 1));
+            let item = OutlineItem {
+                title: title.clone(),
+                page: Some(current),
+                children: Vec::new(),
+            };
+            let path = oe::insert_after(&mut outline, after.as_deref(), item);
+            // Name it right away.
+            tab.outline_rename = Some((path, title));
+            changed = true;
+        }
+        None => {}
+    }
+    if changed {
+        tab.outbox.push(Request::EditPages {
+            doc: tab.id,
+            op: crate::engine::PageOp::SetOutline { outline },
+        });
     }
 }
 
-fn outline_item(ui: &mut Ui, item: &OutlineItem, goto: &mut Option<usize>, index: usize, depth: usize) {
+fn outline_item(
+    ui: &mut Ui,
+    tab: &mut DocTab,
+    item: &OutlineItem,
+    path: Vec<usize>,
+    action: &mut Option<OutlineAction>,
+    commit_rename: &mut Option<(Vec<usize>, String)>,
+) {
     let title = if item.title.is_empty() { "(untitled)" } else { &item.title };
-    if item.children.is_empty() {
-        let r = ui.selectable_label(false, title);
-        if r.clicked() {
-            *goto = item.page;
-        }
-        if let Some(p) = item.page {
-            r.on_hover_text(format!("Page {}", p + 1));
-        }
-    } else {
-        let id = ui.make_persistent_id(("outline_node", depth, index, &item.title));
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-            .show_header(ui, |ui| {
-                if ui.selectable_label(false, title).clicked() {
-                    *goto = item.page;
+    let mut label = |ui: &mut Ui| {
+        if let Some((p, text)) = &mut tab.outline_rename
+            && *p == path
+        {
+            let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width().max(80.0)));
+            if !r.has_focus() && !r.lost_focus() {
+                r.request_focus();
+            }
+            if r.lost_focus() {
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    tab.outline_rename = None;
+                } else {
+                    *commit_rename = Some((path.clone(), text.trim().to_string()));
                 }
-            })
+            }
+            return;
+        }
+        let r = ui.selectable_label(false, title);
+        if r.clicked()
+            && let Some(p) = item.page
+        {
+            *action = Some(OutlineAction::Goto(p));
+        }
+        if r.double_clicked() {
+            *action = Some(OutlineAction::Rename(path.clone()));
+        }
+        let r = match item.page {
+            Some(p) => r.on_hover_text(format!("Page {} · double-click to rename", p + 1)),
+            None => r,
+        };
+        r.context_menu(|ui| {
+            let mut pick = |a: OutlineAction| {
+                *action = Some(a);
+            };
+            if ui.button("Rename").clicked() {
+                pick(OutlineAction::Rename(path.clone()));
+            }
+            if ui.button("Add bookmark after").clicked() {
+                pick(OutlineAction::AddAfter(Some(path.clone())));
+            }
+            if ui.button("Point to the current page").clicked() {
+                pick(OutlineAction::SetPage(path.clone()));
+            }
+            ui.separator();
+            if ui.button("Move up").clicked() {
+                pick(OutlineAction::Shift(path.clone(), -1));
+            }
+            if ui.button("Move down").clicked() {
+                pick(OutlineAction::Shift(path.clone(), 1));
+            }
+            if ui.add_enabled(path.last() != Some(&0), egui::Button::new("Indent (make sub-bookmark)")).clicked() {
+                pick(OutlineAction::Indent(path.clone()));
+            }
+            if ui.add_enabled(path.len() > 1, egui::Button::new("Outdent")).clicked() {
+                pick(OutlineAction::Outdent(path.clone()));
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                pick(OutlineAction::Delete(path.clone()));
+            }
+            if action.is_some() {
+                ui.close();
+            }
+        });
+    };
+    if item.children.is_empty() {
+        label(ui);
+    } else {
+        let id = ui.make_persistent_id(("outline_node", &path));
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+            .show_header(ui, |ui| label(ui))
             .body(|ui| {
                 for (i, child) in item.children.iter().enumerate() {
-                    outline_item(ui, child, goto, i, depth + 1);
+                    let mut p = path.clone();
+                    p.push(i);
+                    outline_item(ui, tab, child, p, action, commit_rename);
                 }
             });
     }

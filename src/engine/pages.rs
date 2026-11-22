@@ -38,6 +38,61 @@ pub enum PageOp {
         pages: Vec<(usize, Vec<super::ocr::OcrWord>)>,
         replace: bool,
     },
+    /// Trims the pages' visible area by margins (points, as the page is displayed).
+    Crop {
+        pages: Vec<usize>,
+        margins: Margins,
+    },
+    /// Writes header and footer texts (replacing ones magic-pdf added before).
+    HeaderFooter {
+        pages: Vec<usize>,
+        spec: HeaderFooter,
+    },
+    /// Removes headers and footers magic-pdf added.
+    RemoveHeaderFooter {
+        pages: Vec<usize>,
+    },
+    /// Replaces the bookmarks.
+    SetOutline {
+        outline: Vec<super::commands::OutlineItem>,
+    },
+}
+
+/// Margins in points: top, right, bottom, left (as the page is displayed).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Margins {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Margins {
+    pub fn as_array(self) -> [f32; 4] {
+        [self.top, self.right, self.bottom, self.left]
+    }
+}
+
+/// Header and footer texts: left, centre and right part of each. `{page}` and
+/// `{pages}` are replaced by the page number and the page count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeaderFooter {
+    pub header: [String; 3],
+    pub footer: [String; 3],
+    pub size: f32,
+    pub color: super::commands::Rgb,
+    /// Distance from the page edge (points).
+    pub margin: f32,
+    /// Number of the first page in the document.
+    pub first_number: i64,
+}
+
+impl HeaderFooter {
+    /// The text for page `index` of a `count`-page document.
+    pub fn resolve(text: &str, index: usize, count: usize, first_number: i64) -> String {
+        text.replace("{page}", &(first_number + index as i64).to_string())
+            .replace("{pages}", &(first_number + count as i64 - 1).to_string())
+    }
 }
 
 /// How page numbers change with an operation.
@@ -84,6 +139,10 @@ impl PageOp {
             PageOp::InsertBlank { .. } => "Insert blank page",
             PageOp::InsertFile { .. } => "Insert pages",
             PageOp::TextLayer { .. } => "Recognise text",
+            PageOp::Crop { .. } => "Crop pages",
+            PageOp::HeaderFooter { .. } => "Header and footer",
+            PageOp::RemoveHeaderFooter { .. } => "Remove header and footer",
+            PageOp::SetOutline { .. } => "Edit bookmarks",
         }
     }
 
@@ -113,7 +172,11 @@ impl PageOp {
                 }
                 Ok(())
             }
-            PageOp::Rotate { pages, .. } => in_range(pages),
+            PageOp::Rotate { pages, .. }
+            | PageOp::Crop { pages, .. }
+            | PageOp::HeaderFooter { pages, .. }
+            | PageOp::RemoveHeaderFooter { pages } => in_range(pages),
+            PageOp::SetOutline { .. } => Ok(()),
             PageOp::TextLayer { pages, .. } => in_range(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::InsertBlank { at, .. } | PageOp::InsertFile { at, .. } => {
                 if *at > count {
@@ -162,7 +225,10 @@ impl PageOp {
                     changed: Vec::new(),
                 }
             }
-            PageOp::Rotate { pages, .. } => PageMapping {
+            PageOp::Rotate { pages, .. }
+            | PageOp::Crop { pages, .. }
+            | PageOp::HeaderFooter { pages, .. }
+            | PageOp::RemoveHeaderFooter { pages } => PageMapping {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: sorted_unique(pages),
@@ -171,6 +237,11 @@ impl PageOp {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: sorted_unique(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
+            },
+            PageOp::SetOutline { .. } => PageMapping {
+                map: (0..count).map(Some).collect(),
+                new_count: count,
+                changed: Vec::new(),
             },
             PageOp::InsertBlank { at, .. } => insert_mapping(count, *at, 1),
             PageOp::InsertFile { at, count: n, .. } => insert_mapping(count, *at, *n),

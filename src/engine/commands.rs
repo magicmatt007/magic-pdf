@@ -115,7 +115,7 @@ pub struct RenderKey {
     pub version: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutlineItem {
     pub title: String,
     pub page: Option<usize>,
@@ -608,6 +608,13 @@ pub enum Request {
         doc: DocId,
         path: PathBuf,
         at: usize,
+    },
+    /// Write a smaller copy of the document to `path`: losslessly compressed, and with
+    /// images above `image_dpi` scaled down (JPEG) when set.
+    SaveOptimized {
+        doc: DocId,
+        path: PathBuf,
+        image_dpi: Option<u32>,
     },
     /// Write `pages` to a new PDF file.
     ExtractPages {

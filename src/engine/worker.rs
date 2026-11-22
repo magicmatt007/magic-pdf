@@ -402,6 +402,10 @@ impl Worker {
                 }
                 Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
             },
+            Request::SaveOptimized { doc, path, image_dpi } => match self.save_optimized(doc, &path, image_dpi) {
+                Ok(message) => self.send(Response::Exported { message }),
+                Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
+            },
             Request::ExtractPages { doc, pages, path } => {
                 let result = self.extract(doc, &[(pages, path.clone())]);
                 match result {
@@ -782,7 +786,7 @@ impl Worker {
                 return false;
             }
         };
-        match od.doc.apply_page_op(&op) {
+        match apply_op(self.lib, od, &op) {
             Ok(inserted) => {
                 if let PageOp::InsertFile { count: n, .. } = &mut op {
                     *n = inserted;
@@ -838,7 +842,7 @@ impl Worker {
             m.inverse()
         } else {
             let count = od.doc.page_count();
-            if let Err(e) = od.doc.apply_page_op(&edit.op) {
+            if let Err(e) = apply_op(lib, od, &edit.op) {
                 self.error(doc, format!("Redo failed: {e}"));
                 return;
             }
@@ -848,6 +852,39 @@ impl Worker {
             m
         };
         self.pages_changed(doc, mapping);
+    }
+
+    /// Writes a smaller copy of the document; returns a summary for the user.
+    fn save_optimized(&self, doc: DocId, path: &Path, image_dpi: Option<u32>) -> Result<String, String> {
+        let od = self.docs.get(&doc).ok_or("document not open")?;
+        let original = od.export(self.lib)?;
+        let mut bytes = original.clone();
+        let mut images = 0;
+        if let Some(dpi) = image_dpi {
+            let copy = Doc::open_bytes(self.lib, bytes.clone(), None).map_err(|_| "could not prepare the copy")?;
+            for i in 0..copy.page_count() {
+                if let Some(page) = copy.page(i) {
+                    images += page.downsample_images(dpi as f32);
+                }
+            }
+            bytes = copy.save_to_bytes()?;
+        }
+        let compressed = match super::lopdf_ops::compress(&bytes) {
+            Ok(c) if c.len() < bytes.len() => c,
+            Ok(_) => bytes,
+            Err(e) => {
+                log::warn!("compression skipped: {e}");
+                bytes
+            }
+        };
+        write_atomically(path, &compressed).map_err(|e| e.to_string())?;
+        let mb = |n: usize| format!("{:.1} MB", n as f64 / 1_048_576.0);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut msg = format!("Saved {name}: {} → {}", mb(original.len()), mb(compressed.len()));
+        if images > 0 {
+            msg += &format!(" ({images} image{} scaled down)", if images == 1 { "" } else { "s" });
+        }
+        Ok(msg)
     }
 
     /// Writes each (pages, path) to a new PDF, taken from the document with all edits.
@@ -1153,6 +1190,20 @@ impl Worker {
             }
             Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
         }
+    }
+}
+
+/// Applies a page operation; bookmarks are rewritten in the saved bytes (PDFium
+/// cannot write them) and the document reopened from those.
+fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
+    match op {
+        PageOp::SetOutline { outline } => {
+            od.doc.kill_form_focus();
+            let bytes = super::lopdf_ops::write_outline(&od.doc.save_to_bytes()?, outline)?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+            Ok(0)
+        }
+        _ => od.doc.apply_page_op(op),
     }
 }
 

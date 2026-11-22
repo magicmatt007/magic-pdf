@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod pages;
 pub mod ocr;
+mod lopdf_ops;
 pub mod rich;
 pub mod shapes;
 pub mod textbox;
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
-pub use pages::{PageMapping, PageOp, move_target};
+pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, move_target};
 pub use rich::{Align, CharStyle, RichText};
 pub use pdf::{FIELD_TEXT, pdf_date_now};
 
@@ -1632,4 +1633,180 @@ mod tests {
         assert_eq!(search_pages(&engine, 2, "4711").len(), 2, "text survives save and reopen");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn page_text(engine: &Engine, doc: DocId, page: usize) -> String {
+        engine.send(Request::PageText { doc, page });
+        recv_until(engine, |r| match r {
+            Response::PageText { page: p, text, .. } if p == page => Some(text.chars.iter().map(|c| c.ch).collect()),
+            _ => None,
+        })
+    }
+
+    fn dark_pixels(size: [usize; 2], rgba: &[u8], region: (f32, f32, f32, f32)) -> usize {
+        let (x0, y0, x1, y1) = region;
+        let mut n = 0;
+        for y in (y0 * size[1] as f32) as usize..(y1 * size[1] as f32) as usize {
+            for x in (x0 * size[0] as f32) as usize..(x1 * size[0] as f32) as usize {
+                if rgba[(y * size[0] + x) * 4..][..3].iter().all(|&c| c < 180) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn crop_header_footer_and_bookmarks_are_undoable_page_edits() {
+        let (_serial, engine) = start();
+        let info = open(&engine, 1, sample());
+        let edit = |op: PageOp| {
+            engine.send(Request::EditPages { doc: 1, op });
+            pages_changed(&engine).0
+        };
+        // Crop page 1 (A4 portrait) and page 6 (stored portrait, shown landscape).
+        let margins = Margins {
+            top: 100.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 50.0,
+        };
+        let cropped = edit(PageOp::Crop {
+            pages: vec![0, 5],
+            margins,
+        });
+        assert_eq!(cropped.page_sizes[0], (545.0, 742.0));
+        assert_eq!(info.page_sizes[5], (842.0, 595.0));
+        assert_eq!(cropped.page_sizes[5], (792.0, 495.0), "margins apply as the page is shown");
+        engine.send(Request::Undo { doc: 1 });
+        assert_eq!(pages_changed(&engine).0.page_sizes[0], (595.0, 842.0));
+
+        // Footer with page numbers; doing it again replaces it.
+        let spec = HeaderFooter {
+            header: ["".into(), "".into(), "Confidential".into()],
+            footer: ["".into(), "Page {page} of {pages}".into(), "".into()],
+            size: 10.0,
+            color: [0, 0, 0],
+            margin: 20.0,
+            first_number: 1,
+        };
+        edit(PageOp::HeaderFooter {
+            pages: (0..40).collect(),
+            spec: spec.clone(),
+        });
+        assert!(page_text(&engine, 1, 0).contains("Page 1 of 40"));
+        let text = page_text(&engine, 1, 5);
+        assert!(text.contains("Page 6 of 40") && text.contains("Confidential"), "{text}");
+        // On the rotated page the footer is at the bottom of the page as shown.
+        let (size, rgba) = render(&engine, 1, 5, Rotation::R0, 1);
+        assert!(dark_pixels(size, &rgba, (0.4, 0.93, 0.6, 0.99)) > 3, "footer at the bottom centre");
+        assert!(dark_pixels(size, &rgba, (0.85, 0.0, 1.0, 0.05)) > 3, "header at the top right");
+        let mut again = spec.clone();
+        again.footer[1] = "– {page} –".into();
+        again.first_number = 3;
+        edit(PageOp::HeaderFooter {
+            pages: vec![0],
+            spec: again,
+        });
+        let text = page_text(&engine, 1, 0);
+        assert!(text.contains("– 3 –") && !text.contains("Page 1 of 40"), "replaced: {text}");
+        assert_eq!(text.matches("Confidential").count(), 1);
+        edit(PageOp::RemoveHeaderFooter { pages: vec![0] });
+        let text = page_text(&engine, 1, 0);
+        assert!(!text.contains("Confidential") && text.contains("Page 1"), "removed: {text}");
+
+        // Bookmarks: replace, save, reopen; undo brings the old ones back.
+        let outline = vec![
+            OutlineItem {
+                title: "Einführung".into(),
+                page: Some(0),
+                children: vec![OutlineItem {
+                    title: "Details".into(),
+                    page: Some(2),
+                    children: Vec::new(),
+                }],
+            },
+            OutlineItem {
+                title: "End".into(),
+                page: Some(39),
+                children: Vec::new(),
+            },
+        ];
+        let info2 = edit(PageOp::SetOutline { outline: outline.clone() });
+        assert_eq!(info2.outline, outline);
+        assert!(page_text(&engine, 1, 5).contains("Page 6 of 40"), "content kept");
+        let path = std::env::temp_dir().join(format!("magic-pdf-outline-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        assert_eq!(open(&engine, 2, path.clone()).outline, outline);
+        std::fs::remove_file(path).ok();
+        engine.send(Request::Undo { doc: 1 });
+        assert_eq!(pages_changed(&engine).0.outline, info.outline);
+    }
+
+    /// A one-page PDF showing a noisy 800×800 RGB picture on 2 × 2 inches (400 dpi).
+    fn photo_pdf() -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let mut seed = 1u32;
+        let pixels: Vec<u8> = (0..800 * 800 * 3)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                ((i / 3 % 800) as u32 / 4 + (seed >> 24) / 4) as u8
+            })
+            .collect();
+        let img = doc.add_object(Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Image", "Width" => 800, "Height" => 800,
+                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8 },
+            pixels,
+        ));
+        let content = doc.add_object(Stream::new(dictionary! {}, b"q 144 0 0 144 100 500 cm /Im0 Do Q".to_vec()));
+        let pages_id = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Contents" => content, "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => img } },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn optimized_copies_are_smaller_and_still_show_the_picture() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-opt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.pdf");
+        std::fs::write(&src, photo_pdf()).unwrap();
+        open(&engine, 1, src.clone());
+        let (size, before) = render(&engine, 1, 0, Rotation::R0, 0);
+        let out = dir.join("small.pdf");
+        engine.send(Request::SaveOptimized {
+            doc: 1,
+            path: out.clone(),
+            image_dpi: Some(150),
+        });
+        let message = recv_until(&engine, |r| match r {
+            Response::Exported { message } => Some(message),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        assert!(message.contains("1 image scaled down"), "{message}");
+        let (a, b) = (std::fs::metadata(&src).unwrap().len(), std::fs::metadata(&out).unwrap().len());
+        assert!(b * 4 < a, "{a} -> {b} bytes");
+        open(&engine, 2, out);
+        let (size2, after) = render(&engine, 2, 0, Rotation::R0, 0);
+        assert_eq!(size, size2);
+        // The picture is still there (page area around it stays white).
+        let mean = |px: &[u8], x: usize, y: usize| px[(y * size[0] + x) * 4] as i32;
+        let (x, y) = ((170.0 / 595.0 * size[0] as f32) as usize, (270.0 / 842.0 * size[1] as f32) as usize);
+        assert!((mean(&before, x, y) - mean(&after, x, y)).abs() < 40, "picture kept");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
+

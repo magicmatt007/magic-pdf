@@ -2,6 +2,8 @@ pub mod cache;
 pub mod color_picker;
 pub mod document_view;
 pub mod layout;
+pub mod outline_edit;
+pub mod page_tools;
 pub mod sidebar;
 pub mod stamps;
 pub mod viewport;

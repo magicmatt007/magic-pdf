@@ -35,6 +35,8 @@ const PDFACTION_URI: c_ulong = 3;
 const FPDF_MATCHCASE: c_ulong = 0x1;
 const FPDF_MATCHWHOLEWORD: c_ulong = 0x2;
 
+/// Marked-content tag of header and footer texts magic-pdf adds.
+const HEADER_FOOTER_MARK: &str = "MagicPdfHeaderFooter";
 const SUBTYPE_TEXT: c_int = 1;
 const SUBTYPE_LINK: c_int = 2;
 const SUBTYPE_FREETEXT: c_int = 3;
@@ -208,6 +210,46 @@ pub fn pdf_date_now() -> String {
 struct VecWriter {
     base: FPDF_FILEWRITE,
     out: Vec<u8>,
+}
+
+/// FPDF_FILEACCESS reader over a `Vec<u8>`.
+unsafe extern "C" fn read_block(param: *mut c_void, position: c_ulong, buf: *mut u8, size: c_ulong) -> c_int {
+    let data = unsafe { &*(param as *const Vec<u8>) };
+    let (start, len) = (position as usize, size as usize);
+    match data.get(start..start + len) {
+        Some(src) => {
+            unsafe { ptr::copy_nonoverlapping(src.as_ptr(), buf, len) };
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Copies a PDFium bitmap into RGBA pixels.
+fn bitmap_rgba(lib: Lib, bmp: FPDF_BITMAP) -> (u32, u32, Vec<u8>) {
+    unsafe {
+        let (w, h) = (lib.FPDFBitmap_GetWidth(bmp) as usize, lib.FPDFBitmap_GetHeight(bmp) as usize);
+        let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
+        let format = lib.FPDFBitmap_GetFormat(bmp);
+        let buf = lib.FPDFBitmap_GetBuffer(bmp) as *const u8;
+        let mut out = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let px = |bpp: usize, i: usize| *buf.add(y * stride + x * bpp + i);
+                let p = match format {
+                    1 => {
+                        let v = px(1, 0);
+                        [v, v, v, 255]
+                    }
+                    2 => [px(3, 2), px(3, 1), px(3, 0), 255],
+                    3 => [px(4, 2), px(4, 1), px(4, 0), 255],
+                    _ => [px(4, 2), px(4, 1), px(4, 0), px(4, 3)],
+                };
+                out.extend(p);
+            }
+        }
+        (w as u32, h as u32, out)
+    }
 }
 
 unsafe extern "C" fn write_block(this: *mut FPDF_FILEWRITE, data: *const c_void, size: c_ulong) -> c_int {
@@ -423,6 +465,47 @@ impl Doc {
                     OpenError::Other(m) => m,
                 })?;
                 self.import_pages(&src, pages.as_deref(), *at)
+            }
+            PageOp::SetOutline { .. } => Err("bookmarks are written by the worker".into()),
+            PageOp::Crop { pages, margins } => {
+                for &i in pages {
+                    let page = self.page(i).ok_or("page not found")?;
+                    page.crop(*margins)?;
+                }
+                self.close_all_pages();
+                Ok(0)
+            }
+            PageOp::HeaderFooter { pages, spec } => {
+                const FPDF_FONT_TRUETYPE: c_int = 2;
+                let ttf = crate::fonts::REGULAR;
+                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                if font.is_null() {
+                    return Err("PDFium could not load the header font".into());
+                }
+                let count = self.page_count();
+                let result = pages.iter().try_for_each(|&i| {
+                    let page = self.page(i).ok_or("page not found")?;
+                    page.remove_marked(HEADER_FOOTER_MARK);
+                    page.add_header_footer(spec, i, count, font);
+                    if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
+                        Ok(())
+                    } else {
+                        Err("PDFium could not write the page content".to_string())
+                    }
+                });
+                unsafe { lib.FPDFFont_Close(font) };
+                self.close_all_pages();
+                result.map(|_| 0)
+            }
+            PageOp::RemoveHeaderFooter { pages } => {
+                for &i in pages {
+                    let page = self.page(i).ok_or("page not found")?;
+                    if page.remove_marked(HEADER_FOOTER_MARK) > 0 && !lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
+                        return Err("PDFium could not write the page content".into());
+                    }
+                }
+                self.close_all_pages();
+                Ok(0)
             }
             PageOp::TextLayer { pages, replace } => {
                 const FPDF_FONT_TRUETYPE: c_int = 2;
@@ -720,6 +803,207 @@ impl<'d> Page<'d> {
                 lib.FPDFPageObj_Transform(obj, a as f64, bb as f64, c as f64, d as f64, e as f64, f as f64);
                 lib.FPDFPage_InsertObject(self.handle, obj);
             }
+        }
+    }
+
+    /// The visible area (crop box, or media box without one), unrotated.
+    fn crop_box(&self) -> PdfBox {
+        let lib = self.lib();
+        let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        unsafe {
+            if !lib.is_true(lib.FPDFPage_GetCropBox(self.handle, &mut l, &mut b, &mut r, &mut t)) {
+                lib.FPDFPage_GetMediaBox(self.handle, &mut l, &mut b, &mut r, &mut t);
+            }
+        }
+        PdfBox {
+            left: l.min(r),
+            bottom: b.min(t),
+            right: l.max(r),
+            top: b.max(t),
+        }
+    }
+
+    fn rotation_turns(&self) -> usize {
+        unsafe { self.lib().FPDFPage_GetRotation(self.handle) }.rem_euclid(4) as usize
+    }
+
+    /// Trims the visible area by margins given as the page is displayed.
+    fn crop(&self, margins: super::pages::Margins) -> Result<(), String> {
+        let disp = margins.as_array();
+        let r = self.rotation_turns();
+        // Unrotated sides (top, right, bottom, left) from the displayed ones.
+        let m: [f32; 4] = std::array::from_fn(|i| disp[(i + r) % 4]);
+        let b = self.crop_box();
+        let new = PdfBox {
+            left: b.left + m[3],
+            bottom: b.bottom + m[2],
+            right: b.right - m[1],
+            top: b.top - m[0],
+        };
+        if new.right - new.left < 36.0 || new.top - new.bottom < 36.0 {
+            return Err("The margins leave less than half an inch of the page.".into());
+        }
+        unsafe { self.lib().FPDFPage_SetCropBox(self.handle, new.left, new.bottom, new.right, new.top) };
+        Ok(())
+    }
+
+    /// Maps a point given as the page is displayed (origin bottom-left of the visible
+    /// area) to unrotated page space, with the displayed x and y directions.
+    fn displayed_to_page(&self, u: f32, v: f32) -> ((f32, f32), (f32, f32), (f32, f32)) {
+        let b = self.crop_box();
+        match self.rotation_turns() {
+            0 => ((b.left + u, b.bottom + v), (1.0, 0.0), (0.0, 1.0)),
+            1 => ((b.right - v, b.bottom + u), (0.0, 1.0), (-1.0, 0.0)),
+            2 => ((b.right - u, b.top - v), (-1.0, 0.0), (0.0, -1.0)),
+            _ => ((b.left + v, b.top - u), (0.0, -1.0), (1.0, 0.0)),
+        }
+    }
+
+    fn add_header_footer(&self, spec: &super::pages::HeaderFooter, index: usize, count: usize, font: FPDF_FONT) {
+        let lib = self.lib();
+        let b = self.crop_box();
+        let (w, h) = if self.rotation_turns() % 2 == 1 {
+            (b.top - b.bottom, b.right - b.left)
+        } else {
+            (b.right - b.left, b.top - b.bottom)
+        };
+        let [cr, cg, cb] = spec.color;
+        let rows = [
+            (&spec.header, h - spec.margin - spec.size * 0.75),
+            (&spec.footer, spec.margin + spec.size * 0.2),
+        ];
+        for (texts, baseline) in rows {
+            for (slot, text) in texts.iter().enumerate() {
+                let text = super::pages::HeaderFooter::resolve(text, index, count, spec.first_number);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                unsafe {
+                    let obj = lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, spec.size);
+                    if obj.is_null() {
+                        continue;
+                    }
+                    let wtext = wide(&text);
+                    lib.FPDFText_SetText(obj, wtext.as_ptr());
+                    lib.FPDFPageObj_SetFillColor(obj, cr.into(), cg.into(), cb.into(), 255);
+                    let (mut l, mut bt, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    lib.FPDFPageObj_GetBounds(obj, &mut l, &mut bt, &mut r, &mut t);
+                    let tw = r - l;
+                    let u = match slot {
+                        0 => spec.margin,
+                        1 => (w - tw) / 2.0,
+                        _ => w - spec.margin - tw,
+                    };
+                    let ((ox, oy), (ax, ay), (cx, cy)) = self.displayed_to_page(u, baseline);
+                    lib.FPDFPageObj_Transform(obj, ax as f64, ay as f64, cx as f64, cy as f64, (ox - ax * l) as f64, (oy - ay * l) as f64);
+                    lib.FPDFPageObj_AddMark(obj, HEADER_FOOTER_MARK);
+                    lib.FPDFPage_InsertObject(self.handle, obj);
+                }
+            }
+        }
+    }
+
+    /// Removes page objects carrying the marked-content tag `name`. Returns how many.
+    fn remove_marked(&self, name: &str) -> usize {
+        let lib = self.lib();
+        let mut removed = 0;
+        unsafe {
+            for i in (0..lib.FPDFPage_CountObjects(self.handle)).rev() {
+                let obj = lib.FPDFPage_GetObject(self.handle, i);
+                if obj.is_null() {
+                    continue;
+                }
+                let marked = (0..lib.FPDFPageObj_CountMarks(obj)).any(|m| {
+                    let mark = lib.FPDFPageObj_GetMark(obj, m as _);
+                    let mut len: c_ulong = 0;
+                    let mut buf = [0u16; 64];
+                    !mark.is_null()
+                        && lib.is_true(lib.FPDFPageObjMark_GetName(mark, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong, &mut len))
+                        && utf16_buf_to_string(&buf) == name
+                });
+                if marked && lib.is_true(lib.FPDFPage_RemoveObject(self.handle, obj)) {
+                    lib.FPDFPageObj_Destroy(obj);
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
+    /// Scales images shown above `dpi` down to `dpi` and stores them as JPEG, where
+    /// that makes them smaller. Images with transparency and black-and-white images
+    /// are left alone. Returns the number of images changed.
+    pub fn downsample_images(&self, dpi: f32) -> usize {
+        const FPDF_PAGEOBJ_IMAGE: c_int = 3;
+        let lib = self.lib();
+        let mut changed = 0;
+        unsafe {
+            for i in 0..lib.FPDFPage_CountObjects(self.handle) {
+                let obj = lib.FPDFPage_GetObject(self.handle, i);
+                if obj.is_null() || lib.FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_IMAGE {
+                    continue;
+                }
+                let mut meta: FPDF_IMAGEOBJ_METADATA = std::mem::zeroed();
+                if !lib.is_true(lib.FPDFImageObj_GetImageMetadata(obj, self.handle, &mut meta)) {
+                    continue;
+                }
+                let shown_dpi = meta.horizontal_dpi.min(meta.vertical_dpi);
+                if meta.bits_per_pixel < 8 || shown_dpi <= dpi * 1.25 || (meta.width as u64 * meta.height as u64) < 100_000 {
+                    continue;
+                }
+                let raw_len = lib.FPDFImageObj_GetImageDataRaw(obj, ptr::null_mut(), 0) as usize;
+                let Some((w, h, rgba)) = self.object_image(obj) else { continue };
+                if rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 250) {
+                    continue;
+                }
+                let scale = dpi / shown_dpi;
+                let (nw, nh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+                let Some(img) = image::RgbaImage::from_raw(w, h, rgba) else { continue };
+                let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+                let rgb = image::DynamicImage::ImageRgba8(small).to_rgb8();
+                let mut jpeg = Vec::new();
+                let encoded = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80).encode_image(&rgb);
+                if encoded.is_err() || jpeg.len() >= raw_len {
+                    continue;
+                }
+                let mut access = FPDF_FILEACCESS {
+                    m_FileLen: jpeg.len() as c_ulong,
+                    m_GetBlock: Some(read_block),
+                    m_Param: &jpeg as *const Vec<u8> as *mut c_void,
+                };
+                let mut page = self.handle;
+                if lib.is_true(lib.FPDFImageObj_LoadJpegFileInline(&mut page, 1, obj, &mut access)) {
+                    changed += 1;
+                }
+            }
+            if changed > 0 {
+                lib.FPDFPage_GenerateContent(self.handle);
+            }
+        }
+        changed
+    }
+
+    /// The pixels of an image object (with its transparency mask) as RGBA.
+    fn object_image(&self, obj: FPDF_PAGEOBJECT) -> Option<(u32, u32, Vec<u8>)> {
+        let lib = self.lib();
+        unsafe {
+            let (mut pw, mut ph) = (0, 0);
+            lib.FPDFImageObj_GetImagePixelSize(obj, &mut pw, &mut ph);
+            let mut saved = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            lib.FPDFPageObj_GetMatrix(obj, &mut saved);
+            let native = FS_MATRIX { a: pw.max(1) as f32, b: 0.0, c: 0.0, d: ph.max(1) as f32, e: 0.0, f: 0.0 };
+            lib.FPDFPageObj_SetMatrix(obj, &native);
+            let mut bmp = lib.FPDFImageObj_GetRenderedBitmap(self.doc.handle, self.handle, obj);
+            lib.FPDFPageObj_SetMatrix(obj, &saved);
+            if bmp.is_null() {
+                bmp = lib.FPDFImageObj_GetBitmap(obj);
+            }
+            if bmp.is_null() {
+                return None;
+            }
+            let out = bitmap_rgba(lib, bmp);
+            lib.FPDFBitmap_Destroy(bmp);
+            Some(out)
         }
     }
 
@@ -1134,59 +1418,8 @@ impl<'d> Page<'d> {
             let obj = (0..n)
                 .map(|i| lib.FPDFAnnot_GetObject(a.handle, i))
                 .find(|o| !o.is_null() && lib.FPDFPageObj_GetType(*o) == FPDF_PAGEOBJ_IMAGE)?;
-            // Rendering the image (with its transparency mask) at its own pixel size: the
-            // rendered size follows the object's matrix, so set that to the pixel size
-            // for a moment.
-            let (mut pw, mut ph) = (0, 0);
-            lib.FPDFImageObj_GetImagePixelSize(obj, &mut pw, &mut ph);
-            let mut saved = FS_MATRIX {
-                a: 1.0,
-                b: 0.0,
-                c: 0.0,
-                d: 1.0,
-                e: 0.0,
-                f: 0.0,
-            };
-            lib.FPDFPageObj_GetMatrix(obj, &mut saved);
-            let native = FS_MATRIX {
-                a: pw.max(1) as f32,
-                b: 0.0,
-                c: 0.0,
-                d: ph.max(1) as f32,
-                e: 0.0,
-                f: 0.0,
-            };
-            lib.FPDFPageObj_SetMatrix(obj, &native);
-            let mut bmp = lib.FPDFImageObj_GetRenderedBitmap(self.doc.handle, self.handle, obj);
-            lib.FPDFPageObj_SetMatrix(obj, &saved);
-            if bmp.is_null() {
-                bmp = lib.FPDFImageObj_GetBitmap(obj);
-            }
-            if bmp.is_null() {
-                return None;
-            }
-            let (w, h) = (lib.FPDFBitmap_GetWidth(bmp) as usize, lib.FPDFBitmap_GetHeight(bmp) as usize);
-            let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
-            let format = lib.FPDFBitmap_GetFormat(bmp);
-            let buf = lib.FPDFBitmap_GetBuffer(bmp) as *const u8;
-            let mut out = Vec::with_capacity(w * h * 4);
-            for y in 0..h {
-                for x in 0..w {
-                    let px = |bpp: usize, i: usize| *buf.add(y * stride + x * bpp + i);
-                    let [r, g, b, al] = match format {
-                        1 => {
-                            let v = px(1, 0);
-                            [v, v, v, 255]
-                        }
-                        2 => [px(3, 2), px(3, 1), px(3, 0), 255],
-                        3 => [px(4, 2), px(4, 1), px(4, 0), 255],
-                        _ => [px(4, 2), px(4, 1), px(4, 0), px(4, 3)],
-                    };
-                    out.extend([r, g, b, al]);
-                }
-            }
-            lib.FPDFBitmap_Destroy(bmp);
-            Some((w as u32, h as u32, out))
+            // The rendered image includes its transparency mask.
+            self.object_image(obj)
         }
     }
 

@@ -96,6 +96,10 @@ pub struct App {
     /// Text put on the clipboard when an annotation was copied: pasting exactly this
     /// text pastes the annotation.
     annot_clip_text: Option<String>,
+    /// Page tool dialogs (None: closed).
+    crop_dialog: Option<crate::view::page_tools::CropDialog>,
+    hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
+    optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
     /// Tabs being moved to another window, waiting for their export.
     moves: HashMap<DocId, MoveTarget>,
     /// Temporary files of tabs received from other windows, deleted once opened.
@@ -229,6 +233,9 @@ impl App {
             stamps: Default::default(),
             last_shape: Tool::Rect,
             annot_clip_text: None,
+            crop_dialog: None,
+            hf_dialog: None,
+            optimize_dialog: None,
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
@@ -976,6 +983,37 @@ impl App {
         }
     }
 
+    fn page_tool_dialogs(&mut self, ctx: &egui::Context) {
+        use crate::view::page_tools::*;
+        let Some(tab) = self.tabs.get_mut(self.active).filter(|t| t.info().is_some()) else {
+            (self.crop_dialog, self.hf_dialog, self.optimize_dialog) = (None, None, None);
+            return;
+        };
+        let mut reqs = Vec::new();
+        if let Some(d) = &mut self.crop_dialog {
+            let (req, open) = crop_dialog(ctx, d, tab);
+            reqs.extend(req);
+            if !open {
+                self.crop_dialog = None;
+            }
+        }
+        if let Some(d) = &mut self.hf_dialog {
+            let (req, open) = header_footer_dialog(ctx, d, tab, &mut self.settings.recent_colors);
+            reqs.extend(req);
+            if !open {
+                self.hf_dialog = None;
+            }
+        }
+        if let Some(d) = &mut self.optimize_dialog {
+            let (req, open) = optimize_dialog(ctx, d, tab);
+            reqs.extend(req);
+            if !open {
+                self.optimize_dialog = None;
+            }
+        }
+        tab.outbox.extend(reqs);
+    }
+
     fn split_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut every) = self.split_every else { return };
         let Some(tab) = self.tabs.get(self.active) else {
@@ -1582,6 +1620,9 @@ impl App {
                 {
                     self.save_active(true);
                 }
+                if ui.add_enabled(has_tab, egui::Button::new("Save optimized copy…")).clicked() {
+                    self.optimize_dialog = Some(Default::default());
+                }
                 if ui.add_enabled(has_tab, egui::Button::new(kb("Print…\tCtrl+P"))).clicked() {
                     self.print();
                 }
@@ -1657,6 +1698,22 @@ impl App {
                         && let Some(t) = self.tabs.get(self.active)
                     {
                         self.ocr.open(t.id, t.page_selection.len() > 1);
+                    }
+                    ui.separator();
+                    if ui.button("Crop pages…").clicked() {
+                        self.crop_dialog = Some(Default::default());
+                    }
+                    if ui.button("Header and footer…").clicked() {
+                        self.hf_dialog = Some(Default::default());
+                    }
+                    if ui
+                        .button("Remove header and footer")
+                        .on_hover_text("Removes what magic-pdf added, on all pages")
+                        .clicked()
+                        && let Some(tab) = self.tabs.get_mut(self.active)
+                    {
+                        let pages = (0..tab.page_count()).collect();
+                        tab.outbox.push(Request::EditPages { doc: tab.id, op: PageOp::RemoveHeaderFooter { pages } });
                     }
                 });
             });
@@ -2678,6 +2735,7 @@ impl eframe::App for App {
             self.page_action(a);
         }
         self.split_dialog(&ctx);
+        self.page_tool_dialogs(&ctx);
         for r in self.ocr.show(&ctx, self.tabs.get(self.active)) {
             self.send(r);
         }
