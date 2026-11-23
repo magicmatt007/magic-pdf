@@ -22,6 +22,7 @@ env_logger = "0.11"
 lopdf = { version = "0.47.0", default-features = false }
 similar = { version = "3.2.1", default-features = false }
 sys-locale = "0.3.2"
+roxmltree = "0.21.2"
 
 [build-dependencies]
 # Embeds the icon into Windows builds; unused elsewhere.

@@ -111,6 +111,15 @@ disk image and the Linux AppImage and publishes them as a GitHub release. Runnin
 workflow) builds the same files as a downloadable artifact without publishing anything.
 CI runs clippy and the tests on Linux, Windows and macOS for every push.
 
+## E-invoices
+
+PDFs with ZUGFeRD / Factur-X invoice data (an embedded `factur-x.xml` or similar) get a
+bar above the page and an **E-invoice** window: seller and buyer, items, VAT, totals and
+payment details, with checks that the amounts add up, that the total appears on the page,
+and that fields EN 16931 requires are present. Attached files are listed in the sidebar's
+**Attachments** tab (open or save them). **File → Document properties** (Ctrl+D) shows
+and edits title, author, subject and keywords (also in the XMP metadata).
+
 ## Languages
 
 The interface is in English and German (Edit → Settings → Language; "System" follows

@@ -402,6 +402,12 @@ impl Worker {
                 }
                 Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
             },
+            Request::GetAttachment { doc, index } => {
+                match self.docs.get(&doc).and_then(|od| od.doc.attachment(index)) {
+                    Some((name, data)) => self.send(Response::Attachment { doc, index, name, data }),
+                    None => self.error(doc, "The attached file could not be read."),
+                }
+            }
             Request::Compare { a, b } => {
                 let (Some(da), Some(db)) = (self.docs.get(&a), self.docs.get(&b)) else { return };
                 let words = |d: &OpenDoc, i: usize| {
@@ -644,6 +650,8 @@ impl Worker {
                     page_sizes,
                     outline: doc.outline(),
                     title: doc.title(),
+                    properties: doc.properties(),
+                    attachments: doc.attachments(),
                 };
                 self.docs.insert(
                     id,
@@ -782,6 +790,8 @@ impl Worker {
             page_sizes: (0..od.doc.page_count()).map(|i| od.doc.page_size(i)).collect(),
             outline: od.doc.outline(),
             title: od.doc.title(),
+            properties: od.doc.properties(),
+            attachments: od.doc.attachments(),
         }
     }
 
@@ -1221,6 +1231,12 @@ impl Worker {
 /// cannot write them) and the document reopened from those.
 fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
     match op {
+        PageOp::SetProperties { properties } => {
+            od.doc.kill_form_focus();
+            let bytes = super::lopdf_ops::write_properties(&od.doc.save_to_bytes()?, properties, &super::pdf::pdf_date_now())?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+            Ok(0)
+        }
         PageOp::SetOutline { outline } => {
             od.doc.kill_form_focus();
             let bytes = super::lopdf_ops::write_outline(&od.doc.save_to_bytes()?, outline)?;

@@ -139,12 +139,46 @@ pub struct OutlineItem {
     pub children: Vec<OutlineItem>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DocInfo {
     /// Displayed page sizes in points (width, height), including each page's own rotation.
     pub page_sizes: Vec<(f32, f32)>,
     pub outline: Vec<OutlineItem>,
     pub title: Option<String>,
+    pub properties: DocProperties,
+    /// Files embedded in the document.
+    pub attachments: Vec<AttachmentInfo>,
+}
+
+/// Document properties (the PDF's information dictionary).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocProperties {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+    pub creator: String,
+    pub producer: String,
+    /// PDF date strings.
+    pub created: String,
+    pub modified: String,
+    /// PDF version times 10 (17 for PDF 1.7).
+    pub version: Option<i32>,
+}
+
+/// The editable document properties.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditableProperties {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub size: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -651,6 +685,11 @@ pub enum Request {
         path: PathBuf,
         at: usize,
     },
+    /// The content of embedded file `index`; answered with `Attachment`.
+    GetAttachment {
+        doc: DocId,
+        index: usize,
+    },
     /// Compare the text of two open documents page by page; answered with `Compared`.
     Compare {
         a: DocId,
@@ -812,6 +851,12 @@ pub enum Response {
     },
     Clipboard {
         text: String,
+    },
+    Attachment {
+        doc: DocId,
+        index: usize,
+        name: String,
+        data: Vec<u8>,
     },
     /// Text differences between two documents (pages with changes only).
     Compared {

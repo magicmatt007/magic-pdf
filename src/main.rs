@@ -4,6 +4,7 @@ mod app;
 mod document;
 mod engine;
 mod fonts;
+mod einvoice;
 mod i18n;
 mod icons;
 mod ipc;

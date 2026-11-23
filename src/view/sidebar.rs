@@ -20,6 +20,8 @@ pub enum SidebarTab {
     Outline,
     Comments,
     Search,
+    /// Files attached to the document (only offered when there are some).
+    Attachments,
 }
 
 /// Narrowest sidebar.
@@ -52,6 +54,8 @@ pub fn show(
         SidebarTab::Outline => outline(ui, tab),
         SidebarTab::Comments => comments(ui, tab, author),
         SidebarTab::Search => search_results(ui, tab),
+        // Drawn by the app (it needs the e-invoice data).
+        SidebarTab::Attachments => {}
     }
 }
 
@@ -70,6 +74,12 @@ pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
             tf("Search ({n})", &[("n", &tab.search.hits.len())])
         };
         ui.selectable_value(sidebar, SidebarTab::Search, label);
+        let attached = tab.info().map_or(0, |i| i.attachments.len());
+        if attached > 0 {
+            ui.selectable_value(sidebar, SidebarTab::Attachments, tf("Attachments ({n})", &[("n", &attached)]));
+        } else if *sidebar == SidebarTab::Attachments {
+            *sidebar = SidebarTab::Pages;
+        }
     });
 }
 
@@ -1003,6 +1013,7 @@ mod tests {
             page_sizes: vec![(595.0, 842.0); pages],
             outline: Vec::new(),
             title: None,
+            ..Default::default()
         });
         tab
     }
@@ -1168,6 +1179,7 @@ mod tests {
             page_sizes: vec![(595.0, 842.0); 4],
             outline: Vec::new(),
             title: None,
+            ..Default::default()
         };
         tab.apply_page_mapping(info, &m);
         assert_eq!(tab.current_page, 2, "stays on the same page, now numbered 3");

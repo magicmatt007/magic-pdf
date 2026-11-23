@@ -21,6 +21,8 @@ pub const ZOOM_PRESETS: [f32; 18] = [
     1200.0, 1600.0, 2400.0, 3200.0,
 ];
 
+// One per open tab, so the size of the Ready variant does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum LoadState {
     Loading,
     NeedsPassword { input: String, wrong: bool },

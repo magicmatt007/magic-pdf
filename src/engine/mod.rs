@@ -1966,5 +1966,84 @@ mod tests {
         let list = save_and_reopen(&engine, 1, "measure");
         assert!(list.iter().any(|a| a.kind == AnnotKind::Area && a.contents == "6.45 cm²"));
     }
+
+    /// A one-page PDF with `xml` attached as factur-x.xml and XMP metadata.
+    fn einvoice_pdf(xml: &[u8]) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let content = doc.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let pages_id = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Contents" => content,
+        });
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+        let file = doc.add_object(Stream::new(dictionary! { "Type" => "EmbeddedFile", "Subtype" => "text#2Fxml" }, xml.to_vec()));
+        let spec = doc.add_object(dictionary! {
+            "Type" => "Filespec", "F" => Object::string_literal("factur-x.xml"), "UF" => Object::string_literal("factur-x.xml"),
+            "EF" => dictionary! { "F" => file }, "AFRelationship" => "Data",
+        });
+        let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF><rdf:Description>\
+<dc:title><rdf:Alt><rdf:li xml:lang='x-default'>Invoice</rdf:li></rdf:Alt></dc:title>\
+</rdf:Description></rdf:RDF></x:xmpmeta>";
+        let metadata = doc.add_object(Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, xmp.to_vec()));
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id, "Metadata" => metadata, "AF" => vec![spec.into()],
+            "Names" => dictionary! { "EmbeddedFiles" => dictionary! { "Names" => vec![Object::string_literal("factur-x.xml"), spec.into()] } },
+        });
+        let info = doc.add_object(dictionary! { "Title" => Object::string_literal("Invoice"), "Producer" => Object::string_literal("Test") });
+        doc.trailer.set("Root", catalog);
+        doc.trailer.set("Info", info);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn attachments_and_document_properties() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-props-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("invoice.pdf");
+        let xml = crate::einvoice::SAMPLE.as_bytes();
+        std::fs::write(&src, einvoice_pdf(xml)).unwrap();
+        let info = open(&engine, 1, src);
+        assert_eq!(info.attachments, vec![AttachmentInfo { name: "factur-x.xml".into(), size: xml.len() }]);
+        assert_eq!((info.properties.title.as_str(), info.properties.producer.as_str()), ("Invoice", "Test"));
+        assert_eq!(info.properties.version, Some(17));
+        engine.send(Request::GetAttachment { doc: 1, index: 0 });
+        let (name, data) = recv_until(&engine, |r| match r {
+            Response::Attachment { name, data, .. } => Some((name, data)),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        assert_eq!((name.as_str(), data.as_slice()), ("factur-x.xml", xml));
+        assert!(crate::einvoice::parse(&data).is_ok());
+
+        // Edit the properties: undoable, saved, and the XMP title follows.
+        let props = EditableProperties {
+            title: "Rechnung Oktober".into(),
+            author: "Stadtwerke".into(),
+            subject: String::new(),
+            keywords: "Wasser, 2026".into(),
+        };
+        engine.send(Request::EditPages { doc: 1, op: PageOp::SetProperties { properties: props.clone() } });
+        let (info, _) = pages_changed(&engine);
+        assert_eq!(info.properties.title, "Rechnung Oktober");
+        assert_eq!(info.properties.keywords, "Wasser, 2026");
+        assert_eq!(info.title.as_deref(), Some("Rechnung Oktober"));
+        assert_eq!(info.attachments.len(), 1, "the attachment stays");
+        let out = dir.join("saved.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let bytes = std::fs::read(&out).unwrap();
+        let saved = String::from_utf8_lossy(&bytes);
+        assert!(saved.contains("<rdf:li xml:lang='x-default'>Rechnung Oktober</rdf:li>"), "XMP readable and updated");
+        let reopened = open(&engine, 2, out);
+        assert_eq!(reopened.properties.author, "Stadtwerke");
+        engine.send(Request::Undo { doc: 1 });
+        assert_eq!(pages_changed(&engine).0.properties.title, "Invoice");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
 

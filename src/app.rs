@@ -101,6 +101,13 @@ pub struct App {
     annot_clip_text: Option<String>,
     /// Two documents shown side by side with their text differences.
     compare: Option<Comparison>,
+    /// Document properties dialog (None: closed).
+    props_dialog: Option<crate::view::doc_info::PropertiesDialog>,
+    /// E-invoice data found in open documents, and the one shown.
+    einvoices: HashMap<DocId, crate::view::doc_info::EInvoice>,
+    show_einvoice: Option<DocId>,
+    /// What to do with attached files the engine is reading.
+    attachment_actions: HashMap<(DocId, usize), crate::view::doc_info::AttachmentAction>,
     /// Page tool dialogs (None: closed).
     crop_dialog: Option<crate::view::page_tools::CropDialog>,
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
@@ -241,6 +248,10 @@ impl App {
             last_shape: Tool::Rect,
             annot_clip_text: None,
             compare: None,
+            props_dialog: None,
+            einvoices: HashMap::new(),
+            show_einvoice: None,
+            attachment_actions: HashMap::new(),
             crop_dialog: None,
             hf_dialog: None,
             optimize_dialog: None,
@@ -691,6 +702,10 @@ impl App {
             self.end_compare();
         }
         let tab = self.tabs.remove(index);
+        self.einvoices.remove(&tab.id);
+        if self.show_einvoice == Some(tab.id) {
+            self.show_einvoice = None;
+        }
         if tab.info().is_some() {
             self.settings.set_file_state(&tab.path, tab.file_state());
             self.settings.save();
@@ -733,6 +748,17 @@ impl App {
                         info.title.as_deref().unwrap_or(&tab.name),
                         info.page_sizes.len()
                     );
+                    // XML attachments may be e-invoice data.
+                    let xml: Vec<usize> = info
+                        .attachments
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, a)| a.name.to_lowercase().ends_with(".xml"))
+                        .map(|(i, _)| i)
+                        .collect();
+                    for &index in &xml {
+                        tab.outbox.push(Request::GetAttachment { doc, index });
+                    }
                     tab.state = LoadState::Ready(info);
                     let page = tab.pending_goto.unwrap_or(0);
                     tab.goto_page(page);
@@ -744,6 +770,9 @@ impl App {
                     if let Some(tmp) = self.temp_files.remove(&doc) {
                         // The document is in memory now.
                         let _ = std::fs::remove_file(tmp);
+                    }
+                    for index in xml {
+                        self.attachment_actions.insert((doc, index), crate::view::doc_info::AttachmentAction::Inspect);
                     }
                 }
             }
@@ -774,6 +803,38 @@ impl App {
             Response::RenderFailed { key } => {
                 // Left in `requested` so it is not retried every frame.
                 log::debug!("render failed for {key:?}");
+            }
+            Response::Attachment { doc, index, name, data } => {
+                use crate::view::doc_info::{AttachmentAction, EInvoice};
+                match self.attachment_actions.remove(&(doc, index)) {
+                    Some(AttachmentAction::Save(path)) => match std::fs::write(&path, &data) {
+                        Ok(()) => self.notice(&tf("Saved {file}", &[("file", &path.display())])),
+                        Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                    },
+                    Some(AttachmentAction::Open) => {
+                        // A copy in the temporary folder, opened with the system's program.
+                        let safe: String = name.chars().map(|c| if c.is_alphanumeric() || ".-_ ".contains(c) { c } else { '_' }).collect();
+                        let dir = std::env::temp_dir().join(format!("magic-pdf-attachments-{}", std::process::id()));
+                        let path = dir.join(if safe.is_empty() { "attachment".into() } else { safe });
+                        let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &data));
+                        match result {
+                            Ok(()) => {
+                                if let Err(e) = open::that_detached(&path) {
+                                    self.error = Some(tf("Could not open {file}: {e}", &[("file", &path.display()), ("e", &e)]));
+                                }
+                            }
+                            Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                        }
+                    }
+                    Some(AttachmentAction::Inspect) | None => {
+                        if crate::einvoice::is_invoice_xml(&data) {
+                            self.einvoices.insert(doc, EInvoice::new(name, data));
+                            if self.screenshot_to.is_some() && std::env::var_os("MAGIC_PDF_SHOW_EINVOICE").is_some() {
+                                self.show_einvoice = Some(doc);
+                            }
+                        }
+                    }
+                }
             }
             Response::Compared { a, b, diffs } => {
                 if let Some(c) = &mut self.compare
@@ -1043,6 +1104,77 @@ impl App {
         if let Some(r) = req {
             self.send(r);
         }
+    }
+
+    fn doc_info_windows(&mut self, ctx: &egui::Context) {
+        use crate::view::doc_info::*;
+        if let Some(d) = &mut self.props_dialog {
+            match self.tabs.iter_mut().find(|t| t.id == d.doc) {
+                Some(tab) => {
+                    let (req, open) = properties_dialog(ctx, d, tab);
+                    tab.outbox.extend(req);
+                    if !open {
+                        self.props_dialog = None;
+                    }
+                }
+                None => self.props_dialog = None,
+            }
+        }
+        let Some(doc) = self.show_einvoice else { return };
+        let (Some(inv), Some(tab)) = (self.einvoices.get(&doc), self.tabs.iter_mut().find(|t| t.id == doc)) else {
+            self.show_einvoice = None;
+            return;
+        };
+        // The text of all pages, to look for the total (invoices are short).
+        let pages = tab.page_count().min(20);
+        for p in 0..pages {
+            tab.request_text(p);
+        }
+        let text = (0..pages)
+            .map(|p| tab.texts.get(&p).and_then(|t| t.as_ref()).map(|t| t.chars.iter().map(|c| c.ch).collect::<String>()))
+            .collect::<Option<Vec<_>>>()
+            .map(|v| v.join("\n"));
+        let mut save = false;
+        if !einvoice_window(ctx, inv, text.as_deref(), &mut save) {
+            self.show_einvoice = None;
+        }
+        if save {
+            let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut dialog = rfd::FileDialog::new().add_filter("XML", &["xml"]).set_file_name(format!("{stem}.xml"));
+            if let Some(dir) = tab.path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(path) = dialog.save_file() {
+                match std::fs::write(&path, &inv.xml) {
+                    Ok(()) => self.notice(&tf("Saved {file}", &[("file", &path.display())])),
+                    Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                }
+            }
+        }
+    }
+
+    fn einvoice_bar(&mut self, ui: &mut Ui) {
+        let Some(doc) = self.tabs.get(self.active).map(|t| t.id) else { return };
+        let Some(inv) = self.einvoices.get(&doc) else { return };
+        let ok = inv
+            .invoice
+            .as_ref()
+            .is_ok_and(|i| crate::einvoice::checks(i).iter().all(|c| c.ok) && crate::einvoice::missing_required(i).is_empty());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(t("E-invoice")).strong());
+            ui.label(tf("This PDF contains invoice data ({format}).", &[("format", &inv.label())]));
+            if let Ok(i) = &inv.invoice
+                && let Some(total) = i.totals.due.or(i.totals.grand)
+            {
+                ui.label(egui::RichText::new(format!("{} {}", crate::einvoice::money(total), i.currency)).strong());
+            }
+            if !ok {
+                ui.colored_label(egui::Color32::from_rgb(210, 90, 0), t("⚠ see the invoice data"));
+            }
+            if ui.button(t("Show invoice data")).clicked() {
+                self.show_einvoice = Some(doc);
+            }
+        });
     }
 
     /// Compares the active document with an open one (`other`) or a file to pick.
@@ -1610,6 +1742,9 @@ impl App {
         if shortcut(cmd, Key::F) {
             self.focus_search = true;
         }
+        if shortcut(cmd, Key::D) {
+            self.props_dialog = self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
+        }
         if shortcut(cmd, Key::Comma) {
             self.show_settings = true;
         }
@@ -1872,6 +2007,9 @@ impl App {
                         }
                     });
                 });
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Document properties…\tCtrl+D")))).clicked() {
+                    self.props_dialog = self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
+                }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Save optimized copy…"))).clicked() {
                     self.optimize_dialog = Some(Default::default());
                 }
@@ -2683,6 +2821,7 @@ impl App {
                         ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
                         ("F9", "Toggle sidebar"),
                         ("Ctrl+,", "Settings"),
+                        ("Ctrl+D", "Document properties"),
                         ("Middle-drag", "Pan with any tool"),
                     ] {
                         ui.strong(kb(k));
@@ -2964,6 +3103,9 @@ impl eframe::App for App {
         if self.compare_panes().is_some() {
             egui::Panel::top("compare").show(ui, |ui| self.compare_bar(ui));
         }
+        if self.tabs.get(self.active).is_some_and(|t| self.einvoices.contains_key(&t.id)) {
+            egui::Panel::top("einvoice").show(ui, |ui| self.einvoice_bar(ui));
+        }
 
         if let Some(tab) = self.tabs.get(self.active) {
             let status = match &tab.state {
@@ -3017,6 +3159,19 @@ impl eframe::App for App {
                         sidebar::tab_row(ui, &self.tabs[self.active], &mut self.sidebar_tab);
                         ui.separator();
                         sidebar::search_all_results(ui, &mut self.tabs, &mut self.active);
+                    } else if self.sidebar_tab == SidebarTab::Attachments {
+                        let tab = &self.tabs[self.active];
+                        sidebar::tab_row(ui, tab, &mut self.sidebar_tab);
+                        ui.separator();
+                        let inv = self.einvoices.get(&tab.id);
+                        if inv.is_some() && ui.button(t("Show invoice data")).clicked() {
+                            self.show_einvoice = Some(tab.id);
+                        }
+                        if let Some((index, action)) = crate::view::doc_info::attachments_list(ui, tab, inv) {
+                            let doc = tab.id;
+                            self.attachment_actions.insert((doc, index), action);
+                            self.tabs[self.active].outbox.push(Request::GetAttachment { doc, index });
+                        }
                     } else {
                         let tab = &mut self.tabs[self.active];
                         sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width, author)
@@ -3083,6 +3238,7 @@ impl eframe::App for App {
         }
         self.split_dialog(&ctx);
         self.page_tool_dialogs(&ctx);
+        self.doc_info_windows(&ctx);
         for r in self.ocr.show(&ctx, self.tabs.get(self.active)) {
             self.send(r);
         }

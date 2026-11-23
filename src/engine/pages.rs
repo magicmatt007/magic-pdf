@@ -56,6 +56,10 @@ pub enum PageOp {
     SetOutline {
         outline: Vec<super::commands::OutlineItem>,
     },
+    /// Changes title, author, subject and keywords.
+    SetProperties {
+        properties: super::commands::EditableProperties,
+    },
 }
 
 /// Margins in points: top, right, bottom, left (as the page is displayed).
@@ -143,6 +147,7 @@ impl PageOp {
             PageOp::HeaderFooter { .. } => "Header and footer",
             PageOp::RemoveHeaderFooter { .. } => "Remove header and footer",
             PageOp::SetOutline { .. } => "Edit bookmarks",
+            PageOp::SetProperties { .. } => "Document properties",
         }
     }
 
@@ -176,7 +181,7 @@ impl PageOp {
             | PageOp::Crop { pages, .. }
             | PageOp::HeaderFooter { pages, .. }
             | PageOp::RemoveHeaderFooter { pages } => in_range(pages),
-            PageOp::SetOutline { .. } => Ok(()),
+            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Ok(()),
             PageOp::TextLayer { pages, .. } => in_range(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::InsertBlank { at, .. } | PageOp::InsertFile { at, .. } => {
                 if *at > count {
@@ -238,7 +243,7 @@ impl PageOp {
                 new_count: count,
                 changed: sorted_unique(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             },
-            PageOp::SetOutline { .. } => PageMapping {
+            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => PageMapping {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: Vec::new(),

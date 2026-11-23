@@ -2081,6 +2081,7 @@ mod tests {
             page_sizes: vec![(595.0, 842.0)],
             outline: Vec::new(),
             title: None,
+            ..Default::default()
         });
         let chars = "test"
             .chars()

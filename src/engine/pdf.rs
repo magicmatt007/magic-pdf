@@ -466,7 +466,7 @@ impl Doc {
                 })?;
                 self.import_pages(&src, pages.as_deref(), *at)
             }
-            PageOp::SetOutline { .. } => Err("bookmarks are written by the worker".into()),
+            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Err("written by the worker".into()),
             PageOp::Crop { pages, margins } => {
                 for &i in pages {
                     let page = self.page(i).ok_or("page not found")?;
@@ -556,6 +556,66 @@ impl Doc {
     pub fn kill_form_focus(&self) {
         if !self.form.is_null() {
             unsafe { self.lib.FORM_ForceToKillFocus(self.form) };
+        }
+    }
+
+    pub fn properties(&self) -> DocProperties {
+        let meta = |tag: &str| {
+            read_utf16(|buf, len| unsafe { self.lib.FPDF_GetMetaText(self.handle, tag, buf, len) })
+                .trim()
+                .to_string()
+        };
+        let mut v = 0;
+        let version = self.lib.is_true(unsafe { self.lib.FPDF_GetFileVersion(self.handle, &mut v) }).then_some(v);
+        DocProperties {
+            title: meta("Title"),
+            author: meta("Author"),
+            subject: meta("Subject"),
+            keywords: meta("Keywords"),
+            creator: meta("Creator"),
+            producer: meta("Producer"),
+            created: meta("CreationDate"),
+            modified: meta("ModDate"),
+            version,
+        }
+    }
+
+    pub fn attachments(&self) -> Vec<AttachmentInfo> {
+        let lib = self.lib;
+        let n = unsafe { lib.FPDFDoc_GetAttachmentCount(self.handle) }.max(0);
+        (0..n)
+            .filter_map(|i| {
+                let a = unsafe { lib.FPDFDoc_GetAttachment(self.handle, i) };
+                if a.is_null() {
+                    return None;
+                }
+                let name = read_utf16(|buf, len| unsafe { lib.FPDFAttachment_GetName(a, buf as *mut FPDF_WCHAR, len) });
+                let mut size: c_ulong = 0;
+                unsafe { lib.FPDFAttachment_GetFile(a, ptr::null_mut(), 0, &mut size) };
+                Some(AttachmentInfo { name, size: size as usize })
+            })
+            .collect()
+    }
+
+    /// Name and content of embedded file `index`.
+    pub fn attachment(&self, index: usize) -> Option<(String, Vec<u8>)> {
+        let lib = self.lib;
+        unsafe {
+            let a = lib.FPDFDoc_GetAttachment(self.handle, index as c_int);
+            if a.is_null() {
+                return None;
+            }
+            let name = read_utf16(|buf, len| lib.FPDFAttachment_GetName(a, buf as *mut FPDF_WCHAR, len));
+            let mut size: c_ulong = 0;
+            if !lib.is_true(lib.FPDFAttachment_GetFile(a, ptr::null_mut(), 0, &mut size)) {
+                return None;
+            }
+            let mut data = vec![0u8; size as usize];
+            let ok = lib.FPDFAttachment_GetFile(a, data.as_mut_ptr() as *mut c_void, size, &mut size);
+            lib.is_true(ok).then(|| {
+                data.truncate(size as usize);
+                (name, data)
+            })
         }
     }
 
