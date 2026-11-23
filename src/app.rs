@@ -98,6 +98,8 @@ pub struct App {
     /// Text put on the clipboard when an annotation was copied: pasting exactly this
     /// text pastes the annotation.
     annot_clip_text: Option<String>,
+    /// Two documents shown side by side with their text differences.
+    compare: Option<Comparison>,
     /// Page tool dialogs (None: closed).
     crop_dialog: Option<crate::view::page_tools::CropDialog>,
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
@@ -236,6 +238,7 @@ impl App {
             stamps: Default::default(),
             last_shape: Tool::Rect,
             annot_clip_text: None,
+            compare: None,
             crop_dialog: None,
             hf_dialog: None,
             optimize_dialog: None,
@@ -302,6 +305,11 @@ impl App {
                 && let Some(t) = app.tabs.get_mut(app.active)
             {
                 t.set_zoom(z / 100.0);
+            }
+            if std::env::var_os("MAGIC_PDF_COMPARE").is_some() && app.tabs.len() >= 2 {
+                app.active = 0;
+                let other = app.tabs[1].id;
+                app.start_compare(Some(other));
             }
             match std::env::var("MAGIC_PDF_SIDEBAR").as_deref() {
                 Ok("outline") => app.sidebar_tab = SidebarTab::Outline,
@@ -675,6 +683,11 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        if let Some(c) = &self.compare
+            && (c.a == self.tabs[index].id || c.b == self.tabs[index].id)
+        {
+            self.end_compare();
+        }
         let tab = self.tabs.remove(index);
         if tab.info().is_some() {
             self.settings.set_file_state(&tab.path, tab.file_state());
@@ -759,6 +772,24 @@ impl App {
             Response::RenderFailed { key } => {
                 // Left in `requested` so it is not retried every frame.
                 log::debug!("render failed for {key:?}");
+            }
+            Response::Compared { a, b, diffs } => {
+                if let Some(c) = &mut self.compare
+                    && (c.a, c.b) == (a, b)
+                {
+                    for (doc, added) in [(a, false), (b, true)] {
+                        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == doc) {
+                            t.diff_marks = diffs
+                                .iter()
+                                .map(|d| {
+                                    let rects = if added { &d.added } else { &d.removed };
+                                    (d.page, rects.iter().map(|r| (*r, added)).collect())
+                                })
+                                .collect();
+                        }
+                    }
+                    c.diffs = Some(diffs);
+                }
             }
             Response::PageText { doc, page, geom, text } => {
                 if let Some(tab) = self.tab_mut(doc) {
@@ -1009,6 +1040,150 @@ impl App {
         };
         if let Some(r) = req {
             self.send(r);
+        }
+    }
+
+    /// Compares the active document with an open one (`other`) or a file to pick.
+    fn start_compare(&mut self, other: Option<DocId>) {
+        let Some(a) = self.tabs.get(self.active).map(|t| t.id) else { return };
+        let b = match other {
+            Some(b) => b,
+            None => {
+                let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+                if let Some(dir) = self.current_dir() {
+                    dialog = dialog.set_directory(dir);
+                }
+                let Some(path) = dialog.pick_file() else { return };
+                self.open(&path);
+                match self.tabs.get(self.active) {
+                    Some(t) if t.id != a => t.id,
+                    _ => return,
+                }
+            }
+        };
+        self.end_compare();
+        // The engine handles requests in order, so a document opened just now is
+        // ready by the time it compares.
+        self.send(Request::Compare { a, b });
+        self.compare = Some(Comparison {
+            a,
+            b,
+            diffs: None,
+            current: None,
+            last: None,
+        });
+        if let Some(i) = self.tabs.iter().position(|t| t.id == a) {
+            self.active = i;
+        }
+        let page = self.tabs[self.active].current_page;
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == b) {
+            t.goto_page(page);
+        }
+    }
+
+    fn end_compare(&mut self) {
+        if let Some(c) = self.compare.take() {
+            for t in &mut self.tabs {
+                if t.id == c.a || t.id == c.b {
+                    t.diff_marks.clear();
+                }
+            }
+        }
+    }
+
+    /// Tab indices (left, right) when the comparison is on screen.
+    fn compare_panes(&self) -> Option<(usize, usize)> {
+        let c = self.compare.as_ref()?;
+        let a = self.tabs.iter().position(|t| t.id == c.a)?;
+        let b = self.tabs.iter().position(|t| t.id == c.b)?;
+        (self.active == a || self.active == b).then_some((a, b))
+    }
+
+    /// Keeps both sides on the same page and zoom, following whichever side moved.
+    fn sync_comparison(&mut self) {
+        let Some((ia, ib)) = self.compare_panes() else { return };
+        let Some(c) = self.compare.as_mut() else { return };
+        let state = |t: &DocTab| (t.current_page, t.viewport.zoom);
+        let (now_a, now_b) = (state(&self.tabs[ia]), state(&self.tabs[ib]));
+        if let Some((last_a, last_b)) = c.last {
+            let (from, to) = if now_a != last_a { (ia, ib) } else if now_b != last_b { (ib, ia) } else { (ia, ia) };
+            if from != to {
+                let (page, zoom, fit, mode) = {
+                    let t = &self.tabs[from];
+                    (t.current_page, t.viewport.zoom, t.viewport.fit, t.mode)
+                };
+                let t = &mut self.tabs[to];
+                if t.mode != mode {
+                    t.set_mode(mode);
+                }
+                t.viewport.fit = fit;
+                if (t.viewport.zoom - zoom).abs() > 1e-4 {
+                    t.set_zoom(zoom);
+                    t.viewport.fit = fit;
+                }
+                if t.current_page != page && page < t.page_count() {
+                    t.goto_page(page);
+                }
+            }
+        }
+        c.last = Some((state(&self.tabs[ia]), state(&self.tabs[ib])));
+    }
+
+    fn compare_bar(&mut self, ui: &mut Ui) {
+        let Some(c) = &self.compare else { return };
+        let name = |id: DocId| self.tabs.iter().find(|t| t.id == id).map(|t| t.title()).unwrap_or_default();
+        let (na, nb) = (name(c.a), name(c.b));
+        let mut go: Option<usize> = None;
+        let mut end = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("Comparing {na} ↔ {nb}")).strong());
+            ui.separator();
+            match &c.diffs {
+                None => {
+                    ui.spinner();
+                    ui.label("Comparing the text…");
+                }
+                Some(d) if d.is_empty() => {
+                    ui.label("The text is the same.");
+                }
+                Some(d) => {
+                    let changes: usize = d.iter().map(|p| p.summary.len()).sum();
+                    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                    ui.label(format!("{} on {}", plural(changes, "change", "changes"), plural(d.len(), "page", "pages")));
+                    let cur = c.current;
+                    if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text("Previous page with changes").clicked() {
+                        go = Some(cur.map_or(d.len() - 1, |i| (i + d.len() - 1) % d.len()));
+                    }
+                    if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text("Next page with changes").clicked() {
+                        go = Some(cur.map_or(0, |i| (i + 1) % d.len()));
+                    }
+                    if let Some(p) = cur.and_then(|i| d.get(i)) {
+                        let text = p.summary.iter().take(3).cloned().collect::<Vec<_>>().join("   ·   ");
+                        let more = if p.summary.len() > 3 { format!("  (+{})", p.summary.len() - 3) } else { String::new() };
+                        ui.label(format!("Page {}: {text}{more}", p.page + 1)).on_hover_text(p.summary.join("\n"));
+                    }
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                end = ui.button("End comparison").clicked();
+                ui.weak("Red: only on the left · Green: only on the right");
+            });
+        });
+        if end {
+            self.end_compare();
+            return;
+        }
+        if let Some(i) = go
+            && let Some(c) = self.compare.as_mut()
+            && let Some(page) = c.diffs.as_ref().and_then(|d| d.get(i)).map(|d| d.page)
+        {
+            c.current = Some(i);
+            for t in &mut self.tabs {
+                if (t.id == c.a || t.id == c.b) && page < t.page_count() {
+                    t.goto_page(page);
+                }
+            }
+            c.last = None;
         }
     }
 
@@ -1343,7 +1518,8 @@ impl App {
             for req in tab.outbox.drain(..) {
                 engine.send(req);
             }
-            if i != self.active {
+            let partner = self.compare.as_ref().is_some_and(|c| c.a == tab.id || c.b == tab.id);
+            if i != self.active && !partner {
                 tab.wanted.clear();
             }
             let mut wanted: HashSet<_> = HashSet::with_capacity(tab.wanted.len());
@@ -1481,6 +1657,7 @@ impl App {
                 (Key::C, Tool::Cloud),
                 (Key::K, Tool::Stamp),
                 (Key::G, Tool::Signature),
+                (Key::M, Tool::Distance),
             ] {
                 if shortcut(Modifiers::NONE, key) {
                     self.tool = tool;
@@ -1672,6 +1849,27 @@ impl App {
                 {
                     self.save_active(true);
                 }
+                ui.add_enabled_ui(has_tab, |ui| {
+                    ui.menu_button("Compare with", |ui| {
+                        let others: Vec<(DocId, String)> = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, t)| *i != self.active && t.info().is_some())
+                            .map(|(_, t)| (t.id, t.title()))
+                            .collect();
+                        for (id, title) in others {
+                            if ui.button(title).clicked() {
+                                self.start_compare(Some(id));
+                                ui.close();
+                            }
+                        }
+                        if ui.button("Another file…").clicked() {
+                            self.start_compare(None);
+                            ui.close();
+                        }
+                    });
+                });
                 if ui.add_enabled(has_tab, egui::Button::new("Save optimized copy…")).clicked() {
                     self.optimize_dialog = Some(Default::default());
                 }
@@ -1890,7 +2088,16 @@ impl App {
                     .on_hover_text(tool.label());
             }
             ui.separator();
-            const SHAPES: [Tool; 6] = [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Polygon, Tool::Cloud];
+            const SHAPES: [Tool; 8] = [
+                Tool::Rect,
+                Tool::Ellipse,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Polygon,
+                Tool::Cloud,
+                Tool::Distance,
+                Tool::Area,
+            ];
             if SHAPES.contains(&self.tool) {
                 self.last_shape = self.tool;
             }
@@ -1976,21 +2183,32 @@ impl App {
                 }
                 ui.separator();
 
-                for (mode, icon) in LayoutMode::ALL.into_iter().zip([
+                // Page layout: one button showing the current layout, the others in its menu.
+                let layouts = LayoutMode::ALL.into_iter().zip([
                     icons::COLUMNS,
                     icons::ROWS,
                     icons::FILE,
                     icons::BOOK_OPEN,
                     icons::SQUARES_FOUR,
-                ]) {
-                    if ui
-                        .selectable_label(tab.mode == mode, icons::text(icon))
-                        .on_hover_text(format!("{} layout", mode.label()))
-                        .clicked()
-                    {
-                        tab.set_mode(mode);
+                ]);
+                let current = layouts.clone().find(|(m, _)| *m == tab.mode).map_or(icons::COLUMNS, |(_, i)| i);
+                ui.menu_button(icons::text(current), |ui| {
+                    for (i, (mode, icon)) in layouts.enumerate() {
+                        let picked = ui
+                            .horizontal(|ui| {
+                                let a = ui.selectable_label(tab.mode == mode, icons::text(icon));
+                                let b = ui.selectable_label(tab.mode == mode, kb(&format!("{}  Ctrl+{}", mode.label(), i + 1)));
+                                a.clicked() || b.clicked()
+                            })
+                            .inner;
+                        if picked {
+                            tab.set_mode(mode);
+                            ui.close();
+                        }
                     }
-                }
+                })
+                .response
+                .on_hover_text(format!("Page layout: {}", tab.mode.label()));
             });
 
             // Search, right-aligned.
@@ -2005,14 +2223,20 @@ impl App {
                     tab.search_step(false);
                 }
                 let all_before = self.search_all;
-                ui.toggle_value(&mut self.search_all, icons::text(icons::COPY))
-                    .on_hover_text("Search all open tabs");
                 let s = &mut tab.search;
                 let before = (s.match_case, s.whole_word);
-                ui.toggle_value(&mut s.whole_word, egui::RichText::new("ab").strong().underline())
-                    .on_hover_text("Whole words");
-                ui.toggle_value(&mut s.match_case, icons::text(icons::TEXT_AA))
-                    .on_hover_text("Match case");
+                // Search options in one menu (keeps the toolbar narrow); highlighted when
+                // any is on.
+                let any = s.match_case || s.whole_word || self.search_all;
+                let icon = icons::text(icons::TEXT_AA);
+                let icon = if any { icon.color(ui.visuals().selection.stroke.color) } else { icon };
+                ui.menu_button(icon, |ui| {
+                    ui.checkbox(&mut s.match_case, "Match case");
+                    ui.checkbox(&mut s.whole_word, "Whole words");
+                    ui.checkbox(&mut self.search_all, "All open tabs");
+                })
+                .response
+                .on_hover_text("Search options: match case, whole words, all open tabs");
                 if (before != (s.match_case, s.whole_word) || all_before != self.search_all) && s.submitted.is_some() {
                     submit = true;
                 }
@@ -2030,7 +2254,7 @@ impl App {
                     egui::TextEdit::singleline(&mut s.query)
                         .id(id)
                         .hint_text(kb("Search (Ctrl+F)"))
-                        .desired_width(160.0),
+                        .desired_width(150.0),
                 );
                 ui.label(icons::text(icons::MAGNIFYING_GLASS));
                 if self.focus_search {
@@ -2114,6 +2338,31 @@ impl App {
                 Tool::Line | Tool::Arrow => {
                     ui.label("Width");
                     changed |= width(ui, &mut style.shape_width);
+                }
+                Tool::Distance | Tool::Area => {
+                    ui.label("Width");
+                    changed |= width(ui, &mut style.shape_width);
+                    if tool == Tool::Area {
+                        ui.label("Fill");
+                        if let Some(f) = color_picker::color_button(ui, "tool_area_fill", style.shape_fill, true, recent) {
+                            style.shape_fill = f;
+                            changed = true;
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Scale 1 :");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut style.measure_ratio).range(0.001..=1_000_000.0).speed(1.0))
+                        .on_hover_text("1 for full size; 100 for a drawing at 1:100")
+                        .changed();
+                    egui::ComboBox::from_id_salt("measure_unit")
+                        .selected_text(style.measure_unit.clone())
+                        .width(50.0)
+                        .show_ui(ui, |ui| {
+                            for u in ["mm", "cm", "m", "km", "in", "ft"] {
+                                changed |= ui.selectable_value(&mut style.measure_unit, u.to_string(), u).changed();
+                            }
+                        });
                 }
                 Tool::Rect | Tool::Ellipse | Tool::Polygon | Tool::Cloud => {
                     ui.label("Width");
@@ -2422,6 +2671,7 @@ impl App {
                         ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
                         ("L / A / P / C", "Line, arrow, polygon, cloud (Enter or double-click finishes)"),
                         ("K / G", "Stamp, signature"),
+                        ("M", "Measure distance (area: in the shapes menu)"),
                         ("Ctrl+C / Ctrl+V on an annotation", "Copy it, paste it under the mouse"),
                         ("Del", "Delete the selected annotation or thumbnail pages"),
                         ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
@@ -2693,6 +2943,9 @@ impl eframe::App for App {
         if !self.tabs.is_empty() {
             egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
         }
+        if self.compare_panes().is_some() {
+            egui::Panel::top("compare").show(ui, |ui| self.compare_bar(ui));
+        }
 
         if let Some(tab) = self.tabs.get(self.active) {
             let status = match &tab.state {
@@ -2765,26 +3018,41 @@ impl eframe::App for App {
             if matches!(self.tool, Tool::Stamp | Tool::Signature) {
                 self.stamps.prepare(&self.settings);
             }
-            let tab = &mut self.tabs[self.active];
-            let signature = self.settings.signatures.get(self.settings.annot_style.signature);
-            document_view::show(
-                ui,
-                tab,
-                ViewContext {
-                    cache: &mut self.cache,
-                    recent_colors: &mut self.settings.recent_colors,
-                    tool: self.tool,
-                    night: self.settings.night_mode,
-                    style: &self.settings.annot_style,
-                    author: &self.settings.author,
-                    stamp: self.stamps.stamp(&self.settings.annot_style),
-                    signature,
-                    signature_image: self.stamps.signature_image(&self.settings.annot_style, &self.settings.signatures),
-                },
-            );
-            if let Some(e) = tab.error_message.take() {
-                self.error = Some(e);
+            let full = ui.available_rect_before_wrap();
+            let panes: Vec<(usize, egui::Rect)> = match self.compare_panes() {
+                Some((left, right)) => {
+                    let mid = full.center().x;
+                    let l = egui::Rect::from_min_max(full.min, egui::pos2(mid - 2.0, full.max.y));
+                    let r = egui::Rect::from_min_max(egui::pos2(mid + 2.0, full.min.y), full.max);
+                    ui.painter().rect_filled(egui::Rect::from_x_y_ranges(mid - 2.0..=mid + 2.0, full.y_range()), 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+                    vec![(left, l), (right, r)]
+                }
+                None => vec![(self.active, full)],
+            };
+            for (i, rect) in panes {
+                let tab = &mut self.tabs[i];
+                let signature = self.settings.signatures.get(self.settings.annot_style.signature);
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("pane", i)));
+                document_view::show(
+                    &mut child,
+                    tab,
+                    ViewContext {
+                        cache: &mut self.cache,
+                        recent_colors: &mut self.settings.recent_colors,
+                        tool: self.tool,
+                        night: self.settings.night_mode,
+                        style: &self.settings.annot_style,
+                        author: &self.settings.author,
+                        stamp: self.stamps.stamp(&self.settings.annot_style),
+                        signature,
+                        signature_image: self.stamps.signature_image(&self.settings.annot_style, &self.settings.signatures),
+                    },
+                );
+                if let Some(e) = tab.error_message.take() {
+                    self.error = Some(e);
+                }
             }
+            self.sync_comparison();
         });
         if crate::view::stamps::signatures_window(&ctx, &mut self.stamps, &mut self.settings) {
             self.settings.save();
@@ -2957,6 +3225,18 @@ fn virtual_key(key: Key) -> Option<u32> {
         Key::Delete => 0x2E,
         _ => return None,
     })
+}
+
+/// A comparison of two open documents.
+struct Comparison {
+    a: DocId,
+    b: DocId,
+    /// Pages with differences (None: still comparing).
+    diffs: Option<Vec<crate::engine::compare::PageDiff>>,
+    /// The change shown last (index into `diffs`).
+    current: Option<usize>,
+    /// Pages and zoom of both sides last frame, to follow scrolling and zooming.
+    last: Option<((usize, f32), (usize, f32))>,
 }
 
 /// What was clicked in a recent-files list.

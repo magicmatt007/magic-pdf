@@ -402,6 +402,18 @@ impl Worker {
                 }
                 Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
             },
+            Request::Compare { a, b } => {
+                let (Some(da), Some(db)) = (self.docs.get(&a), self.docs.get(&b)) else { return };
+                let words = |d: &OpenDoc, i: usize| {
+                    d.doc.page(i).map(|p| super::compare::words(&p.text())).unwrap_or_default()
+                };
+                let n = da.doc.page_count().max(db.doc.page_count());
+                let diffs = (0..n)
+                    .map(|i| super::compare::diff_page(i, &words(da, i), &words(db, i)))
+                    .filter(|d| !d.is_empty())
+                    .collect();
+                self.send(Response::Compared { a, b, diffs });
+            }
             Request::SaveOptimized { doc, path, image_dpi } => match self.save_optimized(doc, &path, image_dpi) {
                 Ok(message) => self.send(Response::Exported { message }),
                 Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),

@@ -2,6 +2,7 @@
 //! documents. PDFium is not thread-safe, so the UI only talks to it through channels.
 
 pub mod commands;
+pub mod compare;
 pub mod pages;
 pub mod ocr;
 mod lopdf_ops;
@@ -82,6 +83,7 @@ pub fn library_search_dirs() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use rich::Span;
+    use super::shapes;
     use std::time::Duration;
 
     fn recv(engine: &Engine) -> Response {
@@ -1883,6 +1885,86 @@ mod tests {
         assert!(c.before.ends_with("Magic PDF horizontal "), "{c:?}");
         assert!(c.after.starts_with(" page 1."), "{c:?}");
         assert!(c.before.chars().count() <= 42 && c.after.chars().count() <= 42, "{c:?}");
+    }
+
+    #[test]
+    fn comparing_finds_the_words_that_changed() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        // A copy with a footer on page 3 only.
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::HeaderFooter {
+                pages: vec![2],
+                spec: HeaderFooter {
+                    header: Default::default(),
+                    footer: ["".into(), "Draft copy".into(), "".into()],
+                    size: 10.0,
+                    color: [0, 0, 0],
+                    margin: 20.0,
+                    first_number: 1,
+                },
+            },
+        });
+        pages_changed(&engine);
+        let path = std::env::temp_dir().join(format!("magic-pdf-compare-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        open(&engine, 2, sample());
+        open(&engine, 3, path.clone());
+        engine.send(Request::Compare { a: 2, b: 3 });
+        let diffs = recv_until(&engine, |r| match r {
+            Response::Compared { a: 2, b: 3, diffs } => Some(diffs),
+            _ => None,
+        });
+        if let Some(dir) = std::env::var_os("MAGIC_PDF_KEEP_DIR") {
+            std::fs::copy(&path, PathBuf::from(dir).join("compare-b.pdf")).unwrap();
+        }
+        std::fs::remove_file(path).ok();
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        let d = &diffs[0];
+        assert_eq!(d.page, 2);
+        assert!(d.removed.is_empty());
+        assert_eq!(d.added.len(), 2, "two added words");
+        assert_eq!(d.summary, ["+ Draft copy"]);
+        // The marks sit near the bottom of the page.
+        assert!(d.added.iter().all(|r| r.bottom < 60.0), "{:?}", d.added);
+    }
+
+    #[test]
+    fn measurements_label_themselves_and_update_when_resized() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let mut d = NewAnnot::new(AnnotKind::Distance, pdf_box(0.0, 0.0, 0.0, 0.0), [0, 0, 200]);
+        d.vertices = vec![(100.0, 400.0), (172.0, 400.0)];
+        d.measure = Some(shapes::Scale::new(100.0, "m").encode());
+        let i = add(&engine, 1, d);
+        let mut area = NewAnnot::new(AnnotKind::Area, pdf_box(0.0, 0.0, 0.0, 0.0), [0, 0, 200]);
+        area.vertices = vec![(300.0, 300.0), (372.0, 300.0), (372.0, 372.0), (300.0, 372.0)];
+        area.measure = Some(shapes::Scale::new(1.0, "cm").encode());
+        let j = add(&engine, 1, area);
+        let list = annots(&engine, 1);
+        let get = |list: &[AnnotInfo], i: usize| list.iter().find(|a| a.index == i).unwrap().clone();
+        assert_eq!(get(&list, i).contents, "2.54 m");
+        assert_eq!(get(&list, i).kind, AnnotKind::Distance);
+        assert_eq!(get(&list, j).contents, "6.45 cm²");
+        // The label is drawn above the line (blue pixels there).
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        assert!(coloured(size, &rgba, (0.17, 0.49, 0.29, 0.52), 2) > 5, "label drawn");
+        // Stretching the line to twice its length doubles the measurement.
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: i,
+            change: AnnotChange {
+                transform: Some([2.0, 1.0, -100.0, 0.0]),
+                ..Default::default()
+            },
+        });
+        let list = annots(&engine, 1);
+        assert_eq!(get(&list, i).contents, "5.08 m");
+        let list = save_and_reopen(&engine, 1, "measure");
+        assert!(list.iter().any(|a| a.kind == AnnotKind::Area && a.contents == "6.45 cm²"));
     }
 }
 

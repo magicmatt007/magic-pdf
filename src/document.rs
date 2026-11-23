@@ -274,6 +274,8 @@ pub struct DocTab {
     /// Comments sidebar: filters and the reply being written.
     pub comment_filter: CommentFilter,
     pub reply_draft: String,
+    /// Comparison marks per page: rectangles and whether they are additions.
+    pub diff_marks: HashMap<usize, Vec<(PdfBox, bool)>>,
     /// Outline sidebar: the bookmark being renamed and its new title.
     pub outline_rename: Option<(Vec<usize>, String)>,
 }
@@ -339,6 +341,7 @@ impl DocTab {
             comment_filter: CommentFilter::default(),
             reply_draft: String::new(),
             outline_rename: None,
+            diff_marks: HashMap::new(),
         };
         if let Some(s) = saved {
             tab.mode = s.mode;

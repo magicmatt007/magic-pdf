@@ -39,10 +39,12 @@ pub enum Tool {
     Cloud,
     Stamp,
     Signature,
+    Distance,
+    Area,
 }
 
 impl Tool {
-    pub const ANNOTATION_TOOLS: [Tool; 14] = [
+    pub const ANNOTATION_TOOLS: [Tool; 16] = [
         Tool::Highlight,
         Tool::Underline,
         Tool::StrikeOut,
@@ -55,6 +57,8 @@ impl Tool {
         Tool::Arrow,
         Tool::Polygon,
         Tool::Cloud,
+        Tool::Distance,
+        Tool::Area,
         Tool::Stamp,
         Tool::Signature,
     ];
@@ -66,6 +70,8 @@ impl Tool {
             Tool::Arrow => Some(AnnotKind::Arrow),
             Tool::Polygon => Some(AnnotKind::Polygon),
             Tool::Cloud => Some(AnnotKind::Cloud),
+            Tool::Distance => Some(AnnotKind::Distance),
+            Tool::Area => Some(AnnotKind::Area),
             _ => None,
         }
     }
@@ -102,6 +108,8 @@ impl Tool {
             Tool::Cloud => icons::CLOUD,
             Tool::Stamp => icons::STAMP,
             Tool::Signature => icons::SIGNATURE,
+            Tool::Distance => icons::RULER,
+            Tool::Area => icons::AREA,
         })
     }
 
@@ -123,6 +131,8 @@ impl Tool {
             Tool::Cloud => "Cloud (C): click the corners, double-click or Enter to finish; or drag a rectangle",
             Tool::Stamp => "Stamp (K): click to place",
             Tool::Signature => "Signature (G): click to place",
+            Tool::Distance => "Measure distance (M), Shift: 45° steps",
+            Tool::Area => "Measure area: click the corners, double-click or Enter to finish",
         }
     }
 
@@ -134,7 +144,9 @@ impl Tool {
             Tool::StrikeOut => Some(&mut style.strikeout),
             Tool::Note => Some(&mut style.note),
             Tool::Ink => Some(&mut style.ink),
-            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Polygon | Tool::Cloud => Some(&mut style.shape),
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Polygon | Tool::Cloud | Tool::Distance | Tool::Area => {
+                Some(&mut style.shape)
+            }
             Tool::TextBox => Some(&mut style.textbox_border),
             Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
             Tool::Signature => Some(&mut style.signature_color),
@@ -675,7 +687,7 @@ fn draw_tool_input(
     pointer: Option<Pos2>,
 ) {
     let Some(pointer) = pointer else { return };
-    let poly_tool = matches!(cx.tool, Tool::Polygon | Tool::Cloud);
+    let poly_tool = matches!(cx.tool, Tool::Polygon | Tool::Cloud | Tool::Area);
     if poly_tool {
         // Clicks add corners; double-click, Enter or a click on the first corner finish.
         let at = screen_to_pdf(tab, pointer, view, match &tab.draft {
@@ -757,7 +769,7 @@ fn draw_tool_input(
                     }
                 }
                 Some(Draft::Shape { start, end, .. }) => {
-                    *end = if shift && matches!(cx.tool, Tool::Line | Tool::Arrow) { snap_45(*start, p) } else { p };
+                    *end = if shift && matches!(cx.tool, Tool::Line | Tool::Arrow | Tool::Distance) { snap_45(*start, p) } else { p };
                 }
                 Some(Draft::Poly { .. }) | None => {}
             }
@@ -782,12 +794,12 @@ fn draw_tool_input(
                 let stroke = points.iter().map(|p| (p.x, p.y)).collect();
                 create(tab, page, cx, AnnotKind::Ink, rect, style.ink, Vec::new(), vec![stroke]);
             }
-            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Line | Tool::Arrow) => {
+            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Line | Tool::Arrow | Tool::Distance) => {
                 if (end - start).length() >= 3.0 {
                     create_shape(tab, page, cx, vec![(start.x, start.y), (end.x, end.y)]);
                 }
             }
-            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Polygon | Tool::Cloud) => {
+            Draft::Shape { page, start, end } if matches!(cx.tool, Tool::Polygon | Tool::Cloud | Tool::Area) => {
                 // A dragged rectangle.
                 if (end.x - start.x).abs() >= 3.0 && (end.y - start.y).abs() >= 3.0 {
                     let pts = vec![(start.x, start.y), (end.x, start.y), (end.x, end.y), (start.x, end.y)];
@@ -876,7 +888,27 @@ fn create_shape(tab: &mut DocTab, page: usize, cx: &ViewContext<'_>, vertices: V
     annot.interior = if kind.has_interior() { style.shape_fill } else { None };
     annot.author = cx.author.to_string();
     annot.vertices = vertices;
+    if matches!(kind, AnnotKind::Distance | AnnotKind::Area) {
+        annot.measure = Some(measure_scale(style).encode());
+    }
     tab.outbox.push(Request::AddAnnot { doc: tab.id, page, annot });
+}
+
+/// The measuring scale chosen in the tool options.
+pub fn measure_scale(style: &AnnotStyle) -> crate::engine::shapes::Scale {
+    crate::engine::shapes::Scale::new(style.measure_ratio as f64, &style.measure_unit)
+}
+
+/// What a measurement being drawn reads.
+fn draft_measure(tool: Tool, pts: &[Pos2], style: &AnnotStyle) -> Option<String> {
+    use crate::engine::shapes::{Shape, measure_label};
+    let shape = match tool {
+        Tool::Distance => Shape::Distance,
+        Tool::Area => Shape::Area,
+        _ => return None,
+    };
+    let pts: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, p.y)).collect();
+    Some(measure_label(shape, &pts, &measure_scale(style))).filter(|s| !s.is_empty())
 }
 
 /// Finishes a polygon or cloud being clicked together.
@@ -1189,6 +1221,17 @@ fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect
     }
     let to_screen = |b: &PdfBox| pdf_box_to_screen(tab, page, b, view).unwrap_or(Rect::NOTHING);
 
+    // Comparison: removed words red, added words green.
+    for (r, added) in tab.diff_marks.get(&page).into_iter().flatten() {
+        let (fill, line) = if *added {
+            (Color32::from_rgba_unmultiplied(40, 200, 80, 70), Color32::from_rgb(20, 150, 60))
+        } else {
+            (Color32::from_rgba_unmultiplied(230, 40, 40, 60), Color32::from_rgb(200, 30, 30))
+        };
+        let s = to_screen(r).expand(1.0);
+        painter.rect(s, CornerRadius::same(2), fill, Stroke::new(1.0, line), StrokeKind::Outside);
+    }
+
     for (i, hit) in tab.search.hits.iter().enumerate() {
         if hit.page != page {
             continue;
@@ -1263,9 +1306,15 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
             for p in &pts[..points.len().min(pts.len())] {
                 painter.circle_filled(*p, 3.0, rgb(cx.style.shape));
             }
+            let label_at = pts.last().copied();
             painter.add(Shape::line(pts, stroke));
+            let mut corners = points.clone();
+            corners.extend(*hover);
+            if let (Some(at), Some(text)) = (label_at, draft_measure(cx.tool, &corners, cx.style)) {
+                measure_tag(painter, at, &text);
+            }
         }
-        Some(Draft::Shape { page, start, end }) if matches!(cx.tool, Tool::Line | Tool::Arrow) => {
+        Some(Draft::Shape { page, start, end }) if matches!(cx.tool, Tool::Line | Tool::Arrow | Tool::Distance) => {
             let (Some(a), Some(b)) = (pdf_to_screen(tab, *page, *start, view), pdf_to_screen(tab, *page, *end, view))
             else {
                 return;
@@ -1275,6 +1324,9 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
                 painter.arrow(a, b - a, stroke);
             } else {
                 painter.line_segment([a, b], stroke);
+            }
+            if let Some(text) = draft_measure(cx.tool, &[*start, *end], cx.style) {
+                measure_tag(painter, b, &text);
             }
         }
         Some(Draft::Shape { page, start, end }) => {
@@ -1303,6 +1355,14 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
         }
         None => {}
     }
+}
+
+/// A measurement read-out next to the pointer while drawing.
+fn measure_tag(painter: &egui::Painter, at: Pos2, text: &str) {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(13.0), Color32::WHITE);
+    let r = Rect::from_min_size(at + vec2(12.0, 8.0), galley.size() + vec2(10.0, 4.0));
+    painter.rect_filled(r, CornerRadius::same(4), Color32::from_black_alpha(200));
+    painter.galley(r.min + vec2(5.0, 2.0), galley, Color32::WHITE);
 }
 
 const HANDLE: f32 = 8.0;

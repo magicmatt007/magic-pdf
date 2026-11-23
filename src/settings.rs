@@ -59,6 +59,9 @@ pub struct AnnotStyle {
     /// Signature tool: the chosen saved signature and the ink colour of drawn ones.
     pub signature: usize,
     pub signature_color: Rgb,
+    /// Measuring: drawing scale 1:`measure_ratio`, results in `measure_unit`.
+    pub measure_ratio: f32,
+    pub measure_unit: String,
 }
 
 /// A saved signature.
@@ -108,6 +111,8 @@ impl Default for AnnotStyle {
             image_stamps: Vec::new(),
             signature: 0,
             signature_color: [10, 40, 140],
+            measure_ratio: 1.0,
+            measure_unit: "mm".into(),
         }
     }
 }

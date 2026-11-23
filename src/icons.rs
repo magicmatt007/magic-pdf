@@ -49,6 +49,8 @@ pub const CLOUD: &str = "\u{e1aa}";
 pub const STAMP: &str = "\u{ea48}";
 pub const SIGNATURE: &str = "\u{e3ac}"; // pen-nib
 pub const FUNNEL: &str = "\u{e266}";
+pub const RULER: &str = "\u{e6b8}";
+pub const AREA: &str = "\u{e69a}"; // selection
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

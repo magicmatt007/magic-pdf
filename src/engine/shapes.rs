@@ -13,6 +13,8 @@ use super::textbox::FontSet;
 pub const SHAPE_KEY: &str = "MagicPdfShape";
 pub const POINTS_KEY: &str = "MagicPdfPoints";
 pub const STAMP_KEY: &str = "MagicPdfStamp";
+/// Measurements: real units per PDF point and the unit, e.g. "0.0353 m".
+pub const MEASURE_KEY: &str = "MagicPdfMeasure";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
@@ -20,6 +22,166 @@ pub enum Shape {
     Arrow,
     Polygon,
     Cloud,
+    /// A measured distance (line with end marks and its length).
+    Distance,
+    /// A measured area (polygon with its area).
+    Area,
+}
+
+/// A measuring scale: real `unit`s per PDF point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scale {
+    pub per_point: f64,
+    pub unit: String,
+}
+
+impl Scale {
+    /// The scale for a drawing at 1:`ratio` measured in `unit` (mm, cm, m, km, in, ft).
+    pub fn new(ratio: f64, unit: &str) -> Scale {
+        let mm_per_unit = match unit {
+            "cm" => 10.0,
+            "m" => 1000.0,
+            "km" => 1_000_000.0,
+            "in" => 25.4,
+            "ft" => 304.8,
+            _ => 1.0,
+        };
+        Scale {
+            per_point: 25.4 / 72.0 * ratio / mm_per_unit,
+            unit: unit.to_string(),
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{} {}", self.per_point, self.unit)
+    }
+
+    pub fn decode(s: &str) -> Option<Scale> {
+        let (n, unit) = s.split_once(' ')?;
+        Some(Scale {
+            per_point: n.parse().ok()?,
+            unit: unit.to_string(),
+        })
+    }
+}
+
+fn number(v: f64) -> String {
+    let s = if v >= 100.0 {
+        format!("{v:.1}")
+    } else if v >= 1.0 {
+        format!("{v:.2}")
+    } else {
+        format!("{v:.3}")
+    };
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The length of a line or the area of a polygon, e.g. "12.5 m" or "3.2 m²".
+pub fn measure_label(shape: Shape, pts: &[(f32, f32)], scale: &Scale) -> String {
+    match shape {
+        Shape::Area if pts.len() >= 3 => {
+            let twice: f64 = (0..pts.len())
+                .map(|i| {
+                    let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                    a.0 as f64 * b.1 as f64 - b.0 as f64 * a.1 as f64
+                })
+                .sum();
+            format!("{} {}²", number(twice.abs() / 2.0 * scale.per_point * scale.per_point), scale.unit)
+        }
+        _ if pts.len() >= 2 => {
+            let len: f64 = pts.windows(2).map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64)).sum();
+            format!("{} {}", number(len * scale.per_point), scale.unit)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Text drawn with glyph outlines along the direction `dir` (unit vector), centred
+/// on `at`, its baseline `lift` points away from the line.
+fn label(fonts: &dyn FontSet, text: &str, size: f32, at: (f32, f32), dir: (f32, f32), lift: f32) -> String {
+    let f = fonts.font(true, false);
+    let w: f32 = text.chars().map(|c| f.advance(c) * size).sum();
+    // Keep text upright.
+    let dir = if dir.0 < -1e-3 || (dir.0.abs() <= 1e-3 && dir.1 < 0.0) { (-dir.0, -dir.1) } else { dir };
+    let up = (-dir.1, dir.0);
+    let origin = (at.0 - dir.0 * w / 2.0 + up.0 * lift, at.1 - dir.1 * w / 2.0 + up.1 * lift);
+    let mut s = format!(
+        "q {:.4} {:.4} {:.4} {:.4} {:.2} {:.2} cm\n",
+        dir.0, dir.1, up.0, up.1, origin.0, origin.1
+    );
+    let mut x = 0.0;
+    for c in text.chars() {
+        if !c.is_whitespace() {
+            f.outline(c, size, x, 0.0, &mut s);
+            s += "f\n";
+        }
+        x += f.advance(c) * size;
+    }
+    s += "Q\n";
+    s
+}
+
+/// Appearance of a measurement: the shape, its label, and the rectangle.
+pub fn measure_appearance(
+    shape: Shape,
+    pts: &[(f32, f32)],
+    color: Rgb,
+    width: f32,
+    fill: Option<Rgb>,
+    text: &str,
+    fonts: &dyn FontSet,
+) -> (PdfBox, String) {
+    let size = (width * 3.0 + 8.0).min(24.0);
+    let mut s = format!("q 1 J 1 j {width:.2} w {} RG {} rg\n", rgb(color), rgb(color));
+    let mut extent: Vec<(f32, f32)> = pts.to_vec();
+    match shape {
+        Shape::Distance if pts.len() >= 2 => {
+            let (a, b) = (pts[0], pts[pts.len() - 1]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+            let dir = (dx / len, dy / len);
+            let n = (-dir.1 * size * 0.5, dir.0 * size * 0.5);
+            s += &format!("{:.2} {:.2} m {:.2} {:.2} l S\n", a.0, a.1, b.0, b.1);
+            for p in [a, b] {
+                // End marks across the line.
+                s += &format!("{:.2} {:.2} m {:.2} {:.2} l S\n", p.0 - n.0, p.1 - n.1, p.0 + n.0, p.1 + n.1);
+                extent.extend([(p.0 - n.0, p.1 - n.1), (p.0 + n.0, p.1 + n.1)]);
+            }
+            let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+            s += &label(fonts, text, size, mid, dir, size * 0.35 + width);
+            let w: f32 = text.chars().map(|c| fonts.font(true, false).advance(c) * size).sum::<f32>() / 2.0 + 2.0;
+            let up = size * 1.3 + width;
+            extent.extend([
+                (mid.0 - w, mid.1 - up),
+                (mid.0 + w, mid.1 + up),
+                (mid.0 - w, mid.1 + up),
+                (mid.0 + w, mid.1 - up),
+            ]);
+        }
+        Shape::Area if pts.len() >= 3 => {
+            s += &format!("{:.2} {:.2} m ", pts[0].0, pts[0].1);
+            for p in &pts[1..] {
+                s += &format!("{:.2} {:.2} l ", p.0, p.1);
+            }
+            match fill {
+                Some(f) => s += &format!("h q {} rg B Q\n", rgb(f)),
+                None => s += "h S\n",
+            }
+            let n = pts.len() as f32;
+            let c = (pts.iter().map(|p| p.0).sum::<f32>() / n, pts.iter().map(|p| p.1).sum::<f32>() / n);
+            s += &format!("{} rg\n", rgb(color));
+            s += &label(fonts, text, size, c, (1.0, 0.0), -size * 0.35);
+        }
+        _ => {}
+    }
+    s += "Q\n";
+    let rect = bounds(extent).unwrap_or(PdfBox {
+        left: 0.0,
+        bottom: 0.0,
+        right: 1.0,
+        top: 1.0,
+    });
+    (rect.expand(width / 2.0 + 1.0), s)
 }
 
 impl Shape {
@@ -29,17 +191,19 @@ impl Shape {
             Shape::Arrow => "arrow",
             Shape::Polygon => "polygon",
             Shape::Cloud => "cloud",
+            Shape::Distance => "distance",
+            Shape::Area => "area",
         }
     }
 
     pub fn parse(s: &str) -> Option<Shape> {
-        [Shape::Line, Shape::Arrow, Shape::Polygon, Shape::Cloud]
+        [Shape::Line, Shape::Arrow, Shape::Polygon, Shape::Cloud, Shape::Distance, Shape::Area]
             .into_iter()
             .find(|k| k.name() == s)
     }
 
     pub fn closed(self) -> bool {
-        matches!(self, Shape::Polygon | Shape::Cloud)
+        matches!(self, Shape::Polygon | Shape::Cloud | Shape::Area)
     }
 }
 
@@ -178,13 +342,13 @@ pub fn appearance(shape: Shape, pts: &[(f32, f32)], color: Rgb, width: f32, fill
 pub fn ink_strokes(shape: Shape, pts: &[(f32, f32)], width: f32) -> Vec<Vec<(f32, f32)>> {
     match shape {
         _ if pts.len() < 2 => Vec::new(),
-        Shape::Line => vec![vec![pts[0], pts[pts.len() - 1]]],
+        Shape::Line | Shape::Distance => vec![vec![pts[0], pts[pts.len() - 1]]],
         Shape::Arrow => {
             let (a, b) = (pts[0], pts[pts.len() - 1]);
             let h = arrow_head(a, b, width);
             vec![vec![a, b], vec![h[1], h[0], h[2]]]
         }
-        Shape::Polygon => {
+        Shape::Polygon | Shape::Area => {
             let mut v = pts.to_vec();
             v.push(pts[0]);
             vec![v]
@@ -288,6 +452,17 @@ pub fn stamp_appearance(rect: PdfBox, title: &str, subtitle: &str, color: Rgb, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measurements_in_real_units() {
+        // 1:100 in metres: 72 pt (one inch on paper) is 2.54 m.
+        let scale = Scale::new(100.0, "m");
+        assert_eq!(measure_label(Shape::Distance, &[(0.0, 0.0), (72.0, 0.0)], &scale), "2.54 m");
+        let square = [(0.0, 0.0), (72.0, 0.0), (72.0, 72.0), (0.0, 72.0)];
+        assert_eq!(measure_label(Shape::Area, &square, &scale), "6.45 m²");
+        assert_eq!(measure_label(Shape::Distance, &[(0.0, 0.0), (0.0, 72.0)], &Scale::new(1.0, "mm")), "25.4 mm");
+        assert_eq!(Scale::decode(&scale.encode()), Some(scale));
+    }
 
     #[test]
     fn points_round_trip() {

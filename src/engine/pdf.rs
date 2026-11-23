@@ -10,7 +10,7 @@ use pdfium_render::prelude::*;
 
 use super::commands::*;
 use super::rich::{CharStyle, RichText};
-use super::shapes::{self, POINTS_KEY, SHAPE_KEY, STAMP_KEY, Shape};
+use super::shapes::{self, MEASURE_KEY, POINTS_KEY, SHAPE_KEY, STAMP_KEY, Shape};
 use super::textbox::{self, BoxStyle, FontSet, GlyphSource};
 
 /// Private keys for comment threads and review status.
@@ -1493,6 +1493,8 @@ impl<'d> Page<'d> {
         n.vertices = info.vertices.clone();
         n.status = info.status.clone();
         n.replies = serde_json::from_str(&self.annot_string(&a, REPLIES_KEY)).unwrap_or_default();
+        let measure = self.annot_string(&a, MEASURE_KEY);
+        n.measure = (!measure.is_empty()).then_some(measure);
         if let Some(rich) = info.rich {
             n.font_size = info.font_size.unwrap_or(12.0);
             n.text_color = info.text_color.unwrap_or([0, 0, 0]);
@@ -1635,6 +1637,9 @@ impl<'d> Page<'d> {
             if let Some(shape) = shape {
                 lib.FPDFAnnot_SetStringValue_str(a.handle, SHAPE_KEY, shape.name());
                 lib.FPDFAnnot_SetStringValue_str(a.handle, POINTS_KEY, &shapes::encode_points(&n.vertices));
+                if let Some(m) = &n.measure {
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, MEASURE_KEY, m);
+                }
             }
             if !n.replies.is_empty() {
                 let json = serde_json::to_string(&n.replies).unwrap_or_default();
@@ -1831,7 +1836,15 @@ impl<'d> Page<'d> {
                 let color = self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]);
                 let fill = if shape.closed() { self.annot_color(&a, COLORTYPE_INTERIOR) } else { None };
                 let pts = shapes::decode_points(&self.annot_string(&a, POINTS_KEY));
-                let (rect, content) = shapes::appearance(shape, &pts, color, width, fill);
+                let (rect, content) = match shapes::Scale::decode(&self.annot_string(&a, MEASURE_KEY)) {
+                    Some(scale) if matches!(shape, Shape::Distance | Shape::Area) => {
+                        let text = shapes::measure_label(shape, &pts, &scale);
+                        // The measurement is also the annotation's comment.
+                        unsafe { lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", &text) };
+                        shapes::measure_appearance(shape, &pts, color, width, fill, &text, fonts)
+                    }
+                    _ => shapes::appearance(shape, &pts, color, width, fill),
+                };
                 self.set_rect(&a, rect);
                 set_ap(&content)
             }

@@ -206,6 +206,9 @@ pub enum AnnotKind {
     Arrow,
     Polygon,
     Cloud,
+    /// Measurements drawn with magic-pdf.
+    Distance,
+    Area,
     Other,
 }
 
@@ -227,6 +230,8 @@ impl AnnotKind {
             AnnotKind::Arrow => "Arrow",
             AnnotKind::Polygon => "Polygon",
             AnnotKind::Cloud => "Cloud",
+            AnnotKind::Distance => "Distance",
+            AnnotKind::Area => "Area",
             AnnotKind::Other => "Annotation",
         }
     }
@@ -255,6 +260,8 @@ impl AnnotKind {
             AnnotKind::Arrow => Some(Shape::Arrow),
             AnnotKind::Polygon => Some(Shape::Polygon),
             AnnotKind::Cloud => Some(Shape::Cloud),
+            AnnotKind::Distance => Some(Shape::Distance),
+            AnnotKind::Area => Some(Shape::Area),
             _ => None,
         }
     }
@@ -266,6 +273,8 @@ impl AnnotKind {
             Shape::Arrow => AnnotKind::Arrow,
             Shape::Polygon => AnnotKind::Polygon,
             Shape::Cloud => AnnotKind::Cloud,
+            Shape::Distance => AnnotKind::Distance,
+            Shape::Area => AnnotKind::Area,
         }
     }
 
@@ -294,7 +303,12 @@ impl AnnotKind {
     pub fn has_interior(self) -> bool {
         matches!(
             self,
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText | AnnotKind::Polygon | AnnotKind::Cloud
+            AnnotKind::Square
+                | AnnotKind::Circle
+                | AnnotKind::FreeText
+                | AnnotKind::Polygon
+                | AnnotKind::Cloud
+                | AnnotKind::Area
         )
     }
 }
@@ -332,6 +346,8 @@ pub struct NewAnnot {
     /// Comment thread and review status.
     pub replies: Vec<Reply>,
     pub status: String,
+    /// Measurements: the scale (see `shapes::Scale::encode`).
+    pub measure: Option<String>,
 }
 
 /// What a new stamp shows.
@@ -375,6 +391,7 @@ impl NewAnnot {
             stamp: None,
             replies: Vec::new(),
             status: String::new(),
+            measure: None,
         }
     }
 
@@ -634,6 +651,11 @@ pub enum Request {
         path: PathBuf,
         at: usize,
     },
+    /// Compare the text of two open documents page by page; answered with `Compared`.
+    Compare {
+        a: DocId,
+        b: DocId,
+    },
     /// Write a smaller copy of the document to `path`: losslessly compressed, and with
     /// images above `image_dpi` scaled down (JPEG) when set.
     SaveOptimized {
@@ -790,6 +812,12 @@ pub enum Response {
     },
     Clipboard {
         text: String,
+    },
+    /// Text differences between two documents (pages with changes only).
+    Compared {
+        a: DocId,
+        b: DocId,
+        diffs: Vec<super::compare::PageDiff>,
     },
     PrintReady {
         job: PrintJob,
