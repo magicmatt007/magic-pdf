@@ -19,6 +19,7 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   open tabs at once
 - Text selection and copy, internal and external links
 - Tabs, recent files, drag & drop, password-protected files, night mode
+- Presentation mode (F5): full screen, one page at a time; arrows, space or a click go on, Esc ends
 - English and German interface
 
 - Annotations: highlight, underline, strikeout, sticky notes, rich text boxes typed
@@ -212,6 +213,7 @@ Tesseract with English is not installed.
 | Ctrl+D | Document properties |
 | Ctrl+, | Settings |
 | F9 | Sidebar |
+| F5 / Esc | Start / end the presentation |
 
 ## License
 

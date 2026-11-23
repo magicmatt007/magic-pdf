@@ -115,6 +115,10 @@ pub struct App {
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
     optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
     images_dialog: Option<crate::view::page_tools::ImagesDialog>,
+    /// Presentation mode (full screen, one page at a time) and what to restore after.
+    presenting: Option<Presentation>,
+    /// Debug aid (screenshots): start a presentation once the document is ready.
+    present_on_load: bool,
     /// Tabs being moved to another window, waiting for their export.
     moves: HashMap<DocId, MoveTarget>,
     /// Temporary files of tabs received from other windows, deleted once opened.
@@ -124,6 +128,18 @@ pub struct App {
     update_events: (Sender<UpdateEvent>, Receiver<UpdateEvent>),
     /// Installer to run when magic-pdf exits (after an update was accepted).
     pending_installer: Option<PathBuf>,
+}
+
+/// The view a presentation started from, restored when it ends.
+struct Presentation {
+    doc: DocId,
+    mode: LayoutMode,
+    fit: crate::view::viewport::FitMode,
+    zoom: f32,
+    sidebar: bool,
+    tool: Tool,
+    /// When it started (for the "Esc ends" hint).
+    since: f64,
 }
 
 /// Results from background update work.
@@ -260,6 +276,8 @@ impl App {
             hf_dialog: None,
             optimize_dialog: None,
             images_dialog: None,
+            presenting: None,
+            present_on_load: false,
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
@@ -278,6 +296,7 @@ impl App {
                 app.tool = *t;
             }
             app.show_settings = wanted == "settings";
+            app.present_on_load = wanted == "present";
         }
         let day = 24 * 60 * 60;
         if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
@@ -1794,9 +1813,170 @@ impl App {
         }
     }
 
+    /// Menu, toolbar, tab bar, notice bars and status bar.
+    fn panels(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        if Tool::ANNOTATION_TOOLS.contains(&self.tool) {
+            egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
+        }
+        if !self.tabs.is_empty() {
+            egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
+        }
+        if self.compare_panes().is_some() {
+            egui::Panel::top("compare").show(ui, |ui| self.compare_bar(ui));
+        }
+        if self.tabs.get(self.active).is_some_and(|t| self.einvoices.contains_key(&t.id)) {
+            egui::Panel::top("einvoice").show(ui, |ui| self.einvoice_bar(ui));
+        }
+        if self.tabs.get(self.active).is_some_and(|t| self.tool == Tool::Redact || !t.redactions.is_empty()) {
+            egui::Panel::top("redaction").show(ui, |ui| self.redaction_bar(ui));
+        }
+
+        if let Some(tab) = self.tabs.get(self.active) {
+            let status = match &tab.state {
+                LoadState::Ready(info) => format!(
+                    "{}   ·   {}   ·   {:.0}%{}{}",
+                    tf("Page {page} of {pages}", &[("page", &(tab.current_page + 1)), ("pages", &info.page_sizes.len())]),
+                    tab.mode.label(),
+                    tab.zoom_percent(),
+                    info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default(),
+                    if tab.dirty { format!("   ·   {}", t("unsaved changes")) } else { String::new() }
+                ),
+                LoadState::Loading => t("Loading…").into(),
+                LoadState::NeedsPassword { .. } => t("Password required").into(),
+                LoadState::Failed(_) => t("Failed to open").into(),
+            };
+            let now = ctx.input(|i| i.time);
+            let notice = self
+                .notice
+                .as_ref()
+                .filter(|(_, t)| now - t < 6.0)
+                .map(|(n, _)| n.clone());
+            if notice.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
+            egui::Panel::bottom("status").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak(status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match notice {
+                        Some(n) => {
+                            ui.strong(n);
+                        }
+                        None => {
+                            ui.weak(tab.path.display().to_string());
+                        }
+                    });
+                });
+            });
+        }
+
+    }
+
+    /// "Esc ends the presentation", shown for a few seconds after it starts.
+    fn presentation_hint(&self, ctx: &egui::Context) {
+        let Some(p) = &self.presenting else { return };
+        let age = ctx.input(|i| i.time) - p.since;
+        if age < 3.0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            egui::Area::new(egui::Id::unique("presentation_hint"))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(t("Presentation: arrows, space or click for the next page; Esc ends"));
+                    });
+                });
+        }
+    }
+
+    fn start_presentation(&mut self, ctx: &egui::Context) {
+        let tool = self.tool;
+        let sidebar = self.settings.show_sidebar;
+        let Some(tab) = self.tabs.get_mut(self.active).filter(|t| t.info().is_some()) else { return };
+        self.presenting = Some(Presentation {
+            doc: tab.id,
+            mode: tab.mode,
+            fit: tab.viewport.fit,
+            zoom: tab.viewport.zoom,
+            sidebar,
+            tool,
+            since: ctx.input(|i| i.time),
+        });
+        tab.cancel_interaction();
+        tab.set_mode(LayoutMode::SinglePage);
+        tab.viewport.fit = crate::view::viewport::FitMode::Page;
+        self.tool = Tool::Hand;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+    }
+
+    fn end_presentation(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.presenting.take() else { return };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        self.tool = p.tool;
+        self.settings.show_sidebar = p.sidebar;
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == p.doc) {
+            let page = tab.current_page;
+            tab.set_mode(p.mode);
+            tab.viewport.fit = p.fit;
+            tab.viewport.zoom = p.zoom;
+            tab.goto_page(page);
+        }
+    }
+
+    /// Keys and clicks during a presentation. True if presenting (other shortcuts off).
+    fn presentation_input(&mut self, ctx: &egui::Context) -> bool {
+        let Some(p) = &self.presenting else { return false };
+        let Some(tab) = self.tabs.get_mut(self.active).filter(|t| t.id == p.doc) else {
+            self.end_presentation(ctx);
+            return false;
+        };
+        let mut end = false;
+        ctx.input_mut(|i| {
+            for key in [Key::ArrowRight, Key::ArrowDown, Key::PageDown, Key::Space, Key::Enter] {
+                while i.consume_key(Modifiers::NONE, key) {
+                    tab.step_page(true);
+                }
+            }
+            for key in [Key::ArrowLeft, Key::ArrowUp, Key::PageUp, Key::Backspace] {
+                while i.consume_key(Modifiers::NONE, key) {
+                    tab.step_page(false);
+                }
+            }
+            if i.consume_key(Modifiers::NONE, Key::Home) {
+                tab.goto_page(0);
+            }
+            if i.consume_key(Modifiers::NONE, Key::End) {
+                tab.goto_page(usize::MAX);
+            }
+            if i.pointer.button_clicked(egui::PointerButton::Primary) {
+                tab.step_page(true);
+            }
+            if i.pointer.button_clicked(egui::PointerButton::Secondary) {
+                tab.step_page(false);
+            }
+            end = i.consume_key(Modifiers::NONE, Key::Escape) || i.consume_key(Modifiers::NONE, Key::F5);
+        });
+        if end {
+            self.end_presentation(ctx);
+        }
+        true
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cmd = Modifiers::COMMAND;
         let shortcut = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
+        if self.present_on_load && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
+            self.present_on_load = false;
+            self.start_presentation(ctx);
+        }
+        if self.presentation_input(ctx) {
+            return;
+        }
+        if shortcut(Modifiers::NONE, Key::F5) {
+            self.start_presentation(ctx);
+            return;
+        }
 
         if shortcut(cmd, Key::O) {
             self.open_dialog();
@@ -2245,6 +2425,10 @@ impl App {
                     {
                         t.set_mode(mode);
                     }
+                }
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Presentation\tF5")))).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.start_presentation(&ctx);
                 }
                 ui.separator();
                 for fit in [FitMode::Width, FitMode::Height, FitMode::Page] {
@@ -2951,6 +3135,7 @@ impl App {
                         ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
                         ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
                         ("F9", "Toggle sidebar"),
+                        ("F5, Esc", "Start / end the presentation (arrows, space, click: next page)"),
                         ("Ctrl+,", "Settings"),
                         ("Ctrl+D", "Document properties"),
                         ("Middle-drag", "Pan with any tool"),
@@ -3223,64 +3408,14 @@ impl eframe::App for App {
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
 
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        if Tool::ANNOTATION_TOOLS.contains(&self.tool) {
-            egui::Panel::top("tool_options").show(ui, |ui| self.tool_options(ui));
+        let presenting = self.presenting.is_some();
+        if presenting {
+            self.presentation_hint(&ctx);
+        } else {
+            self.panels(ui, &ctx);
         }
-        if !self.tabs.is_empty() {
-            egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
-        }
-        if self.compare_panes().is_some() {
-            egui::Panel::top("compare").show(ui, |ui| self.compare_bar(ui));
-        }
-        if self.tabs.get(self.active).is_some_and(|t| self.einvoices.contains_key(&t.id)) {
-            egui::Panel::top("einvoice").show(ui, |ui| self.einvoice_bar(ui));
-        }
-        if self.tabs.get(self.active).is_some_and(|t| self.tool == Tool::Redact || !t.redactions.is_empty()) {
-            egui::Panel::top("redaction").show(ui, |ui| self.redaction_bar(ui));
-        }
-
-        if let Some(tab) = self.tabs.get(self.active) {
-            let status = match &tab.state {
-                LoadState::Ready(info) => format!(
-                    "{}   ·   {}   ·   {:.0}%{}{}",
-                    tf("Page {page} of {pages}", &[("page", &(tab.current_page + 1)), ("pages", &info.page_sizes.len())]),
-                    tab.mode.label(),
-                    tab.zoom_percent(),
-                    info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default(),
-                    if tab.dirty { format!("   ·   {}", t("unsaved changes")) } else { String::new() }
-                ),
-                LoadState::Loading => t("Loading…").into(),
-                LoadState::NeedsPassword { .. } => t("Password required").into(),
-                LoadState::Failed(_) => t("Failed to open").into(),
-            };
-            let now = ctx.input(|i| i.time);
-            let notice = self
-                .notice
-                .as_ref()
-                .filter(|(_, t)| now - t < 6.0)
-                .map(|(n, _)| n.clone());
-            if notice.is_some() {
-                ctx.request_repaint_after(std::time::Duration::from_secs(1));
-            }
-            egui::Panel::bottom("status").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.weak(status);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match notice {
-                        Some(n) => {
-                            ui.strong(n);
-                        }
-                        None => {
-                            ui.weak(tab.path.display().to_string());
-                        }
-                    });
-                });
-            });
-        }
-
         let mut page_actions = Vec::new();
-        if self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
+        if !presenting && self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
             let thumb_width = &mut self.settings.thumb_width;
             let author = &self.settings.author;
             let all = self.search_all && self.sidebar_tab == SidebarTab::Search && self.tabs.len() > 1;
@@ -3352,6 +3487,7 @@ impl eframe::App for App {
                         stamp: self.stamps.stamp(&self.settings.annot_style),
                         signature,
                         signature_image: self.stamps.signature_image(&self.settings.annot_style, &self.settings.signatures),
+                        presenting,
                     },
                 );
                 if let Some(e) = tab.error_message.take() {

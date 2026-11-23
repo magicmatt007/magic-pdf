@@ -174,6 +174,8 @@ pub struct ViewContext<'a> {
     pub signature: Option<&'a Signature>,
     /// The picture of an image signature.
     pub signature_image: Option<&'a StampSpec>,
+    /// Presentation mode: pages on black.
+    pub presenting: bool,
 }
 
 const SEARCH_COLOR: Color32 = Color32::from_rgba_premultiplied(120, 100, 0, 90);
@@ -189,7 +191,9 @@ pub fn rgb(c: Rgb) -> Color32 {
 
 pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
     let (view, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-    let bg = if cx.night {
+    let bg = if cx.presenting {
+        Color32::BLACK
+    } else if cx.night {
         Color32::from_gray(24)
     } else {
         Color32::from_gray(96)
@@ -2290,6 +2294,7 @@ mod tests {
                         stamp,
                         signature: None,
                         signature_image: None,
+                        presenting: false,
                     },
                 );
             });

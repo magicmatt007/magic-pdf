@@ -466,4 +466,8 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Resolution", "Auflösung"),
     ("One file per page, named after the document and the page number. PNG keeps text sharp; JPEG is smaller for photos.", "Eine Datei pro Seite, benannt nach Dokument und Seitenzahl. PNG hält Text scharf; JPEG ist bei Fotos kleiner."),
     ("Saved {n} pictures to {dir}", "{n} Bilder gespeichert in {dir}"),
+    ("Presentation\tF5", "Präsentation\tF5"),
+    ("Presentation: arrows, space or click for the next page; Esc ends", "Präsentation: Pfeiltasten, Leertaste oder Klick für die nächste Seite; Esc beendet"),
+    ("F5, Esc", "F5, Esc"),
+    ("Start / end the presentation (arrows, space, click: next page)", "Präsentation starten / beenden (Pfeiltasten, Leertaste, Klick: nächste Seite)"),
 ];
