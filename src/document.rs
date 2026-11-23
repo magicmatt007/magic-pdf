@@ -214,6 +214,10 @@ pub struct DocTab {
     pub page_input: String,
 
     pub pending_goto: Option<usize>,
+    /// Page to scroll into view without moving it to the top (grid keyboard focus).
+    pub pending_show: Option<usize>,
+    /// Page the arrow keys have moved to in the grid overview (Enter opens it).
+    pub grid_focus: Option<usize>,
     pub pending_reveal: Option<(usize, PdfBox)>,
     /// Scroll request in screen points, applied by the view.
     pub pending_scroll: Vec2,
@@ -327,6 +331,8 @@ impl DocTab {
             mark_dirty_on_open: false,
             draft: None,
             redactions: Vec::new(),
+            pending_show: None,
+            grid_focus: None,
             redact_drag: None,
             annot_drag: None,
             nudge: Vec2::ZERO,
@@ -600,6 +606,7 @@ impl DocTab {
 
     pub fn set_mode(&mut self, mode: LayoutMode) {
         if self.mode != mode {
+            self.grid_focus = None;
             if mode == LayoutMode::Grid {
                 self.mode_before_grid = self.mode;
             }
@@ -612,8 +619,29 @@ impl DocTab {
         }
     }
 
+    /// Moves the grid focus by `dx` pages or `dy` rows.
+    pub fn grid_move(&mut self, dx: i64, dy: i64) {
+        let rows = &self.layout.rows;
+        let n = self.page_count();
+        if rows.is_empty() || n == 0 {
+            return;
+        }
+        let cur = self.grid_focus.unwrap_or(self.current_page).min(n - 1);
+        let page = if dy == 0 {
+            (cur as i64 + dx).clamp(0, n as i64 - 1) as usize
+        } else {
+            let r = rows.iter().position(|r| r.contains(&cur)).unwrap_or(0);
+            let c = rows[r].iter().position(|&p| p == cur).unwrap_or(0);
+            let target = &rows[(r as i64 + dy).clamp(0, rows.len() as i64 - 1) as usize];
+            target[c.min(target.len() - 1)]
+        };
+        self.grid_focus = Some(page);
+        self.pending_show = Some(page);
+    }
+
     /// Leaves the grid overview and shows `page` in the layout used before it.
     pub fn open_from_grid(&mut self, page: usize) {
+        self.grid_focus = None;
         self.set_current_page(page);
         self.set_mode(reading_mode(self.mode_before_grid));
     }
@@ -884,6 +912,26 @@ mod tests {
         assert_eq!(tab.mode, LayoutMode::Facing);
         assert_eq!(tab.current_page, 7);
         assert_eq!(tab.pending_goto, Some(7));
+
+        // Arrow keys in the grid: by page, by row (same column, clamped), Enter opens.
+        let mut tab = DocTab::new(3, PathBuf::from("z.pdf"), LayoutMode::Grid, None);
+        tab.layout.rows = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7]];
+        tab.state = LoadState::Ready(DocInfo {
+            page_sizes: vec![(595.0, 842.0); 8],
+            ..Default::default()
+        });
+        tab.grid_move(1, 0);
+        assert_eq!(tab.grid_focus, Some(1));
+        tab.grid_move(0, 1);
+        assert_eq!(tab.grid_focus, Some(4));
+        tab.grid_move(1, 0);
+        tab.grid_move(0, 1);
+        assert_eq!(tab.grid_focus, Some(7), "last row is shorter");
+        tab.grid_move(0, 5);
+        assert_eq!(tab.grid_focus, Some(7));
+        tab.grid_move(-20, 0);
+        assert_eq!(tab.grid_focus, Some(0));
+        assert_eq!(tab.pending_show, Some(0));
 
         // Starting in the grid falls back to the vertical layout.
         let mut tab = DocTab::new(2, PathBuf::from("y.pdf"), LayoutMode::Grid, None);

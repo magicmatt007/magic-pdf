@@ -229,6 +229,12 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
     update_current_page(tab, view);
 
     paint_pages(ui, tab, view, &mut cx);
+    if tab.mode == LayoutMode::Grid
+        && let Some(rect) = tab.grid_focus.and_then(|p| tab.layout.page_rect(p))
+    {
+        let s = tab.viewport.rect_to_screen(rect, view).expand(4.0);
+        ui.painter_at(view).rect_stroke(s, CornerRadius::same(3), Stroke::new(3.0, Color32::from_rgb(30, 120, 255)), StrokeKind::Outside);
+    }
     selection_toolbar(ui, tab, view, &cx);
     annotation_popup(ui, tab, view, cx.recent_colors);
 }
@@ -526,9 +532,14 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     let Some((_, pdf_pt)) = screen_to_pdf(tab, pointer, view, Some(page)) else { return };
 
     // Grid overview: double-click a page to open it in the previous layout.
-    if tab.mode == LayoutMode::Grid && matches!(tool, Tool::Hand | Tool::SelectText) && response.double_clicked() {
-        tab.open_from_grid(page);
-        return;
+    if tab.mode == LayoutMode::Grid && matches!(tool, Tool::Hand | Tool::SelectText) {
+        if response.double_clicked() {
+            tab.open_from_grid(page);
+            return;
+        }
+        if response.clicked() {
+            tab.grid_focus = Some(page);
+        }
     }
 
     // Stamps and signatures: a click places them.
@@ -1104,6 +1115,12 @@ fn nearest_char(text: &crate::engine::PageText, p: Pos2) -> Option<usize> {
 }
 
 fn apply_pending_navigation(tab: &mut DocTab, view: Rect) {
+    if let Some(page) = tab.pending_show.take() {
+        tab.relayout(view.size());
+        if let Some(rect) = tab.layout.page_rect(page) {
+            tab.viewport.reveal(rect.expand(GAP / 2.0), view);
+        }
+    }
     if let Some(page) = tab.pending_goto.take() {
         let page = page.min(tab.page_count().saturating_sub(1));
         tab.set_current_page(page);

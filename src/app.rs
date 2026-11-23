@@ -1989,6 +1989,24 @@ impl App {
                 }
             });
         }
+        // Grid overview: arrow keys move between pages, Enter opens the one marked.
+        if tab.mode == LayoutMode::Grid && !can_nudge && matches!(self.tool, Tool::Hand | Tool::SelectText) {
+            ctx.input_mut(|i| {
+                for (key, dx, dy) in [
+                    (Key::ArrowLeft, -1, 0),
+                    (Key::ArrowRight, 1, 0),
+                    (Key::ArrowUp, 0, -1),
+                    (Key::ArrowDown, 0, 1),
+                ] {
+                    while i.consume_key(Modifiers::NONE, key) {
+                        tab.grid_move(dx, dy);
+                    }
+                }
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    tab.open_from_grid(tab.grid_focus.unwrap_or(tab.current_page));
+                }
+            });
+        }
         let horizontal = tab.mode.is_horizontal();
         let single = tab.mode == LayoutMode::SinglePage;
         let view = tab.view_rect;
@@ -2905,6 +2923,7 @@ impl App {
                         ("Space / Shift+Space", "Scroll one screen"),
                         ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
                         ("Double-click a page in the grid", "Open it in the previous layout"),
+                        ("Arrows, Enter in the grid", "Move between pages, open the marked one"),
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
                         ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),

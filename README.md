@@ -10,7 +10,8 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 ## Features
 
 - Layouts: horizontal, vertical, single page, facing (cover + pairs), grid overview
-  (double-click a page to open it in the previous layout); per-file memory
+  (double-click a page, or move with the arrow keys and press Enter, to open it in the
+  previous layout); per-file memory
 - Fit width / height / page, zoom presets, Ctrl+wheel zoom around the cursor, rotation;
   sharp tiles at high zoom
 - Thumbnails, outline/bookmarks, attachments
@@ -193,6 +194,7 @@ Tesseract with English is not installed.
 | PgUp/PgDn, Home/End, Space | Page navigation |
 | Ctrl+1…5 | Horizontal, vertical, single, facing, grid |
 | Double-click a page in the grid | Open it in the previous layout |
+| Arrows, Enter in the grid | Move between pages, open the marked one |
 | Ctrl+R / Ctrl+Shift+R | Rotate |
 | H / S | Hand / text-select tool |
 | U / N / T / D / R / E | Highlight, note, text box, draw, rectangle, ellipse |
