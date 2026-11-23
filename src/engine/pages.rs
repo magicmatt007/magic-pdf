@@ -56,6 +56,19 @@ pub enum PageOp {
     SetOutline {
         outline: Vec<super::commands::OutlineItem>,
     },
+    /// Writes a watermark text across the pages (replacing one magic-pdf added before).
+    Watermark {
+        pages: Vec<usize>,
+        spec: Watermark,
+    },
+    /// Removes watermarks magic-pdf added.
+    RemoveWatermark {
+        pages: Vec<usize>,
+    },
+    /// Makes annotations and form fields part of the page content (no longer editable).
+    Flatten {
+        pages: Vec<usize>,
+    },
     /// Removes everything under the areas (PDF page space) for good: text, image
     /// pixels, shapes and annotations, and paints the areas black.
     Redact {
@@ -102,6 +115,21 @@ impl HeaderFooter {
         text.replace("{page}", &(first_number + index as i64).to_string())
             .replace("{pages}", &(first_number + count as i64 - 1).to_string())
     }
+}
+
+/// A text drawn across the page centre.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Watermark {
+    pub text: String,
+    /// Largest font size (points); smaller if the text would not fit the page.
+    pub size: f32,
+    pub color: super::commands::Rgb,
+    /// 0 (invisible) to 1 (opaque).
+    pub opacity: f32,
+    /// Counter-clockwise, as the page is displayed; None: along the diagonal.
+    pub angle: Option<f32>,
+    /// Drawn under the page content instead of over it.
+    pub behind: bool,
 }
 
 /// How page numbers change with an operation.
@@ -154,6 +182,9 @@ impl PageOp {
             PageOp::SetOutline { .. } => "Edit bookmarks",
             PageOp::SetProperties { .. } => "Document properties",
             PageOp::Redact { .. } => "Redact",
+            PageOp::Watermark { .. } => "Watermark",
+            PageOp::RemoveWatermark { .. } => "Remove watermark",
+            PageOp::Flatten { .. } => "Flatten annotations and form fields",
         }
     }
 
@@ -186,7 +217,10 @@ impl PageOp {
             PageOp::Rotate { pages, .. }
             | PageOp::Crop { pages, .. }
             | PageOp::HeaderFooter { pages, .. }
-            | PageOp::RemoveHeaderFooter { pages } => in_range(pages),
+            | PageOp::RemoveHeaderFooter { pages }
+            | PageOp::Watermark { pages, .. }
+            | PageOp::RemoveWatermark { pages }
+            | PageOp::Flatten { pages } => in_range(pages),
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Ok(()),
             PageOp::TextLayer { pages, .. } => in_range(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::Redact { areas } => in_range(&areas.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
@@ -240,7 +274,10 @@ impl PageOp {
             PageOp::Rotate { pages, .. }
             | PageOp::Crop { pages, .. }
             | PageOp::HeaderFooter { pages, .. }
-            | PageOp::RemoveHeaderFooter { pages } => PageMapping {
+            | PageOp::RemoveHeaderFooter { pages }
+            | PageOp::Watermark { pages, .. }
+            | PageOp::RemoveWatermark { pages }
+            | PageOp::Flatten { pages } => PageMapping {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: sorted_unique(pages),

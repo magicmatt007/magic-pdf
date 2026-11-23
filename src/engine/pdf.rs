@@ -37,6 +37,8 @@ const FPDF_MATCHWHOLEWORD: c_ulong = 0x2;
 
 /// Marked-content tag of header and footer texts magic-pdf adds.
 const HEADER_FOOTER_MARK: &str = "MagicPdfHeaderFooter";
+/// Marked-content tag of watermarks magic-pdf adds.
+const WATERMARK_MARK: &str = "MagicPdfWatermark";
 const SUBTYPE_TEXT: c_int = 1;
 const SUBTYPE_LINK: c_int = 2;
 const SUBTYPE_FREETEXT: c_int = 3;
@@ -495,6 +497,45 @@ impl Doc {
                 self.import_pages(&src, pages.as_deref(), *at)
             }
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Err("written by the worker".into()),
+            PageOp::Watermark { pages, spec } => {
+                const FPDF_FONT_TRUETYPE: c_int = 2;
+                let ttf = crate::fonts::BOLD;
+                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                if font.is_null() {
+                    return Err("PDFium could not load the watermark font".into());
+                }
+                let result = pages.iter().try_for_each(|&i| {
+                    let page = self.page(i).ok_or("page not found")?;
+                    page.remove_marked(WATERMARK_MARK);
+                    page.add_watermark(spec, font);
+                    page.generate_content()
+                });
+                unsafe { lib.FPDFFont_Close(font) };
+                self.close_all_pages();
+                result.map(|_| 0)
+            }
+            PageOp::RemoveWatermark { pages } => {
+                for &i in pages {
+                    let page = self.page(i).ok_or("page not found")?;
+                    if page.remove_marked(WATERMARK_MARK) > 0 {
+                        page.generate_content()?;
+                    }
+                }
+                self.close_all_pages();
+                Ok(0)
+            }
+            PageOp::Flatten { pages } => {
+                const FLAT_NORMALDISPLAY: c_int = 0;
+                const FLATTEN_FAIL: c_int = 0;
+                for &i in pages {
+                    let page = self.page(i).ok_or("page not found")?;
+                    if unsafe { lib.FPDFPage_Flatten(page.handle, FLAT_NORMALDISPLAY) } == FLATTEN_FAIL {
+                        return Err(format!("PDFium could not flatten page {}", i + 1));
+                    }
+                }
+                self.close_all_pages();
+                Ok(0)
+            }
             PageOp::Redact { areas } => {
                 for (i, boxes) in areas {
                     let page = self.page(*i).ok_or("page not found")?;
@@ -1011,6 +1052,72 @@ impl<'d> Page<'d> {
                     lib.FPDFPageObj_AddMark(obj, HEADER_FOOTER_MARK);
                     lib.FPDFPage_InsertObject(self.handle, obj);
                 }
+            }
+        }
+    }
+
+    fn generate_content(&self) -> Result<(), String> {
+        if self.lib().is_true(unsafe { self.lib().FPDFPage_GenerateContent(self.handle) }) {
+            Ok(())
+        } else {
+            Err("PDFium could not write the page content".to_string())
+        }
+    }
+
+    /// Draws the watermark text across the page centre, as the page is displayed.
+    fn add_watermark(&self, spec: &super::pages::Watermark, font: FPDF_FONT) {
+        let lib = self.lib();
+        if spec.text.trim().is_empty() {
+            return;
+        }
+        let b = self.crop_box();
+        let (w, h) = if self.rotation_turns() % 2 == 1 {
+            (b.top - b.bottom, b.right - b.left)
+        } else {
+            (b.right - b.left, b.top - b.bottom)
+        };
+        let angle = spec.angle.map_or_else(|| h.atan2(w), f32::to_radians);
+        unsafe {
+            // Measure at 1 pt, then pick the size that fits 80 % of the page along the angle.
+            let probe = lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, 1.0);
+            if probe.is_null() {
+                return;
+            }
+            let text = wide(&spec.text);
+            lib.FPDFText_SetText(probe, text.as_ptr());
+            let (mut l, mut bt, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            lib.FPDFPageObj_GetBounds(probe, &mut l, &mut bt, &mut r, &mut t);
+            lib.FPDFPageObj_Destroy(probe);
+            let unit_width = (r - l).max(0.01);
+            let (sin, cos) = angle.sin_cos();
+            // Longest line through the centre at this angle that stays on the page.
+            let reach = (if cos.abs() > 1e-3 { w / cos.abs() } else { f32::MAX }).min(if sin.abs() > 1e-3 { h / sin.abs() } else { f32::MAX });
+            let size = spec.size.min(0.8 * reach / unit_width).max(4.0);
+            let obj = lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, size);
+            if obj.is_null() {
+                return;
+            }
+            lib.FPDFText_SetText(obj, text.as_ptr());
+            let [cr, cg, cb] = spec.color;
+            let alpha = (spec.opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+            lib.FPDFPageObj_SetFillColor(obj, cr.into(), cg.into(), cb.into(), alpha);
+            lib.FPDFPageObj_GetBounds(obj, &mut l, &mut bt, &mut r, &mut t);
+            let (xc, yc) = ((l + r) / 2.0, (bt + t) / 2.0);
+            // Text space -> displayed page (rotated about the centre) -> PDF page space.
+            let (o, (ax, ay), (cx, cy)) = self.displayed_to_page(0.0, 0.0);
+            let (du, dv) = (w / 2.0 - cos * xc + sin * yc, h / 2.0 - sin * xc - cos * yc);
+            let m = FS_MATRIX {
+                a: ax * cos + cx * sin,
+                b: ay * cos + cy * sin,
+                c: -ax * sin + cx * cos,
+                d: -ay * sin + cy * cos,
+                e: o.0 + ax * du + cx * dv,
+                f: o.1 + ay * du + cy * dv,
+            };
+            lib.FPDFPageObj_SetMatrix(obj, &m);
+            lib.FPDFPageObj_AddMark(obj, WATERMARK_MARK);
+            if !(spec.behind && lib.is_true(lib.FPDFPage_InsertObjectAtIndex(self.handle, obj, 0))) {
+                lib.FPDFPage_InsertObject(self.handle, obj);
             }
         }
     }

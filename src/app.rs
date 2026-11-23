@@ -115,6 +115,8 @@ pub struct App {
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
     optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
     images_dialog: Option<crate::view::page_tools::ImagesDialog>,
+    watermark_dialog: Option<crate::view::page_tools::WatermarkDialog>,
+    flatten_dialog: Option<crate::view::page_tools::FlattenDialog>,
     /// Presentation mode (full screen, one page at a time) and what to restore after.
     presenting: Option<Presentation>,
     /// Debug aid (screenshots): start a presentation once the document is ready.
@@ -276,6 +278,8 @@ impl App {
             hf_dialog: None,
             optimize_dialog: None,
             images_dialog: None,
+            watermark_dialog: None,
+            flatten_dialog: None,
             presenting: None,
             present_on_load: false,
             moves: HashMap::new(),
@@ -1422,6 +1426,7 @@ impl App {
         use crate::view::page_tools::*;
         let Some(tab) = self.tabs.get_mut(self.active).filter(|t| t.info().is_some()) else {
             (self.crop_dialog, self.hf_dialog, self.optimize_dialog, self.images_dialog) = (None, None, None, None);
+            (self.watermark_dialog, self.flatten_dialog) = (None, None);
             return;
         };
         let mut reqs = Vec::new();
@@ -1444,6 +1449,20 @@ impl App {
             reqs.extend(req);
             if !open {
                 self.optimize_dialog = None;
+            }
+        }
+        if let Some(d) = &mut self.watermark_dialog {
+            let (req, open) = watermark_dialog(ctx, d, tab, &mut self.settings.recent_colors);
+            reqs.extend(req);
+            if !open {
+                self.watermark_dialog = None;
+            }
+        }
+        if let Some(d) = &mut self.flatten_dialog {
+            let (req, open) = flatten_dialog(ctx, d, tab);
+            reqs.extend(req);
+            if !open {
+                self.flatten_dialog = None;
             }
         }
         if let Some(d) = &mut self.images_dialog {
@@ -2391,6 +2410,21 @@ impl App {
                     {
                         let pages = (0..tab.page_count()).collect();
                         tab.outbox.push(Request::EditPages { doc: tab.id, op: PageOp::RemoveHeaderFooter { pages } });
+                    }
+                    if ui.button(t("Watermark…")).clicked() {
+                        self.watermark_dialog = Some(Default::default());
+                    }
+                    if ui
+                        .button(t("Remove watermark"))
+                        .on_hover_text(t("Removes what magic-pdf added, on all pages"))
+                        .clicked()
+                        && let Some(tab) = self.tabs.get_mut(self.active)
+                    {
+                        let pages = (0..tab.page_count()).collect();
+                        tab.outbox.push(Request::EditPages { doc: tab.id, op: PageOp::RemoveWatermark { pages } });
+                    }
+                    if ui.button(t("Flatten annotations and form fields…")).clicked() {
+                        self.flatten_dialog = Some(Default::default());
                     }
                     ui.separator();
                     if ui.button(t("Redact (mark areas)")).clicked() {

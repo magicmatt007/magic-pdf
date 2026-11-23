@@ -1285,7 +1285,12 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
             Ok(0)
         }
+        PageOp::Flatten { pages } => {
+            drop_soft_deleted(od, pages);
+            od.doc.apply_page_op(op)
+        }
         PageOp::Redact { areas } => {
+            drop_soft_deleted(od, &areas.iter().map(|(p, _)| *p).collect::<Vec<_>>());
             od.doc.apply_page_op(op)?;
             let pages: Vec<usize> = areas.iter().map(|(p, _)| *p).collect();
             // Without the clean-up the removed content could still be in the file, so
@@ -1303,6 +1308,23 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
         }
         _ => od.doc.apply_page_op(op),
     }
+}
+
+/// Before an operation that removes annotations from `pages`: annotations deleted in
+/// the app (only hidden until saving, and known by their index) are removed for real
+/// there, as the indices are about to change. Known colours there are forgotten too.
+fn drop_soft_deleted(od: &mut OpenDoc, pages: &[usize]) {
+    let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(p, i) in od.deleted.keys().filter(|(p, _)| pages.contains(p)) {
+        by_page.entry(p).or_default().push(i);
+    }
+    for (p, indices) in by_page {
+        if let Some(page) = od.doc.page(p) {
+            page.remove_annots(&indices);
+        }
+    }
+    od.deleted.retain(|(p, _), _| !pages.contains(p));
+    od.colors.retain(|(p, _), _| !pages.contains(p));
 }
 
 /// Renumbers page-keyed annotation bookkeeping after a page operation.

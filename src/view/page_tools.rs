@@ -6,7 +6,7 @@ use crate::i18n::{t, tf};
 use eframe::egui::{self, Ui};
 
 use crate::document::DocTab;
-use crate::engine::{HeaderFooter, Margins, PageOp, Request, Rgb, pdf_date_now};
+use crate::engine::{HeaderFooter, Margins, PageOp, Request, Rgb, Watermark, pdf_date_now};
 use crate::view::color_picker;
 use crate::view::document_view::format_pdf_date;
 
@@ -192,6 +192,115 @@ pub fn header_footer_dialog(
                 }),
                 false,
             );
+        } else if cancel {
+            result = (None, false);
+        }
+    });
+    result
+}
+
+pub struct WatermarkDialog {
+    text: String,
+    size: f32,
+    color: Rgb,
+    opacity: f32,
+    /// None: diagonal.
+    angle: Option<f32>,
+    behind: bool,
+    scope: Scope,
+}
+
+impl Default for WatermarkDialog {
+    fn default() -> Self {
+        Self {
+            text: "DRAFT".into(),
+            size: 120.0,
+            color: [200, 30, 30],
+            opacity: 0.25,
+            angle: None,
+            behind: false,
+            scope: Scope::All,
+        }
+    }
+}
+
+pub fn watermark_dialog(ctx: &egui::Context, d: &mut WatermarkDialog, tab: &DocTab, recent: &mut Vec<Rgb>) -> (Option<Request>, bool) {
+    let mut result = (None, true);
+    window(t("Watermark")).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(t("Text"));
+            ui.add(egui::TextEdit::singleline(&mut d.text).desired_width(260.0));
+        });
+        ui.horizontal(|ui| {
+            for s in ["DRAFT", "COPY", "CONFIDENTIAL", "SAMPLE"] {
+                if ui.small_button(s).clicked() {
+                    d.text = s.into();
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(t("Largest size"));
+            ui.add(egui::DragValue::new(&mut d.size).range(8.0..=400.0).suffix(" pt"));
+            ui.label(t("Colour"));
+            if let Some(Some(c)) = color_picker::color_button(ui, "wm_color", Some(d.color), false, recent) {
+                d.color = c;
+            }
+            ui.label(t("Opacity"));
+            let mut pct = (d.opacity * 100.0).round();
+            if ui.add(egui::Slider::new(&mut pct, 5.0..=100.0).suffix(" %")).changed() {
+                d.opacity = pct / 100.0;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(t("Direction"));
+            ui.radio_value(&mut d.angle, None, t("Diagonal"));
+            ui.radio_value(&mut d.angle, Some(0.0), t("Horizontal"));
+            let mut custom = d.angle.filter(|a| *a != 0.0);
+            if ui.radio(custom.is_some(), t("Angle")).clicked() && custom.is_none() {
+                d.angle = Some(30.0);
+                custom = d.angle;
+            }
+            if let Some(mut a) = custom
+                && ui.add(egui::DragValue::new(&mut a).range(-90.0..=90.0).suffix("°")).changed()
+            {
+                d.angle = Some(if a == 0.0 { 0.1 } else { a });
+            }
+        });
+        ui.checkbox(&mut d.behind, t("Behind the page content"));
+        scope_ui(ui, &mut d.scope, tab);
+        ui.weak(t("The text shrinks to fit the page. Applying again replaces the watermark magic-pdf added before."));
+        let (ok, cancel) = buttons(ui, t("Apply"));
+        if ok && !d.text.trim().is_empty() {
+            let spec = Watermark {
+                text: d.text.trim().to_string(),
+                size: d.size,
+                color: d.color,
+                opacity: d.opacity,
+                angle: d.angle,
+                behind: d.behind,
+            };
+            result = (Some(Request::EditPages { doc: tab.id, op: PageOp::Watermark { pages: pages(d.scope, tab), spec } }), false);
+        } else if cancel {
+            result = (None, false);
+        }
+    });
+    result
+}
+
+#[derive(Default)]
+pub struct FlattenDialog {
+    scope: Scope,
+}
+
+pub fn flatten_dialog(ctx: &egui::Context, d: &mut FlattenDialog, tab: &DocTab) -> (Option<Request>, bool) {
+    let mut result = (None, true);
+    window(t("Flatten annotations and form fields")).show(ctx, |ui| {
+        ui.label(t("Comments, drawings, stamps, signatures and filled-in form fields become part of the page: they look the same but can no longer be edited, moved or deleted, and fields can no longer be filled in."));
+        ui.label(t("Undo works until the document is closed."));
+        scope_ui(ui, &mut d.scope, tab);
+        let (ok, cancel) = buttons(ui, t("Flatten"));
+        if ok {
+            result = (Some(Request::EditPages { doc: tab.id, op: PageOp::Flatten { pages: pages(d.scope, tab) } }), false);
         } else if cancel {
             result = (None, false);
         }

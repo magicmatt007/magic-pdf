@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
-pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, move_target};
+pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, Watermark, move_target};
 pub use rich::{Align, CharStyle, RichText};
 pub use pdf::{FIELD_TEXT, pdf_date_now};
 
@@ -1928,6 +1928,116 @@ mod tests {
         let px = image::open(dir.join("sample-p001.png")).unwrap().to_rgba8();
         assert_eq!(px.get_pixel(1100, 1000).0, [255, 255, 255, 255], "white page margin");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn watermarks_are_drawn_replaced_and_removed() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let edit = |op: PageOp| {
+            engine.send(Request::EditPages { doc: 1, op });
+            pages_changed(&engine)
+        };
+        let spec = Watermark {
+            text: "DRAFT".into(),
+            size: 200.0,
+            color: [255, 0, 0],
+            opacity: 0.3,
+            angle: None,
+            behind: false,
+        };
+        let (_, before) = render(&engine, 1, 0, Rotation::R0, 0);
+        edit(PageOp::Watermark { pages: vec![0, 5], spec: spec.clone() });
+        assert!(page_text(&engine, 1, 0).contains("DRAFT"));
+        assert!(page_text(&engine, 1, 5).contains("DRAFT"));
+        // Light red (30 % opacity), never full red; on the rotated page too.
+        let pink = |px: &[u8]| px[0] > 230 && (150..235).contains(&px[1]) && (150..235).contains(&px[2]);
+        let red = |px: &[u8]| px[0] > 200 && px[1] < 80 && px[2] < 80;
+        let count = |buf: &[u8], f: &dyn Fn(&[u8]) -> bool| buf.chunks(4).filter(|p| f(p)).count();
+        let (_, after) = render(&engine, 1, 0, Rotation::R0, 1);
+        assert!(count(&after, &pink) > count(&before, &pink) + 2000, "watermark drawn");
+        assert_eq!(count(&after, &red), 0, "drawn transparent");
+        let (_, rotated) = render(&engine, 1, 5, Rotation::R0, 1);
+        assert!(count(&rotated, &pink) > 2000, "on the rotated page too");
+
+        // Applying again replaces it; removing takes it off.
+        edit(PageOp::Watermark {
+            pages: vec![0],
+            spec: Watermark { text: "COPY".into(), behind: true, ..spec },
+        });
+        let text = page_text(&engine, 1, 0);
+        assert!(text.contains("COPY") && !text.contains("DRAFT"), "{text}");
+        edit(PageOp::RemoveWatermark { pages: vec![0] });
+        assert!(!page_text(&engine, 1, 0).contains("COPY"));
+        assert!(page_text(&engine, 1, 5).contains("DRAFT"), "other pages keep theirs");
+    }
+
+    fn square(rect: PdfBox, interior: Rgb) -> NewAnnot {
+        NewAnnot {
+            interior: Some(interior),
+            author: "tester".into(),
+            ..NewAnnot::new(AnnotKind::Square, rect, [0, 0, 0])
+        }
+    }
+
+    #[test]
+    fn flattening_keeps_the_look_and_removes_the_annotations() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let squares = |list: Vec<AnnotInfo>| list.iter().filter(|a| a.kind == AnnotKind::Square).count();
+        assert_eq!(squares(annots(&engine, 1)), 1);
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Flatten { pages: vec![0] } });
+        pages_changed(&engine);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        assert_eq!(squares(annots(&engine, 1)), 0, "no longer an annotation");
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let at = |x: f32, y: f32| {
+            let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
+            rgba[(py * size[0] + px) * 4..][..3].to_vec()
+        };
+        assert_eq!(at(350.0, 350.0), vec![0, 0, 255], "still drawn, as page content");
+        engine.send(Request::Undo { doc: 1 });
+        pages_changed(&engine);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        assert_eq!(squares(annots(&engine, 1)), 1, "undo brings the annotation back");
+    }
+
+    #[test]
+    fn annotations_deleted_before_a_redaction_stay_deleted() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let a = PdfBox { left: 300.0, bottom: 300.0, right: 350.0, top: 350.0 };
+        let b = PdfBox { left: 400.0, bottom: 300.0, right: 450.0, top: 350.0 };
+        let c = PdfBox { left: 480.0, bottom: 300.0, right: 530.0, top: 350.0 };
+        for (r, col) in [(a, [255, 0, 0]), (b, [0, 255, 0]), (c, [0, 0, 255])] {
+            engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(r, col) });
+        }
+        let list = annots(&engine, 1);
+        let list = if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
+        let list = if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
+        let index_of = |list: &[AnnotInfo], r: PdfBox| list.iter().find(|x| x.kind == AnnotKind::Square && (x.rect.left - r.left).abs() < 3.0).unwrap().index;
+        // Delete C in the app (hidden until saving), then redact over A.
+        engine.send(Request::DeleteAnnot { doc: 1, page: 0, index: index_of(&list, c) });
+        let _ = annots(&engine, 1);
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Redact { areas: vec![(0, vec![a.expand(2.0)])] },
+        });
+        pages_changed(&engine);
+        // D takes the index C had before the redaction shifted everything.
+        let d = PdfBox { left: 540.0, bottom: 300.0, right: 570.0, top: 350.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(d, [0, 0, 0]) });
+        let _ = annots(&engine, 1);
+        let path = std::env::temp_dir().join(format!("magic-pdf-redact-del-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        open(&engine, 2, path.clone());
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let left: Vec<f32> = annots(&engine, 2).iter().filter(|x| x.kind == AnnotKind::Square).map(|x| x.rect.left.round()).collect();
+        assert_eq!(left, vec![400.0, 540.0], "B and D are left: A redacted, C deleted");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

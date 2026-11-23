@@ -50,6 +50,10 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   every search match, then apply: what lies under the marks is removed from the file for
   good (text, image pixels, shapes inside the marks, comments) and blacked out; undoable
   until the document is closed
+- Pages → Watermark: a text such as DRAFT across the pages (diagonal, horizontal or any
+  angle; colour, opacity, over or behind the content), replaced or removed again later
+- Pages → Flatten annotations and form fields: they become part of the page content,
+  looking the same but no longer editable
 - OCR: Pages → Recognise text makes scanned pages searchable and selectable with
   [Tesseract](https://github.com/tesseract-ocr/tesseract) (installed separately; the
   dialog says how), as an invisible text layer over the page image
