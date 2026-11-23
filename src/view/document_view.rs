@@ -42,6 +42,7 @@ pub enum Tool {
     Signature,
     Distance,
     Area,
+    Redact,
 }
 
 impl Tool {
@@ -111,6 +112,7 @@ impl Tool {
             Tool::Signature => icons::SIGNATURE,
             Tool::Distance => icons::RULER,
             Tool::Area => icons::AREA,
+            Tool::Redact => icons::EYE_SLASH,
         })
     }
 
@@ -134,6 +136,7 @@ impl Tool {
             Tool::Signature => "Signature (G): click to place",
             Tool::Distance => "Measure distance (M), Shift: 45° steps",
             Tool::Area => "Measure area: click the corners, double-click or Enter to finish",
+            Tool::Redact => "Redact (X): drag over an area or click a word to mark it; click a mark to unmark it",
         })
     }
 
@@ -152,7 +155,7 @@ impl Tool {
             Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
             Tool::Signature => Some(&mut style.signature_color),
             Tool::Stamp => None,
-            Tool::Hand | Tool::SelectText => None,
+            Tool::Hand | Tool::SelectText | Tool::Redact => None,
         }
     }
 }
@@ -175,6 +178,8 @@ pub struct ViewContext<'a> {
 
 const SEARCH_COLOR: Color32 = Color32::from_rgba_premultiplied(120, 100, 0, 90);
 const SEARCH_CURRENT_COLOR: Color32 = Color32::from_rgba_premultiplied(160, 60, 0, 130);
+const REDACTION_FILL: Color32 = Color32::from_rgba_premultiplied(60, 0, 0, 70);
+const REDACTION_LINE: Color32 = Color32::from_rgb(220, 30, 30);
 const SELECTION_COLOR: Color32 = Color32::from_rgba_premultiplied(30, 90, 200, 90);
 const NOTE_SIZE: f32 = 20.0;
 
@@ -298,6 +303,78 @@ fn annot_at(tab: &DocTab, page: usize, p: Pos2) -> Option<&AnnotInfo> {
         .find(|a| a.rect.expand(2.0).contains(p.x, p.y))
 }
 
+/// Screen position -> PDF point on a given page (also outside the page).
+fn screen_to_pdf_on(tab: &DocTab, screen: Pos2, view: Rect, page: usize) -> Option<Pos2> {
+    let page_rect = tab.layout.page_rect(page)?;
+    let geom = tab.geoms.get(&page)?;
+    let local = (tab.viewport.to_doc(screen, view) - page_rect.min).to_pos2();
+    Some(geom_local_to_pdf(local, geom, tab.rotation))
+}
+
+/// The redaction tool: drag to mark an area, click a word to mark it, click a mark
+/// to unmark it.
+fn redact_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, pointer: Option<Pos2>) {
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    }
+    let on_page = pointer.filter(|p| view.contains(*p)).and_then(|pt| screen_to_pdf(tab, pt, view, None));
+    if let Some((page, _)) = on_page
+        && !tab.texts.contains_key(&page)
+    {
+        tab.request_text(page);
+    }
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        tab.redact_drag = on_page.map(|(page, p)| (page, p, p));
+    } else if response.dragged_by(egui::PointerButton::Primary) {
+        if let Some(page) = tab.redact_drag.map(|d| d.0)
+            && let Some(p) = pointer.and_then(|pt| screen_to_pdf_on(tab, pt, view, page))
+            && let Some(d) = &mut tab.redact_drag
+        {
+            d.2 = p;
+        }
+    } else if response.drag_stopped() {
+        if let Some((page, a, b)) = tab.redact_drag.take() {
+            let r = PdfBox {
+                left: a.x.min(b.x),
+                bottom: a.y.min(b.y),
+                right: a.x.max(b.x),
+                top: a.y.max(b.y),
+            };
+            tab.mark_redaction(page, r);
+        }
+    } else if response.clicked()
+        && let Some((page, p)) = on_page
+    {
+        if let Some(i) = tab.redactions.iter().rposition(|(q, b)| *q == page && b.contains(p.x, p.y)) {
+            tab.redactions.remove(i);
+        } else if let Some(word) = word_at(tab, page, p) {
+            tab.mark_redaction(page, word.expand(1.0));
+        }
+    }
+}
+
+/// The box of the word under `p`, if any.
+fn word_at(tab: &DocTab, page: usize, p: Pos2) -> Option<PdfBox> {
+    let text = tab.texts.get(&page)?.as_ref()?;
+    let i = text.chars.iter().position(|c| c.rect.is_some_and(|r| r.expand(1.0).contains(p.x, p.y)))?;
+    let is_word = |c: char| c.is_alphanumeric() || "_-@.".contains(c);
+    if !is_word(text.chars[i].ch) {
+        return text.chars[i].rect;
+    }
+    let (mut a, mut b) = (i, i);
+    while a > 0 && is_word(text.chars[a - 1].ch) {
+        a -= 1;
+    }
+    while b + 1 < text.chars.len() && is_word(text.chars[b + 1].ch) {
+        b += 1;
+    }
+    // Trailing full stops belong to the sentence, not to the word.
+    while b > a && text.chars[b].ch == '.' {
+        b -= 1;
+    }
+    text.chars[a..=b].iter().filter_map(|c| c.rect).reduce(PdfBox::union)
+}
+
 fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, cx: &mut ViewContext<'_>) {
     let (scroll, zoom_delta, shift, pointer) = ui.input(|i| {
         (
@@ -377,6 +454,11 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     let pointer = pointer.filter(|p| {
         response.dragged() || response.drag_stopped() || ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
     });
+
+    if tool == Tool::Redact && !middle_down {
+        redact_input(ui, tab, response, view, pointer);
+        return;
+    }
 
     // Drawing tools.
     if let Some((page, p)) = pointer.filter(|p| view.contains(*p)).and_then(|pt| screen_to_pdf(tab, pt, view, None)) {
@@ -1239,6 +1321,23 @@ fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect
         painter.rect(s, CornerRadius::same(2), fill, Stroke::new(1.0, line), StrokeKind::Outside);
     }
 
+    // Areas marked for redaction, and the one being dragged out.
+    let drag = tab.redact_drag.filter(|d| d.0 == page).map(|(_, a, b)| PdfBox {
+        left: a.x.min(b.x),
+        bottom: a.y.min(b.y),
+        right: a.x.max(b.x),
+        top: a.y.max(b.y),
+    });
+    for b in tab.redactions.iter().filter(|(p, _)| *p == page).map(|(_, b)| b).chain(drag.as_ref()) {
+        painter.rect(
+            to_screen(b),
+            CornerRadius::ZERO,
+            REDACTION_FILL,
+            Stroke::new(1.5, REDACTION_LINE),
+            StrokeKind::Outside,
+        );
+    }
+
     for (i, hit) in tab.search.hits.iter().enumerate() {
         if hit.page != page {
             continue;
@@ -1614,6 +1713,7 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
         return;
     }
     let mut action = None;
+    let mut redact = false;
     egui::Area::new(Id::unique(("selection_toolbar", tab.id)))
         .fixed_pos(last.right_bottom() + vec2(4.0, 4.0))
         .order(egui::Order::Foreground)
@@ -1635,6 +1735,9 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
                             action = Some(Some(kind));
                         }
                     }
+                    if ui.button(Tool::Redact.icon()).on_hover_text(t("Mark for redaction")).clicked() {
+                        redact = true;
+                    }
                 });
             });
         });
@@ -1646,6 +1749,9 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
         }
         Some(Some(kind)) => create_markup(tab, cx, kind),
         None => {}
+    }
+    if redact {
+        tab.mark_selection();
     }
 }
 

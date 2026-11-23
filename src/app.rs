@@ -1,6 +1,6 @@
 //! Application shell: tabs, menus, toolbar, keyboard shortcuts and engine plumbing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -110,6 +110,8 @@ pub struct App {
     attachment_actions: HashMap<(DocId, usize), crate::view::doc_info::AttachmentAction>,
     /// Page tool dialogs (None: closed).
     crop_dialog: Option<crate::view::page_tools::CropDialog>,
+    /// The tab whose redactions wait for confirmation.
+    confirm_redact: Option<DocId>,
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
     optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
     /// Tabs being moved to another window, waiting for their export.
@@ -253,6 +255,7 @@ impl App {
             show_einvoice: None,
             attachment_actions: HashMap::new(),
             crop_dialog: None,
+            confirm_redact: None,
             hf_dialog: None,
             optimize_dialog: None,
             moves: HashMap::new(),
@@ -265,7 +268,11 @@ impl App {
         if app.screenshot_to.is_some() {
             // Debug aid for screenshots: start with a given tool selected.
             let wanted = std::env::var("MAGIC_PDF_TOOL").unwrap_or_default();
-            if let Some(t) = Tool::ANNOTATION_TOOLS.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted)) {
+            if let Some(t) = Tool::ANNOTATION_TOOLS
+                .iter()
+                .chain([&Tool::Redact])
+                .find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted))
+            {
                 app.tool = *t;
             }
             app.show_settings = wanted == "settings";
@@ -1153,6 +1160,75 @@ impl App {
         }
     }
 
+    fn redaction_bar(&mut self, ui: &mut Ui) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let n = tab.redactions.len();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(t("Redaction")).strong());
+            if n == 0 {
+                ui.label(t("Drag over an area or click a word to mark it. Nothing is removed until you apply."));
+            } else {
+                ui.label(tf("{n} areas marked.", &[("n", &n)]));
+                if ui.button(t("Apply redactions…")).clicked() {
+                    self.confirm_redact = Some(tab.id);
+                }
+                if ui.button(t("Clear marks")).clicked() {
+                    tab.redactions.clear();
+                }
+            }
+            let hits = tab.search.hits.len();
+            if hits > 0
+                && ui
+                    .button(tf("Mark all {n} search matches", &[("n", &hits)]))
+                    .on_hover_text(t("Marks every match of the current search for redaction"))
+                    .clicked()
+            {
+                tab.mark_search_hits();
+            }
+        });
+    }
+
+    fn redaction_dialog(&mut self, ctx: &egui::Context) {
+        let Some(doc) = self.confirm_redact else { return };
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == doc && !t.redactions.is_empty()) else {
+            self.confirm_redact = None;
+            return;
+        };
+        let pages: BTreeSet<usize> = tab.redactions.iter().map(|(p, _)| *p).collect();
+        let mut choice = None;
+        egui::Window::new(t("Apply redactions"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(tf(
+                    "{n} marked areas on {pages} pages are blacked out and what lies under them is removed: text, parts of pictures, shapes and comments.",
+                    &[("n", &tab.redactions.len()), ("pages", &pages.len())],
+                ));
+                ui.label(t("Undo works until the document is closed. Once saved, the removed content cannot be recovered from the file."));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t("Apply redactions")).clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button(t("Cancel")).clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                if let Some(op) = tab.take_redactions() {
+                    tab.outbox.push(Request::EditPages { doc, op });
+                }
+                self.confirm_redact = None;
+                self.tool = Tool::Hand;
+            }
+            Some(false) => self.confirm_redact = None,
+            None => {}
+        }
+    }
+
     fn einvoice_bar(&mut self, ui: &mut Ui) {
         let Some(doc) = self.tabs.get(self.active).map(|t| t.id) else { return };
         let Some(inv) = self.einvoices.get(&doc) else { return };
@@ -1795,6 +1871,7 @@ impl App {
                 (Key::K, Tool::Stamp),
                 (Key::G, Tool::Signature),
                 (Key::M, Tool::Distance),
+                (Key::X, Tool::Redact),
             ] {
                 if shortcut(Modifiers::NONE, key) {
                     self.tool = tool;
@@ -2105,6 +2182,24 @@ impl App {
                         let pages = (0..tab.page_count()).collect();
                         tab.outbox.push(Request::EditPages { doc: tab.id, op: PageOp::RemoveHeaderFooter { pages } });
                     }
+                    ui.separator();
+                    if ui.button(t("Redact (mark areas)")).clicked() {
+                        self.tool = Tool::Redact;
+                    }
+                    let (hits, marks) = self
+                        .tabs
+                        .get(self.active)
+                        .map_or((0, 0), |t| (t.search.hits.len(), t.redactions.len()));
+                    if ui
+                        .add_enabled(hits > 0, egui::Button::new(t("Mark search matches for redaction")))
+                        .clicked()
+                        && let Some(tab) = self.tabs.get_mut(self.active)
+                    {
+                        tab.mark_search_hits();
+                    }
+                    if ui.add_enabled(marks > 0, egui::Button::new(t("Apply redactions…"))).clicked() {
+                        self.confirm_redact = self.tabs.get(self.active).map(|t| t.id);
+                    }
                 });
             });
             ui.menu_button(t("View"), |ui| {
@@ -2267,6 +2362,9 @@ impl App {
                     menu.response.on_hover_text(t("More shapes"));
                 }
             }
+            ui.separator();
+            ui.selectable_value(&mut self.tool, Tool::Redact, Tool::Redact.icon())
+                .on_hover_text(Tool::Redact.label());
             ui.separator();
 
             let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -2813,6 +2911,7 @@ impl App {
                         ("L / A / P / C", "Line, arrow, polygon, cloud (Enter or double-click finishes)"),
                         ("K / G", "Stamp, signature"),
                         ("M", "Measure distance (area: in the shapes menu)"),
+                        ("X", "Redact: mark areas or words, then apply"),
                         ("Ctrl+C / Ctrl+V on an annotation", "Copy it, paste it under the mouse"),
                         ("Del", "Delete the selected annotation or thumbnail pages"),
                         ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
@@ -3107,6 +3206,9 @@ impl eframe::App for App {
         if self.tabs.get(self.active).is_some_and(|t| self.einvoices.contains_key(&t.id)) {
             egui::Panel::top("einvoice").show(ui, |ui| self.einvoice_bar(ui));
         }
+        if self.tabs.get(self.active).is_some_and(|t| self.tool == Tool::Redact || !t.redactions.is_empty()) {
+            egui::Panel::top("redaction").show(ui, |ui| self.redaction_bar(ui));
+        }
 
         if let Some(tab) = self.tabs.get(self.active) {
             let status = match &tab.state {
@@ -3243,6 +3345,7 @@ impl eframe::App for App {
         for r in self.ocr.show(&ctx, self.tabs.get(self.active)) {
             self.send(r);
         }
+        self.redaction_dialog(&ctx);
         self.password_dialog(&ctx);
         self.unsaved_dialog(&ctx);
         self.print_dialog_ui(&ctx);

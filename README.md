@@ -44,6 +44,10 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   PDFs (also by dropping files between thumbnails), extract to a new file, split
   into several files; crop pages, headers and footers with page numbers, date and file
   name; add, rename, move and indent bookmarks; all undoable and saved with the document
+- Redaction (X, or Pages → Redact): drag over areas, click words, mark selected text or
+  every search match, then apply: what lies under the marks is removed from the file for
+  good (text, image pixels, shapes inside the marks, comments) and blacked out; undoable
+  until the document is closed
 - OCR: Pages → Recognise text makes scanned pages searchable and selectable with
   [Tesseract](https://github.com/tesseract-ocr/tesseract) (installed separately; the
   dialog says how), as an invisible text layer over the page image
@@ -140,6 +144,19 @@ and that fields EN 16931 requires are present. Attached files are listed in the 
 **Attachments** tab (open or save them). **File → Document properties** (Ctrl+D) shows
 and edits title, author, subject and keywords (also in the XMP metadata).
 
+## Redaction
+
+Applying redactions removes, on each marked page, every character whose centre lies in a
+mark; the rest of its line is rewritten glyph by glyph at the same positions, so it stays
+searchable and selectable. Pixels of pictures under a mark are blackened in the picture
+itself, shapes lying completely inside a mark and annotations touching one are removed,
+and each mark is painted black. Where text cannot be rewritten in its own font, and for
+form XObjects (content groups) touching a mark, that part of the page becomes a picture
+taken before the redaction, with the marks already black. Afterwards the file is cleaned
+of everything no longer used (old page contents and pictures), so the removed content does
+not stay hidden in it; if that is not possible (encrypted files) the redaction is not
+applied. Document properties, bookmarks and attachments are not changed.
+
 ## Languages
 
 The interface is in English and German (Edit → Settings → Language; "System" follows
@@ -181,6 +198,7 @@ Tesseract with English is not installed.
 | U / N / T / D / R / E | Highlight, note, text box, draw, rectangle, ellipse |
 | L / A / P / C | Line, arrow, polygon, cloud (Enter or double-click finishes) |
 | K / G / M | Stamp, signature, measure distance |
+| X | Redact: mark areas or words, then apply |
 | Ctrl+C / Ctrl+V on an annotation | Copy it, paste it under the mouse |
 | Esc | Cancel what is in progress and return to the Hand tool |
 | Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |

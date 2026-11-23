@@ -238,6 +238,10 @@ pub struct DocTab {
     /// A just-created annotation to open for typing once it is listed.
     pub pending_edit: Option<(usize, usize)>,
     pub draft: Option<Draft>,
+    /// Areas marked for redaction (PDF page space), applied together.
+    pub redactions: Vec<(usize, PdfBox)>,
+    /// Redaction area being dragged out: page, start and end (PDF page space).
+    pub redact_drag: Option<(usize, Pos2, Pos2)>,
     pub annot_drag: Option<AnnotDrag>,
     /// Arrow-key nudge of the selected annotation, in displayed page points.
     pub nudge: Vec2,
@@ -322,6 +326,8 @@ impl DocTab {
             pending_edit: None,
             mark_dirty_on_open: false,
             draft: None,
+            redactions: Vec::new(),
+            redact_drag: None,
             annot_drag: None,
             nudge: Vec2::ZERO,
             page_versions: HashMap::new(),
@@ -459,10 +465,52 @@ impl DocTab {
         self.selecting = false;
         self.draft = None;
         self.annot_drag = None;
+        self.redact_drag = None;
         self.deselect_annot();
         self.page_selection.clear();
         self.page_anchor = None;
         self.pages_focused = false;
+    }
+
+    /// Marks an area for redaction (ignored if tiny).
+    pub fn mark_redaction(&mut self, page: usize, b: PdfBox) {
+        if b.right - b.left >= 1.0 && b.top - b.bottom >= 1.0 && !self.redactions.contains(&(page, b)) {
+            self.redactions.push((page, b));
+        }
+    }
+
+    /// Marks every search hit for redaction; returns how many hits.
+    pub fn mark_search_hits(&mut self) -> usize {
+        let hits: Vec<(usize, PdfBox)> =
+            self.search.hits.iter().flat_map(|h| h.rects.iter().map(move |r| (h.page, r.expand(1.0)))).collect();
+        let n = self.search.hits.len();
+        for (p, b) in hits {
+            self.mark_redaction(p, b);
+        }
+        n
+    }
+
+    /// Marks the selected text for redaction (line by line).
+    pub fn mark_selection(&mut self) {
+        if let Some((page, lines)) = self.selection_line_boxes() {
+            for b in lines {
+                self.mark_redaction(page, b.expand(1.0));
+            }
+            self.selection = None;
+        }
+    }
+
+    /// The marks as one page operation (and clears them).
+    pub fn take_redactions(&mut self) -> Option<crate::engine::PageOp> {
+        let mut areas: Vec<(usize, Vec<PdfBox>)> = Vec::new();
+        for (p, b) in std::mem::take(&mut self.redactions) {
+            match areas.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, v)) => v.push(b),
+                None => areas.push((p, vec![b])),
+            }
+        }
+        areas.sort_by_key(|(p, _)| *p);
+        (!areas.is_empty()).then_some(crate::engine::PageOp::Redact { areas })
     }
 
     /// Pages that page operations act on: the thumbnail selection, else the current page.
@@ -490,6 +538,11 @@ impl DocTab {
             *self.page_versions.entry(*p).or_insert(0) += 1;
         }
         self.page_selection = self.page_selection.iter().filter_map(|p| map(*p)).collect();
+        self.redactions = std::mem::take(&mut self.redactions)
+            .into_iter()
+            .filter_map(|(p, b)| map(p).map(|n| (n, b)))
+            .collect();
+        self.redact_drag = None;
         self.page_anchor = self.page_anchor.and_then(map);
         let count = info.page_sizes.len();
         // Stay on the same page if it still exists, else on the page now at its place.
