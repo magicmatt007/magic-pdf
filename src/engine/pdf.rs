@@ -445,7 +445,7 @@ impl Doc {
                 let n = lib.FPDFSignatureObj_GetByteRange(sig, ptr::null_mut(), 0) as usize;
                 let mut range = vec![0 as c_int; n];
                 lib.FPDFSignatureObj_GetByteRange(sig, range.as_mut_ptr(), n as c_ulong);
-                let ranges: Vec<(usize, usize)> = range.chunks_exact(2).map(|p| (p[0].max(0) as usize, p[1].max(0) as usize)).collect();
+                let ranges: Vec<(usize, usize)> = range.as_chunks::<2>().0.iter().map(|p| (p[0].max(0) as usize, p[1].max(0) as usize)).collect();
                 let ascii = |f: &dyn Fn(*mut std::os::raw::c_char, c_ulong) -> c_ulong| {
                     let len = f(ptr::null_mut(), 0) as usize;
                     let mut buf = vec![0u8; len];
