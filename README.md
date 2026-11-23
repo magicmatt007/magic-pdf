@@ -9,19 +9,30 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 
 ## Features
 
-- Layouts: horizontal, vertical, single page, facing (cover + pairs), grid; per-file memory
-- Fit width / height / page, zoom presets, Ctrl+wheel zoom around the cursor, rotation
-- Thumbnails, outline/bookmarks, document search with highlighted matches
+- Layouts: horizontal, vertical, single page, facing (cover + pairs), grid overview
+  (double-click a page to open it in the previous layout); per-file memory
+- Fit width / height / page, zoom presets, Ctrl+wheel zoom around the cursor, rotation;
+  sharp tiles at high zoom
+- Thumbnails, outline/bookmarks, attachments
+- Search with highlighted matches and the words around each hit, in one file or in all
+  open tabs at once
 - Text selection and copy, internal and external links
 - Tabs, recent files, drag & drop, password-protected files, night mode
+- English and German interface
 
 - Annotations: highlight, underline, strikeout, sticky notes, rich text boxes typed
   directly on the page (bold, italic, underline, strikethrough, colours and sizes per
-  word, alignment; Ctrl+B/I/U; stored as standard PDF rich text), freehand drawing, rectangles and ellipses (with separate
-  fill colours); any colour (70-colour palette, recent colours, custom colour or
-  hex code), line widths, comments, a Comments sidebar; drag annotations to move
-  them, resize with handles (Shift keeps proportions), nudge with arrow keys; undo/redo,
-  Save / Save As (deleted annotations are removed from the file)
+  word, alignment; Ctrl+B/I/U; stored as standard PDF rich text), freehand drawing,
+  rectangles and ellipses (with separate fill colours), lines and arrows (Shift: 45° steps), polygons and clouds, stamps
+  (built-in, own texts with name and date, pictures) and signatures (drawn or from a
+  picture); any colour (70-colour palette, recent colours, custom colour or
+  hex code), line widths; copy and paste annotations (also between tabs)
+- Comments: a Comments sidebar with search and filters by type, author and status,
+  reply threads and review status (Accepted, Rejected, …)
+- Measuring: distances and areas with a drawing scale (1:n; mm, cm, m, km, in, ft),
+  shown live and kept on the page
+- Annotation editing: drag to move, resize with handles (Shift keeps proportions),
+  nudge with arrow keys; undo/redo, Save / Save As (deleted annotations are removed from the file)
 
 - Form filling: text fields, checkboxes, radio buttons, combo and list boxes
   (typing, Tab between fields, copy/paste, field undo); filled values are saved
@@ -31,7 +42,16 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Page editing in the thumbnail sidebar or the Pages menu: select pages (Ctrl/Shift
   click), drag to reorder, rotate, delete, insert blank pages or pages from other
   PDFs (also by dropping files between thumbnails), extract to a new file, split
-  into several files; all undoable and saved with the document
+  into several files; crop pages, headers and footers with page numbers, date and file
+  name; add, rename, move and indent bookmarks; all undoable and saved with the document
+- OCR: Pages → Recognise text makes scanned pages searchable and selectable with
+  [Tesseract](https://github.com/tesseract-ocr/tesseract) (installed separately; the
+  dialog says how), as an invisible text layer over the page image
+- Compare two PDFs (File → Compare with): side by side, scrolling and zooming together,
+  changed words marked red and green, a bar to step through pages with changes
+- E-invoices (ZUGFeRD / Factur-X) shown and checked, document properties (Ctrl+D) and
+  File → Save optimized copy (lossless compression, pictures scaled down to a chosen dpi);
+  see [E-invoices](#e-invoices)
 
 - One window, many tabs: PDFs opened from the desktop join the running window;
   drag a tab out to give it its own window, or onto another magic-pdf window to
@@ -140,8 +160,12 @@ macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting.
 ```bash
 python3 tests/fixtures/make_sample.py   # regenerates tests/fixtures/sample.pdf
 python3 tests/fixtures/make_form.py     # regenerates tests/fixtures/form.pdf
-cargo test                               # layout/viewport unit tests + PDFium engine test
+python3 tests/fixtures/make_scanned.py  # regenerates tests/fixtures/scanned.pdf
+cargo test                               # unit tests + PDFium engine tests
 ```
+
+The engine tests need PDFium (`scripts/fetch-pdfium.sh`); the OCR test is skipped when
+Tesseract with English is not installed.
 
 ## Shortcuts
 
@@ -151,15 +175,21 @@ cargo test                               # layout/viewport unit tests + PDFium e
 | Ctrl+Wheel, Ctrl+±, Ctrl+0 | Zoom, actual size |
 | PgUp/PgDn, Home/End, Space | Page navigation |
 | Ctrl+1…5 | Horizontal, vertical, single, facing, grid |
+| Double-click a page in the grid | Open it in the previous layout |
 | Ctrl+R / Ctrl+Shift+R | Rotate |
 | H / S | Hand / text-select tool |
 | U / N / T / D / R / E | Highlight, note, text box, draw, rectangle, ellipse |
+| L / A / P / C | Line, arrow, polygon, cloud (Enter or double-click finishes) |
+| K / G / M | Stamp, signature, measure distance |
+| Ctrl+C / Ctrl+V on an annotation | Copy it, paste it under the mouse |
 | Esc | Cancel what is in progress and return to the Hand tool |
 | Ctrl+Z / Ctrl+Y, Del | Undo / redo, delete selected annotation |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |
 | Ctrl+P | Print |
 | Click / Ctrl / Shift + click thumbnail | Select pages (Del deletes them) |
 | Ctrl+F, Enter, F3 | Search |
+| Ctrl+D | Document properties |
+| Ctrl+, | Settings |
 | F9 | Sidebar |
 
 ## License
