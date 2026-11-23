@@ -284,7 +284,6 @@ mod tests {
             .data(|d| d.get_temp(Id::unique(("test_palette_cell", 3usize, 7usize))))
             .expect("picker open");
         frame(click(cell_rect.center()));
-        drop(frame);
         let expected = palette()[3][7];
         assert_eq!(result, Some(Some(expected)));
         assert_eq!(recent, vec![expected]);

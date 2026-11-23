@@ -195,34 +195,6 @@ pub fn write_properties(bytes: &[u8], p: &EditableProperties, now: &str) -> Resu
     save(&mut doc, false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn xmp_fields_are_updated_in_place() {
-        let mut xml = r#"<x:xmpmeta><rdf:RDF><rdf:Description>
-<dc:title><rdf:Alt><rdf:li xml:lang="x-default">Old</rdf:li></rdf:Alt></dc:title>
-<dc:creator><rdf:Seq><rdf:li>Someone</rdf:li></rdf:Seq></dc:creator>
-<pdf:Keywords>a, b</pdf:Keywords>
-<xmp:ModifyDate>2020-01-01T00:00:00Z</xmp:ModifyDate>
-</rdf:Description></rdf:RDF></x:xmpmeta>"#
-            .to_string();
-        let p = EditableProperties {
-            title: "Neu & besser".into(),
-            author: "Matt".into(),
-            subject: "Not in the XMP".into(),
-            keywords: "x".into(),
-        };
-        update_xmp(&mut xml, &p, "D:20261123101500Z");
-        assert!(xml.contains(r#"<rdf:li xml:lang="x-default">Neu &amp; besser</rdf:li>"#), "{xml}");
-        assert!(xml.contains("<rdf:li>Matt</rdf:li>"));
-        assert!(xml.contains("<pdf:Keywords>x</pdf:Keywords>"));
-        assert!(xml.contains("<xmp:ModifyDate>2026-11-23T10:15:00Z</xmp:ModifyDate>"));
-        assert!(!xml.contains("Not in the XMP"), "missing fields are not added");
-    }
-}
-
 /// After redaction: drops XObjects the redacted pages no longer draw from their
 /// resources, then every object nothing refers to any more (old content streams,
 /// images and annotation appearances that could still hold the removed content).
@@ -271,4 +243,32 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
     }
     doc.prune_objects();
     save(&mut doc, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xmp_fields_are_updated_in_place() {
+        let mut xml = r#"<x:xmpmeta><rdf:RDF><rdf:Description>
+<dc:title><rdf:Alt><rdf:li xml:lang="x-default">Old</rdf:li></rdf:Alt></dc:title>
+<dc:creator><rdf:Seq><rdf:li>Someone</rdf:li></rdf:Seq></dc:creator>
+<pdf:Keywords>a, b</pdf:Keywords>
+<xmp:ModifyDate>2020-01-01T00:00:00Z</xmp:ModifyDate>
+</rdf:Description></rdf:RDF></x:xmpmeta>"#
+            .to_string();
+        let p = EditableProperties {
+            title: "Neu & besser".into(),
+            author: "Matt".into(),
+            subject: "Not in the XMP".into(),
+            keywords: "x".into(),
+        };
+        update_xmp(&mut xml, &p, "D:20261123101500Z");
+        assert!(xml.contains(r#"<rdf:li xml:lang="x-default">Neu &amp; besser</rdf:li>"#), "{xml}");
+        assert!(xml.contains("<rdf:li>Matt</rdf:li>"));
+        assert!(xml.contains("<pdf:Keywords>x</pdf:Keywords>"));
+        assert!(xml.contains("<xmp:ModifyDate>2026-11-23T10:15:00Z</xmp:ModifyDate>"));
+        assert!(!xml.contains("Not in the XMP"), "missing fields are not added");
+    }
 }
