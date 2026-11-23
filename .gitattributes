@@ -1,0 +1,7 @@
+# Byte-exact files: no line-ending conversion on Windows checkouts (signatures and
+# byte offsets in PDFs depend on every byte).
+*.pdf binary
+*.ttf binary
+*.png binary
+*.ico binary
+*.icns binary
