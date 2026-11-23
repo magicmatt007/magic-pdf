@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod compare;
 pub mod pages;
+pub mod redact;
 pub mod ocr;
 mod lopdf_ops;
 pub mod rich;
@@ -1779,6 +1780,123 @@ mod tests {
         let mut out = Vec::new();
         doc.save_to(&mut out).unwrap();
         out
+    }
+
+    fn page_chars(engine: &Engine, doc: DocId, page: usize) -> Vec<TextChar> {
+        engine.send(Request::PageText { doc, page });
+        recv_until(engine, |r| match r {
+            Response::PageText { page: p, text, .. } if p == page => Some(text.chars.clone()),
+            _ => None,
+        })
+    }
+
+    /// Every stream of a PDF file, decompressed where possible.
+    fn all_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let doc = lopdf::Document::load_mem(bytes).unwrap();
+        doc.objects
+            .values()
+            .filter_map(|o| o.as_stream().ok())
+            .map(|s| s.decompressed_content().unwrap_or_else(|_| s.content.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn redaction_removes_text_for_good_and_is_undoable() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let chars = page_chars(&engine, 1, 0);
+        let text: String = chars.iter().map(|c| c.ch).collect();
+        let count = |t: &str, w: &str| t.matches(w).count();
+        let before = (count(&text, "quick"), count(&text, "brown"));
+        // The first "quick" (line 1).
+        let start = text.find("quick").unwrap();
+        let start = text[..start].chars().count();
+        let area = chars[start..start + 5]
+            .iter()
+            .filter_map(|c| c.rect)
+            .reduce(PdfBox::union)
+            .unwrap()
+            .expand(0.5);
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Redact { areas: vec![(0, vec![area])] },
+        });
+        let (_, mapping) = pages_changed(&engine);
+        assert_eq!(mapping.changed, vec![0]);
+        let after = page_text(&engine, 1, 0);
+        assert_eq!(count(&after, "quick"), before.0 - 1, "{after}");
+        assert_eq!(count(&after, "brown"), before.1, "the rest of the line stays");
+        assert!(after.contains("Page 1"));
+        // The rest of the line keeps its place: "brown" is where it was.
+        let brown = |cs: &[TextChar]| {
+            let t: String = cs.iter().map(|c| c.ch).collect();
+            let i = t[..t.find("brown").unwrap()].chars().count();
+            cs[i].rect.unwrap()
+        };
+        let moved = brown(&page_chars(&engine, 1, 0));
+        let orig = brown(&chars);
+        assert!((moved.left - orig.left).abs() < 0.5 && (moved.bottom - orig.bottom).abs() < 0.5, "{orig:?} -> {moved:?}");
+        // Black where the word was.
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let (w, h) = (595.0, 842.0);
+        let region = (area.left / w + 0.002, 1.0 - area.top / h + 0.002, area.right / w - 0.002, 1.0 - area.bottom / h - 0.002);
+        let px = (((region.2 - region.0) * size[0] as f32) * ((region.3 - region.1) * size[1] as f32)) as usize;
+        assert!(dark_pixels(size, &rgba, region) * 10 >= px * 9, "covered black");
+
+        // Saved and reopened: gone, and no old content stream still holds the line.
+        let path = std::env::temp_dir().join(format!("magic-pdf-redact-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let bytes = std::fs::read(&path).unwrap();
+        let line = b"The quick brown fox jumps over the lazy dog. Magic PDF horizontal layout line 1, page 1.";
+        assert!(
+            !all_streams(&bytes).iter().any(|s| s.windows(line.len()).any(|w| w == line)),
+            "the original line is still in the file"
+        );
+        open(&engine, 2, path.clone());
+        assert_eq!(count(&page_text(&engine, 2, 0), "quick"), before.0 - 1);
+        std::fs::remove_file(path).ok();
+
+        engine.send(Request::Undo { doc: 1 });
+        pages_changed(&engine);
+        assert_eq!(count(&page_text(&engine, 1, 0), "quick"), before.0);
+    }
+
+    #[test]
+    fn redaction_blackens_image_pixels_and_drops_the_original_picture() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-redact-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.pdf");
+        std::fs::write(&src, photo_pdf()).unwrap();
+        open(&engine, 1, src);
+        // The picture spans 100..244 × 500..644; redact its left half.
+        let area = PdfBox { left: 90.0, bottom: 490.0, right: 172.0, top: 650.0 };
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::Redact { areas: vec![(0, vec![area])] },
+        });
+        pages_changed(&engine);
+        let out = dir.join("redacted.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let bytes = std::fs::read(&out).unwrap();
+        // One picture left (the original is gone), its left half black, right half not.
+        let doc = lopdf::Document::load_mem(&bytes).unwrap();
+        let images: Vec<_> = doc
+            .objects
+            .values()
+            .filter_map(|o| o.as_stream().ok())
+            .filter(|s| s.dict.get(b"Subtype").and_then(|o| o.as_name()).is_ok_and(|n| n == b"Image"))
+            .filter(|s| s.dict.get(b"Width").and_then(|o| o.as_i64()).is_ok_and(|w| w == 800))
+            .collect();
+        assert_eq!(images.len(), 1, "only the redacted picture is in the file");
+        let px = images[0].decompressed_content().unwrap_or_else(|_| images[0].content.clone());
+        let bpp = px.len() / (800 * 800);
+        let at = |x: usize, y: usize| &px[(y * 800 + x) * bpp..][..3];
+        assert_eq!(at(100, 400), &[0, 0, 0], "left half blackened");
+        assert_ne!(at(700, 400), &[0, 0, 0], "right half kept");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

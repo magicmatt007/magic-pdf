@@ -226,6 +226,34 @@ unsafe extern "C" fn read_block(param: *mut c_void, position: c_ulong, buf: *mut
 }
 
 /// Copies a PDFium bitmap into RGBA pixels.
+/// A PDFium BGRA bitmap from RGBA pixels (caller destroys it).
+fn rgba_bitmap(lib: Lib, w: u32, h: u32, rgba: &[u8]) -> Option<FPDF_BITMAP> {
+    if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
+        return None;
+    }
+    // Only pixels that are not fully opaque need an alpha channel (a soft mask).
+    let alpha = rgba.chunks_exact(4).any(|p| p[3] != 255);
+    unsafe {
+        let bmp = lib.FPDFBitmap_Create(w as c_int, h as c_int, alpha.into());
+        if bmp.is_null() {
+            return None;
+        }
+        let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
+        let buf = lib.FPDFBitmap_GetBuffer(bmp) as *mut u8;
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let s = &rgba[(y * w as usize + x) * 4..][..4];
+                let d = buf.add(y * stride + x * 4);
+                *d = s[2];
+                *d.add(1) = s[1];
+                *d.add(2) = s[0];
+                *d.add(3) = s[3];
+            }
+        }
+        Some(bmp)
+    }
+}
+
 fn bitmap_rgba(lib: Lib, bmp: FPDF_BITMAP) -> (u32, u32, Vec<u8>) {
     unsafe {
         let (w, h) = (lib.FPDFBitmap_GetWidth(bmp) as usize, lib.FPDFBitmap_GetHeight(bmp) as usize);
@@ -467,6 +495,14 @@ impl Doc {
                 self.import_pages(&src, pages.as_deref(), *at)
             }
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Err("written by the worker".into()),
+            PageOp::Redact { areas } => {
+                for (i, boxes) in areas {
+                    let page = self.page(*i).ok_or("page not found")?;
+                    page.redact(boxes)?;
+                }
+                self.close_all_pages();
+                Ok(0)
+            }
             PageOp::Crop { pages, margins } => {
                 for &i in pages {
                     let page = self.page(i).ok_or("page not found")?;
@@ -1080,6 +1116,349 @@ impl<'d> Page<'d> {
             let out = bitmap_rgba(lib, bmp);
             lib.FPDFBitmap_Destroy(bmp);
             Some(out)
+        }
+    }
+
+    /// Redacts the page: removes text, image pixels, shapes and annotations under
+    /// `areas` (PDF page space) and paints the areas black. Characters whose centre
+    /// is covered go; the rest of their text object is rewritten glyph by glyph at
+    /// the same positions. Glyphs that cannot be rewritten in their font, and form
+    /// XObjects touching an area, are replaced by a picture of the page taken before
+    /// the redaction (with the areas already black).
+    fn redact(&self, areas: &[PdfBox]) -> Result<(), String> {
+        use super::redact::{removes_char, removes_object};
+        const IMAGE: c_int = 3;
+        const FORM: c_int = 5;
+        const FILL_ALTERNATE: c_int = 1;
+        let lib = self.lib();
+        let mut black: Vec<PdfBox> = areas.to_vec();
+        let mut patches: Vec<PdfBox> = Vec::new();
+        let snapshot = self.redaction_snapshot();
+
+        struct Glyph {
+            ch: u32,
+            origin: (f64, f64),
+            bbox: PdfBox,
+            remove: bool,
+        }
+        let objects: Vec<FPDF_PAGEOBJECT> =
+            unsafe { (0..lib.FPDFPage_CountObjects(self.handle)).map(|i| lib.FPDFPage_GetObject(self.handle, i)).collect() };
+        let bounds = |obj: FPDF_PAGEOBJECT| {
+            let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            unsafe { lib.is_true(lib.FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) }.then_some(PdfBox {
+                left: l,
+                bottom: b,
+                right: r,
+                top: t,
+            })
+        };
+
+        // 1. Text: characters per text object.
+        let mut glyphs: Vec<(FPDF_PAGEOBJECT, Vec<Glyph>)> = Vec::new();
+        if let Some(tp) = self.text_page() {
+            let n = unsafe { lib.FPDFText_CountChars(tp.handle) };
+            for i in 0..n {
+                unsafe {
+                    let obj = lib.FPDFText_GetTextObject(tp.handle, i);
+                    let ch = lib.FPDFText_GetUnicode(tp.handle, i);
+                    if obj.is_null() || ch < 0x20 {
+                        continue;
+                    }
+                    let (mut l, mut r, mut b, mut t) = (0.0, 0.0, 0.0, 0.0);
+                    let (mut x, mut y) = (0.0, 0.0);
+                    if !lib.is_true(lib.FPDFText_GetCharBox(tp.handle, i, &mut l, &mut r, &mut b, &mut t))
+                        || !lib.is_true(lib.FPDFText_GetCharOrigin(tp.handle, i, &mut x, &mut y))
+                    {
+                        continue;
+                    }
+                    let bbox = PdfBox {
+                        left: l as f32,
+                        bottom: b as f32,
+                        right: r as f32,
+                        top: t as f32,
+                    };
+                    let g = Glyph {
+                        ch,
+                        origin: (x, y),
+                        bbox,
+                        remove: removes_char(&bbox, areas),
+                    };
+                    match glyphs.iter_mut().find(|(o, _)| *o == obj) {
+                        Some((_, v)) => v.push(g),
+                        None => glyphs.push((obj, vec![g])),
+                    }
+                }
+            }
+        }
+        // Rewrites the kept glyphs of affected top-level text objects.
+        let mut created: Vec<(FPDF_PAGEOBJECT, u32, PdfBox)> = Vec::new();
+        for (obj, gs) in &glyphs {
+            if !gs.iter().any(|g| g.remove) {
+                continue;
+            }
+            black.extend(gs.iter().filter(|g| g.remove).map(|g| g.bbox));
+            let Some(index) = objects.iter().position(|o| o == obj) else {
+                // Inside a form XObject: handled with the form below.
+                continue;
+            };
+            unsafe {
+                let font = lib.FPDFTextObj_GetFont(*obj);
+                let mut size = 0.0f32;
+                lib.FPDFTextObj_GetFontSize(*obj, &mut size);
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                lib.FPDFPageObj_GetMatrix(*obj, &mut m);
+                let mode = lib.FPDFTextObj_GetTextRenderMode(*obj);
+                let (mut fr, mut fg, mut fb, mut fa) = (0, 0, 0, 255);
+                let fill = lib.is_true(lib.FPDFPageObj_GetFillColor(*obj, &mut fr, &mut fg, &mut fb, &mut fa));
+                let (mut sr, mut sg, mut sb, mut sa) = (0, 0, 0, 255);
+                let stroke = lib.is_true(lib.FPDFPageObj_GetStrokeColor(*obj, &mut sr, &mut sg, &mut sb, &mut sa));
+                let mut width = 0.0f32;
+                let has_width = lib.is_true(lib.FPDFPageObj_GetStrokeWidth(*obj, &mut width));
+                for g in gs.iter().filter(|g| !g.remove && g.ch != 0x20) {
+                    let new = if font.is_null() {
+                        ptr::null_mut()
+                    } else {
+                        lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, size)
+                    };
+                    let text: Vec<u16> = char::from_u32(g.ch).map(|c| wide(&c.to_string())).unwrap_or_default();
+                    if new.is_null() || text.is_empty() || !lib.is_true(lib.FPDFText_SetText(new, text.as_ptr())) {
+                        if !new.is_null() {
+                            lib.FPDFPageObj_Destroy(new);
+                        }
+                        patches.push(g.bbox);
+                        continue;
+                    }
+                    let gm = FS_MATRIX { e: g.origin.0 as f32, f: g.origin.1 as f32, ..m };
+                    lib.FPDFPageObj_SetMatrix(new, &gm);
+                    lib.FPDFTextObj_SetTextRenderMode(new, mode);
+                    if fill {
+                        lib.FPDFPageObj_SetFillColor(new, fr, fg, fb, fa);
+                    }
+                    if stroke {
+                        lib.FPDFPageObj_SetStrokeColor(new, sr, sg, sb, sa);
+                    }
+                    if has_width {
+                        lib.FPDFPageObj_SetStrokeWidth(new, width);
+                    }
+                    if !lib.is_true(lib.FPDFPage_InsertObjectAtIndex(self.handle, new, index)) {
+                        lib.FPDFPage_InsertObject(self.handle, new);
+                    }
+                    created.push((new, g.ch, g.bbox));
+                }
+                if lib.is_true(lib.FPDFPage_RemoveObject(self.handle, *obj)) {
+                    lib.FPDFPageObj_Destroy(*obj);
+                }
+            }
+        }
+        // Glyphs whose font cannot encode the character again become part of a picture.
+        if !created.is_empty()
+            && let Some(tp) = self.text_page()
+        {
+            for (obj, ch, bbox) in &created {
+                let mut buf = [0u16; 8];
+                let len = unsafe { lib.FPDFTextObj_GetText(*obj, tp.handle, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong) };
+                let got = utf16_buf_to_string(&buf[..(len as usize / 2).min(buf.len())]);
+                if got.chars().next().map(u32::from) != Some(*ch) {
+                    patches.push(*bbox);
+                    unsafe {
+                        if lib.is_true(lib.FPDFPage_RemoveObject(self.handle, *obj)) {
+                            lib.FPDFPageObj_Destroy(*obj);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Images, shapes and form XObjects (top level; text objects were handled above).
+        let hit = |b: &PdfBox| areas.iter().any(|a| a.intersects(b));
+        for &obj in objects.iter().rev() {
+            if glyphs.iter().any(|(o, gs)| *o == obj && gs.iter().any(|g| g.remove)) {
+                continue; // already replaced
+            }
+            let Some(b) = bounds(obj) else { continue };
+            if !hit(&b) {
+                continue;
+            }
+            let kind = unsafe { lib.FPDFPageObj_GetType(obj) };
+            let remove = if removes_object(&b, areas) {
+                true
+            } else if kind == FORM {
+                patches.push(b);
+                true
+            } else if kind == IMAGE {
+                !self.redact_image(obj, areas)
+            } else {
+                // Text none of whose characters is covered; shapes only partly covered.
+                false
+            };
+            if remove {
+                unsafe {
+                    if lib.is_true(lib.FPDFPage_RemoveObject(self.handle, obj)) {
+                        lib.FPDFPageObj_Destroy(obj);
+                    }
+                }
+            }
+        }
+
+        // 3. Pictures of the page where content could not be kept as it was.
+        if !patches.is_empty() {
+            let (w, h, rgba) = snapshot.ok_or("could not render the page")?;
+            for p in &patches {
+                self.insert_patch(w, h, &rgba, &p.expand(0.5), &black)?;
+            }
+        }
+
+        // 4. Annotations over an area.
+        unsafe {
+            for i in (0..lib.FPDFPage_GetAnnotCount(self.handle)).rev() {
+                let a = lib.FPDFPage_GetAnnot(self.handle, i);
+                if a.is_null() {
+                    continue;
+                }
+                let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+                let ok = lib.is_true(lib.FPDFAnnot_GetRect(a, &mut r));
+                lib.FPDFPage_CloseAnnot(a);
+                let b = PdfBox {
+                    left: r.left.min(r.right),
+                    bottom: r.bottom.min(r.top),
+                    right: r.left.max(r.right),
+                    top: r.bottom.max(r.top),
+                };
+                if ok && hit(&b) {
+                    lib.FPDFPage_RemoveAnnot(self.handle, i);
+                }
+            }
+        }
+
+        // 5. Black boxes on top.
+        for b in &black {
+            unsafe {
+                let obj = lib.FPDFPageObj_CreateNewRect(b.left, b.bottom, b.right - b.left, b.top - b.bottom);
+                if obj.is_null() {
+                    return Err("PDFium could not draw the redaction".into());
+                }
+                lib.FPDFPageObj_SetFillColor(obj, 0, 0, 0, 255);
+                lib.FPDFPath_SetDrawMode(obj, FILL_ALTERNATE, 0);
+                lib.FPDFPage_InsertObject(self.handle, obj);
+            }
+        }
+        if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(self.handle) }) {
+            Ok(())
+        } else {
+            Err("PDFium could not write the page content".into())
+        }
+    }
+
+    /// The page content (no annotations) as RGBA pixels, about 200 dpi.
+    fn redaction_snapshot(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let lib = self.lib();
+        let (pw, ph) = unsafe { (lib.FPDF_GetPageWidthF(self.handle), lib.FPDF_GetPageHeightF(self.handle)) };
+        let scale = (200.0 / 72.0f32).min(6000.0 / pw.max(ph).max(1.0));
+        let (w, h) = ((pw * scale).round().max(1.0) as c_int, (ph * scale).round().max(1.0) as c_int);
+        unsafe {
+            let bmp = lib.FPDFBitmap_CreateEx(w, h, FPDF_BITMAP_BGRA, ptr::null_mut(), 0);
+            if bmp.is_null() {
+                return None;
+            }
+            lib.FPDFBitmap_FillRect(bmp, 0, 0, w, h, 0xFFFF_FFFF);
+            lib.FPDF_RenderPageBitmap(bmp, self.handle, 0, 0, w, h, 0, FPDF_REVERSE_BYTE_ORDER);
+            let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
+            let buf = lib.FPDFBitmap_GetBuffer(bmp) as *const u8;
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(buf.add(y * stride), w as usize * 4));
+            }
+            lib.FPDFBitmap_Destroy(bmp);
+            Some((w as u32, h as u32, out))
+        }
+    }
+
+    /// Adds the part `area` of the page snapshot as an image, with `black` painted over.
+    fn insert_patch(&self, w: u32, h: u32, rgba: &[u8], area: &PdfBox, black: &[PdfBox]) -> Result<(), String> {
+        let lib = self.lib();
+        let (wi, hi) = (w as c_int, h as c_int);
+        let to_dev = |x: f32, y: f32| {
+            let (mut dx, mut dy) = (0, 0);
+            unsafe { lib.FPDF_PageToDevice(self.handle, 0, 0, wi, hi, 0, x.into(), y.into(), &mut dx, &mut dy) };
+            (dx, dy)
+        };
+        let dev_rect = |b: &PdfBox| {
+            let pts = [to_dev(b.left, b.bottom), to_dev(b.right, b.top), to_dev(b.left, b.top), to_dev(b.right, b.bottom)];
+            let x0 = pts.iter().map(|p| p.0).min().unwrap_or(0).clamp(0, wi);
+            let x1 = pts.iter().map(|p| p.0).max().unwrap_or(0).clamp(0, wi);
+            let y0 = pts.iter().map(|p| p.1).min().unwrap_or(0).clamp(0, hi);
+            let y1 = pts.iter().map(|p| p.1).max().unwrap_or(0).clamp(0, hi);
+            (x0 as u32, y0 as u32, x1 as u32, y1 as u32)
+        };
+        let (x0, y0, x1, y1) = dev_rect(area);
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(());
+        }
+        let (pw, ph) = (x1 - x0, y1 - y0);
+        let mut crop = Vec::with_capacity((pw * ph * 4) as usize);
+        for y in y0..y1 {
+            let start = ((y * w + x0) * 4) as usize;
+            crop.extend_from_slice(&rgba[start..start + (pw * 4) as usize]);
+        }
+        for b in black {
+            let (bx0, by0, bx1, by1) = dev_rect(b);
+            let (cx0, cy0) = (bx0.max(x0), by0.max(y0));
+            let (cx1, cy1) = (bx1.min(x1), by1.min(y1));
+            if cx0 < cx1 && cy0 < cy1 {
+                super::redact::fill_black(&mut crop, pw, (cx0 - x0, cy0 - y0, cx1 - x0, cy1 - y0));
+            }
+        }
+        let to_page = |dx: u32, dy: u32| {
+            let (mut x, mut y) = (0.0, 0.0);
+            unsafe { lib.FPDF_DeviceToPage(self.handle, 0, 0, wi, hi, 0, dx as c_int, dy as c_int, &mut x, &mut y) };
+            (x as f32, y as f32)
+        };
+        // Image space: (0, 0) is the bottom-left pixel corner, (1, 1) the top-right.
+        let o = to_page(x0, y1);
+        let ux = to_page(x1, y1);
+        let vy = to_page(x0, y0);
+        let m = FS_MATRIX {
+            a: ux.0 - o.0,
+            b: ux.1 - o.1,
+            c: vy.0 - o.0,
+            d: vy.1 - o.1,
+            e: o.0,
+            f: o.1,
+        };
+        unsafe {
+            let bmp = rgba_bitmap(lib, pw, ph, &crop).ok_or("out of memory for the redaction")?;
+            let img = lib.FPDFPageObj_NewImageObj(self.doc.handle);
+            let ok = lib.is_true(lib.FPDFImageObj_SetBitmap(ptr::null_mut(), 0, img, bmp));
+            lib.FPDFBitmap_Destroy(bmp);
+            if !ok {
+                lib.FPDFPageObj_Destroy(img);
+                return Err("PDFium could not store the redacted picture".into());
+            }
+            lib.FPDFPageObj_SetMatrix(img, &m);
+            lib.FPDFPage_InsertObject(self.handle, img);
+        }
+        Ok(())
+    }
+
+    /// Blackens the pixels of an image object under `areas`. False if the image could
+    /// not be read or written (the caller then removes it).
+    fn redact_image(&self, obj: FPDF_PAGEOBJECT, areas: &[PdfBox]) -> bool {
+        use super::redact::{fill_black, image_pixels};
+        let lib = self.lib();
+        let Some((w, h, mut rgba)) = self.object_image(obj) else { return false };
+        let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+        unsafe { lib.FPDFPageObj_GetMatrix(obj, &mut m) };
+        let m = [m.a, m.b, m.c, m.d, m.e, m.f];
+        for a in areas {
+            if let Some(r) = image_pixels(m, w, h, a) {
+                fill_black(&mut rgba, w, r);
+            }
+        }
+        unsafe {
+            let Some(bmp) = rgba_bitmap(lib, w, h, &rgba) else { return false };
+            let ok = lib.is_true(lib.FPDFImageObj_SetBitmap(ptr::null_mut(), 0, obj, bmp));
+            lib.FPDFBitmap_Destroy(bmp);
+            ok
         }
     }
 

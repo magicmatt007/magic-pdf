@@ -1237,6 +1237,16 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
             Ok(0)
         }
+        PageOp::Redact { areas } => {
+            od.doc.apply_page_op(op)?;
+            let pages: Vec<usize> = areas.iter().map(|(p, _)| *p).collect();
+            // Without the clean-up the removed content could still be in the file, so
+            // a failure fails the redaction (the worker restores the snapshot).
+            let bytes = super::lopdf_ops::purge_after_redaction(&od.doc.save_to_bytes()?, &pages)
+                .map_err(|e| format!("the removed content could not be cleared out of the file: {e}"))?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+            Ok(0)
+        }
         PageOp::SetOutline { outline } => {
             od.doc.kill_form_focus();
             let bytes = super::lopdf_ops::write_outline(&od.doc.save_to_bytes()?, outline)?;

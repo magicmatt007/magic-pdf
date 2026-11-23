@@ -1,5 +1,6 @@
 //! Changes PDFium has no API for, done on the saved bytes with lopdf: writing the
-//! bookmark tree (outline) and lossless compression.
+//! bookmark tree (outline), lossless compression and clearing out what redaction
+//! left unreferenced.
 
 use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 
@@ -220,4 +221,54 @@ mod tests {
         assert!(xml.contains("<xmp:ModifyDate>2026-11-23T10:15:00Z</xmp:ModifyDate>"));
         assert!(!xml.contains("Not in the XMP"), "missing fields are not added");
     }
+}
+
+/// After redaction: drops XObjects the redacted pages no longer draw from their
+/// resources, then every object nothing refers to any more (old content streams,
+/// images and annotation appearances that could still hold the removed content).
+pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, String> {
+    let mut doc = load(bytes)?;
+    let ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    for &i in pages {
+        let Some(&page_id) = ids.get(i) else { continue };
+        let content = doc.get_page_content(page_id);
+        let ops = lopdf::content::Content::decode(&content).map_err(|e| format!("could not read the page content: {e}"))?;
+        let used: Vec<Vec<u8>> = ops
+            .operations
+            .iter()
+            .filter(|op| op.operator == "Do")
+            .filter_map(|op| op.operands.first()?.as_name().ok().map(<[u8]>::to_vec))
+            .collect();
+        // The page's own resources, or inherited ones, as a direct dictionary.
+        let resources = match doc.get_page_resources(page_id) {
+            Ok((Some(d), _)) => d.clone(),
+            Ok((None, refs)) => match refs.first().and_then(|r| doc.get_dictionary(*r).ok()) {
+                Some(d) => d.clone(),
+                None => continue,
+            },
+            Err(_) => continue,
+        };
+        let mut resources = resources;
+        let xobjects = match resources.get(b"XObject") {
+            Ok(Object::Dictionary(d)) => Some(d.clone()),
+            Ok(Object::Reference(r)) => doc.get_dictionary(*r).ok().cloned(),
+            _ => None,
+        };
+        let Some(mut xobjects) = xobjects else { continue };
+        let unused: Vec<Vec<u8>> = xobjects.iter().map(|(k, _)| k.clone()).filter(|k| !used.contains(k)).collect();
+        if unused.is_empty() {
+            continue;
+        }
+        for k in unused {
+            xobjects.remove(&k);
+        }
+        resources.set("XObject", Object::Dictionary(xobjects));
+        let page = doc
+            .get_object_mut(page_id)
+            .and_then(Object::as_dict_mut)
+            .map_err(|e| format!("could not update the page: {e}"))?;
+        page.set("Resources", Object::Dictionary(resources));
+    }
+    doc.prune_objects();
+    save(&mut doc, false)
 }

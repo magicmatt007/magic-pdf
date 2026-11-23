@@ -56,6 +56,11 @@ pub enum PageOp {
     SetOutline {
         outline: Vec<super::commands::OutlineItem>,
     },
+    /// Removes everything under the areas (PDF page space) for good: text, image
+    /// pixels, shapes and annotations, and paints the areas black.
+    Redact {
+        areas: Vec<(usize, Vec<super::commands::PdfBox>)>,
+    },
     /// Changes title, author, subject and keywords.
     SetProperties {
         properties: super::commands::EditableProperties,
@@ -148,6 +153,7 @@ impl PageOp {
             PageOp::RemoveHeaderFooter { .. } => "Remove header and footer",
             PageOp::SetOutline { .. } => "Edit bookmarks",
             PageOp::SetProperties { .. } => "Document properties",
+            PageOp::Redact { .. } => "Redact",
         }
     }
 
@@ -183,6 +189,7 @@ impl PageOp {
             | PageOp::RemoveHeaderFooter { pages } => in_range(pages),
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Ok(()),
             PageOp::TextLayer { pages, .. } => in_range(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
+            PageOp::Redact { areas } => in_range(&areas.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::InsertBlank { at, .. } | PageOp::InsertFile { at, .. } => {
                 if *at > count {
                     Err("insert position is out of range".into())
@@ -242,6 +249,11 @@ impl PageOp {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
                 changed: sorted_unique(&pages.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
+            },
+            PageOp::Redact { areas } => PageMapping {
+                map: (0..count).map(Some).collect(),
+                new_count: count,
+                changed: sorted_unique(&areas.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             },
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => PageMapping {
                 map: (0..count).map(Some).collect(),

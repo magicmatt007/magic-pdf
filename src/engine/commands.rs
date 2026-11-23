@@ -90,6 +90,20 @@ impl PdfBox {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.left && x <= self.right && y >= self.bottom && y <= self.top
     }
+
+    /// Whether the two boxes share area (touching edges do not count).
+    pub fn intersects(&self, o: &PdfBox) -> bool {
+        self.left < o.right && o.left < self.right && self.bottom < o.top && o.bottom < self.top
+    }
+
+    /// Whether `o` lies completely inside this box.
+    pub fn encloses(&self, o: &PdfBox) -> bool {
+        o.left >= self.left && o.right <= self.right && o.bottom >= self.bottom && o.top <= self.top
+    }
+
+    pub fn center(&self) -> (f32, f32) {
+        ((self.left + self.right) / 2.0, (self.bottom + self.top) / 2.0)
+    }
 }
 
 /// How a page's PDF coordinates map onto its displayed (unrotated-by-view) area.
