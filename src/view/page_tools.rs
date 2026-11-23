@@ -1,6 +1,7 @@
 //! Dialogs for page tools: crop, header and footer, and saving an optimized copy.
 
 use std::path::PathBuf;
+use crate::i18n::{t, tf};
 
 use eframe::egui::{self, Ui};
 
@@ -22,12 +23,12 @@ enum Scope {
 fn scope_ui(ui: &mut Ui, scope: &mut Scope, tab: &DocTab) {
     let n = tab.target_pages().len();
     ui.horizontal(|ui| {
-        ui.label("Pages");
-        ui.radio_value(scope, Scope::All, format!("All ({})", tab.page_count()));
+        ui.label(t("Pages"));
+        ui.radio_value(scope, Scope::All, tf("All ({count})", &[("count", &tab.page_count())]));
         let label = if tab.page_selection.is_empty() {
-            format!("Current page ({})", tab.current_page + 1)
+            tf("Current page ({page})", &[("page", &(tab.current_page + 1))])
         } else {
-            format!("Selected ({n})")
+            tf("Selected ({n})", &[("n", &n)])
         };
         ui.radio_value(scope, Scope::Selected, label);
     });
@@ -43,7 +44,7 @@ fn pages(scope: Scope, tab: &DocTab) -> Vec<usize> {
 /// Dialog buttons; returns (ok, cancel).
 fn buttons(ui: &mut Ui, ok: &str) -> (bool, bool) {
     ui.add_space(6.0);
-    ui.horizontal(|ui| (ui.button(ok).clicked(), ui.button("Cancel").clicked())).inner
+    ui.horizontal(|ui| (ui.button(ok).clicked(), ui.button(t("Cancel")).clicked())).inner
 }
 
 fn window(title: &str) -> egui::Window<'_> {
@@ -65,7 +66,7 @@ pub struct CropDialog {
 pub fn crop_dialog(ctx: &egui::Context, d: &mut CropDialog, tab: &DocTab) -> (Option<Request>, bool) {
     let mut result = (None, true);
     window("Crop pages").show(ctx, |ui| {
-        ui.label("Trim the visible area of the pages (as they are shown):");
+        ui.label(t("Trim the visible area of the pages (as they are shown):"));
         egui::Grid::new("crop").num_columns(4).show(ui, |ui| {
             for (i, side) in ["Top", "Right", "Bottom", "Left"].iter().enumerate() {
                 ui.label(*side);
@@ -75,11 +76,11 @@ pub fn crop_dialog(ctx: &egui::Context, d: &mut CropDialog, tab: &DocTab) -> (Op
                 }
             }
         });
-        if ui.small_button("Same on all sides").clicked() {
+        if ui.small_button(t("Same on all sides")).clicked() {
             d.mm = [d.mm[0]; 4];
         }
         scope_ui(ui, &mut d.scope, tab);
-        ui.weak("Cropping hides content outside; Undo brings it back.");
+        ui.weak(t("Cropping hides content outside; Undo brings it back."));
         let (ok, cancel) = buttons(ui, "Crop");
         if ok && d.mm.iter().any(|&m| m > 0.0) {
             let [top, right, bottom, left] = d.mm.map(|m| m * MM);
@@ -154,19 +155,19 @@ pub fn header_footer_dialog(
         });
         ui.weak("Placeholders: {page}  {pages}  {date}  {file}");
         ui.horizontal(|ui| {
-            ui.label("Size");
+            ui.label(t("Size"));
             ui.add(egui::DragValue::new(&mut d.size).range(5.0..=36.0).suffix(" pt"));
-            ui.label("Colour");
+            ui.label(t("Colour"));
             if let Some(Some(c)) = color_picker::color_button(ui, "hf_color", Some(d.color), false, recent) {
                 d.color = c;
             }
-            ui.label("Distance from edge");
+            ui.label(t("Distance from edge"));
             ui.add(egui::DragValue::new(&mut d.margin_mm).range(2.0..=50.0).suffix(" mm"));
-            ui.label("First page number");
+            ui.label(t("First page number"));
             ui.add(egui::DragValue::new(&mut d.first_number).range(-9999..=99999));
         });
         scope_ui(ui, &mut d.scope, tab);
-        ui.weak("Applying again replaces the header and footer magic-pdf added before.");
+        ui.weak(t("Applying again replaces the header and footer magic-pdf added before."));
         let (ok, cancel) = buttons(ui, "Apply");
         if ok {
             let date = format_pdf_date(&pdf_date_now()).chars().take(10).collect::<String>();
@@ -212,18 +213,18 @@ impl Default for OptimizeDialog {
 pub fn optimize_dialog(ctx: &egui::Context, d: &mut OptimizeDialog, tab: &DocTab) -> (Option<Request>, bool) {
     let mut result = (None, true);
     window("Save optimized copy").show(ctx, |ui| {
-        ui.label("Writes a smaller copy; the open document stays as it is.");
-        ui.label("• Compresses the file structure (lossless)");
+        ui.label(t("Writes a smaller copy; the open document stays as it is."));
+        ui.label(t("• Compresses the file structure (lossless)"));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut d.scale_images, "Scale down pictures above");
+            ui.checkbox(&mut d.scale_images, t("Scale down pictures above"));
             ui.add_enabled(d.scale_images, egui::DragValue::new(&mut d.dpi).range(72..=600).suffix(" dpi"));
         });
-        ui.weak("150 dpi suits screens and office printers; 300 dpi keeps print quality.\nPictures become JPEG; black-and-white scans and transparent pictures stay as they are.");
+        ui.weak(t("150 dpi suits screens and office printers; 300 dpi keeps print quality.\nPictures become JPEG; black-and-white scans and transparent pictures stay as they are."));
         let (ok, cancel) = buttons(ui, "Save as…");
         if ok {
             let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("PDF documents", &["pdf"])
+                .add_filter(t("PDF documents"), &["pdf"])
                 .set_file_name(format!("{stem}-small.pdf"));
             if let Some(dir) = tab.path.parent() {
                 dialog = dialog.set_directory(dir);

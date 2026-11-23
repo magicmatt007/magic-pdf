@@ -31,13 +31,13 @@ impl LayoutMode {
     ];
 
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::t(match self {
             LayoutMode::Horizontal => "Horizontal",
             LayoutMode::Vertical => "Vertical",
             LayoutMode::SinglePage => "Single page",
             LayoutMode::Facing => "Facing",
             LayoutMode::Grid => "Grid",
-        }
+        })
     }
 
     /// Whether scrolling advances along the x axis.

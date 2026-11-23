@@ -2,6 +2,7 @@
 //! signature manager (draw a signature with the mouse or use a picture).
 
 use std::collections::HashMap;
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -15,7 +16,7 @@ const MAX_IMAGE: u32 = 1600;
 
 /// Loads a PNG or JPEG file as RGBA pixels for a stamp.
 pub fn load_image(path: &Path) -> Result<StampSpec, String> {
-    let img = image::open(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    let img = image::open(path).map_err(|e| tf("Could not read {file}: {e}", &[("file", &path.display()), ("e", &e)]))?;
     let img = if img.width().max(img.height()) > MAX_IMAGE {
         img.thumbnail(MAX_IMAGE, MAX_IMAGE)
     } else {
@@ -140,7 +141,7 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
                     changed = true;
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(t("Remove")).clicked() {
                         remove = Some((false, i));
                     }
                 });
@@ -152,7 +153,7 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
                     changed = true;
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(t("Remove")).clicked() {
                         remove = Some((true, i));
                     }
                 });
@@ -172,9 +173,9 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
                 None => {}
             }
         });
-    ui.add(egui::TextEdit::singleline(&mut state.new_text).hint_text("Own text").desired_width(110.0));
+    ui.add(egui::TextEdit::singleline(&mut state.new_text).hint_text(t("Own text")).desired_width(110.0));
     let text = state.new_text.trim().to_uppercase();
-    if ui.add_enabled(!text.is_empty(), egui::Button::new("Add")).clicked() {
+    if ui.add_enabled(!text.is_empty(), egui::Button::new(t("Add"))).clicked() {
         if !style.custom_stamps.contains(&text) {
             style.custom_stamps.push(text.clone());
         }
@@ -183,8 +184,8 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
         state.new_text.clear();
         changed = true;
     }
-    if ui.button("Image…").on_hover_text("Use a picture (PNG or JPEG) as a stamp").clicked()
-        && let Some(path) = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg"]).pick_file()
+    if ui.button(t("Image…")).on_hover_text(t("Use a picture (PNG or JPEG) as a stamp")).clicked()
+        && let Some(path) = rfd::FileDialog::new().add_filter(t("Pictures"), &["png", "jpg", "jpeg"]).pick_file()
     {
         if !style.image_stamps.contains(&path) {
             style.image_stamps.push(path.clone());
@@ -194,7 +195,7 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
         changed = true;
     }
     if style.stamp_image.is_none() {
-        changed |= ui.checkbox(&mut style.stamp_details, "Name and date").changed();
+        changed |= ui.checkbox(&mut style.stamp_details, t("Name and date")).changed();
     }
     changed
 }
@@ -203,11 +204,11 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
 pub fn signature_options(ui: &mut Ui, state: &mut StampState, settings: &mut Settings) -> bool {
     let mut changed = false;
     let label = |i: usize, s: &Signature| match s {
-        Signature::Drawn(_) => format!("Signature {}", i + 1),
-        Signature::Image(p) => format!("Signature {} ({})", i + 1, file_name(p)),
+        Signature::Drawn(_) => tf("Signature {n}", &[("n", &(i + 1))]),
+        Signature::Image(p) => format!("{} ({})", tf("Signature {n}", &[("n", &(i + 1))]), file_name(p)),
     };
     if settings.signatures.is_empty() {
-        ui.weak("No signature yet");
+        ui.weak(t("No signature yet"));
     } else {
         let sel = settings.annot_style.signature.min(settings.signatures.len() - 1);
         egui::ComboBox::from_id_salt("signature_choice")
@@ -221,7 +222,7 @@ pub fn signature_options(ui: &mut Ui, state: &mut StampState, settings: &mut Set
                 }
             });
     }
-    if ui.button("Signatures…").clicked() {
+    if ui.button(t("Signatures…")).clicked() {
         state.show_signatures = true;
     }
     changed
@@ -259,12 +260,12 @@ pub fn signatures_window(ctx: &egui::Context, state: &mut StampState, settings: 
     let mut changed = false;
     let mut open = state.show_signatures;
     let ink = rgb(settings.annot_style.signature_color);
-    egui::Window::new("Signatures")
+    egui::Window::new(t("Signatures"))
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .show(ctx, |ui| {
-            ui.label("Draw your signature with the mouse (or a pen):");
+            ui.label(t("Draw your signature with the mouse (or a pen):"));
             let size = vec2(420.0, 420.0 * ASPECT);
             let (rect, resp) = ui.allocate_exact_size(size, Sense::drag());
             ui.painter().rect_filled(rect, 4.0, Color32::WHITE);
@@ -286,18 +287,18 @@ pub fn signatures_window(ctx: &egui::Context, state: &mut StampState, settings: 
             paint_strokes(ui, rect, &state.drawing, ink);
             ui.horizontal(|ui| {
                 let has = state.drawing.iter().any(|s| s.len() > 1);
-                if ui.add_enabled(has, egui::Button::new("Save signature")).clicked() {
+                if ui.add_enabled(has, egui::Button::new(t("Save signature"))).clicked() {
                     let strokes: Vec<_> = state.drawing.drain(..).filter(|s| s.len() > 1).collect();
                     settings.signatures.push(Signature::Drawn(normalize(&strokes)));
                     settings.annot_style.signature = settings.signatures.len() - 1;
                     changed = true;
                 }
-                if ui.add_enabled(!state.drawing.is_empty(), egui::Button::new("Clear")).clicked() {
+                if ui.add_enabled(!state.drawing.is_empty(), egui::Button::new(t("Clear"))).clicked() {
                     state.drawing.clear();
                 }
                 ui.separator();
-                if ui.button("Use a picture…").on_hover_text("A scanned signature (PNG with transparency works best)").clicked()
-                    && let Some(path) = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg"]).pick_file()
+                if ui.button(t("Use a picture…")).on_hover_text(t("A scanned signature (PNG with transparency works best)")).clicked()
+                    && let Some(path) = rfd::FileDialog::new().add_filter(t("Pictures"), &["png", "jpg", "jpeg"]).pick_file()
                 {
                     state.images.remove(&path);
                     settings.signatures.push(Signature::Image(path));
@@ -307,7 +308,7 @@ pub fn signatures_window(ctx: &egui::Context, state: &mut StampState, settings: 
             });
             if !settings.signatures.is_empty() {
                 ui.separator();
-                ui.label("Saved signatures (click to use):");
+                ui.label(t("Saved signatures (click to use):"));
                 let mut remove = None;
                 for (i, s) in settings.signatures.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -335,7 +336,7 @@ pub fn signatures_window(ctx: &egui::Context, state: &mut StampState, settings: 
                             settings.annot_style.signature = i;
                             changed = true;
                         }
-                        if ui.button("Delete").clicked() {
+                        if ui.button(t("Delete")).clicked() {
                             remove = Some(i);
                         }
                     });
@@ -347,7 +348,7 @@ pub fn signatures_window(ctx: &egui::Context, state: &mut StampState, settings: 
                     changed = true;
                 }
             }
-            ui.weak("Signatures are kept in magic-pdf's settings on this computer. Placed signatures are pictures, not certified digital signatures.");
+            ui.weak(t("Signatures are kept in magic-pdf's settings on this computer. Placed signatures are pictures, not certified digital signatures."));
         });
     state.show_signatures = open;
     changed

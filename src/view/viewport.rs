@@ -17,12 +17,12 @@ pub enum FitMode {
 
 impl FitMode {
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::t(match self {
             FitMode::None => "Custom",
             FitMode::Width => "Fit width",
             FitMode::Height => "Fit height",
             FitMode::Page => "Fit page",
-        }
+        })
     }
 }
 

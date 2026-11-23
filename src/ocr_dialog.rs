@@ -1,6 +1,7 @@
 //! The "Recognise text (OCR)" dialog: choose pages and languages, show progress.
 
 use std::path::PathBuf;
+use crate::i18n::{t, tf};
 
 use eframe::egui;
 
@@ -135,11 +136,11 @@ impl OcrDialog {
                     self.state = None;
                     let mut msg = match recognised {
                         0 => "No text found".to_string(),
-                        1 => format!("Recognised {words} words on 1 page"),
-                        n => format!("Recognised {words} words on {n} pages"),
+                        1 => tf("Recognised {words} words on 1 page", &[("words", &words)]),
+                        n => tf("Recognised {words} words on {n} pages", &[("words", &words), ("n", &n)]),
                     };
                     if *skipped > 0 {
-                        msg += &format!(" ({skipped} already had text)");
+                        msg += &tf(" ({skipped} already had text)", &[("skipped", &skipped)]);
                     }
                     Some(msg)
                 }
@@ -174,41 +175,41 @@ impl OcrDialog {
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::unique("ocr_dialog")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading("Recognise text (OCR)");
+            ui.heading(t("Recognise text (OCR)"));
             ui.add_space(4.0);
             let (exe, langs) = match &state.tesseract {
                 Ok((exe, langs)) => (exe, langs),
                 Err(help) => {
                     ui.label(help.as_str());
                     ui.add_space(8.0);
-                    close |= ui.button("Close").clicked();
+                    close |= ui.button(t("Close")).clicked();
                     return;
                 }
             };
             if let Some((done, total)) = state.progress {
-                ui.label(format!("Recognising page {} of {total}…", (done + 1).min(total)));
+                ui.label(tf("Recognising page {page} of {total}…", &[("page", &(done + 1).min(total)), ("total", &total)]));
                 ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).show_percentage());
-                ui.weak("Each page takes a few seconds.");
+                ui.weak(t("Each page takes a few seconds."));
                 ui.add_space(8.0);
-                if ui.button("Cancel").clicked() {
+                if ui.button(t("Cancel")).clicked() {
                     out.push(Request::CancelOcr { doc });
                 }
                 return;
             }
-            ui.label("Makes scanned pages searchable and their text selectable, by adding invisible text over the page image.");
+            ui.label(t("Makes scanned pages searchable and their text selectable, by adding invisible text over the page image."));
             ui.add_space(6.0);
-            ui.strong("Pages");
-            ui.radio_value(&mut state.scope, Scope::All, format!("All pages ({count})"));
-            ui.radio_value(&mut state.scope, Scope::Current, format!("Current page ({})", tab.current_page + 1));
+            ui.strong(t("Pages"));
+            ui.radio_value(&mut state.scope, Scope::All, tf("All pages ({count})", &[("count", &count)]));
+            ui.radio_value(&mut state.scope, Scope::Current, tf("Current page ({page})", &[("page", &(tab.current_page + 1))]));
             if selected.len() > 1 || state.scope == Scope::Selected {
-                ui.radio_value(&mut state.scope, Scope::Selected, format!("Selected pages ({})", selected.len()));
+                ui.radio_value(&mut state.scope, Scope::Selected, tf("Selected pages ({n})", &[("n", &selected.len())]));
             }
-            ui.checkbox(&mut state.force, "Also pages that already have text")
-                .on_hover_text("Pages with text are normally skipped. This replaces text added by an earlier recognition; other text stays.");
+            ui.checkbox(&mut state.force, t("Also pages that already have text"))
+                .on_hover_text(t("Pages with text are normally skipped. This replaces text added by an earlier recognition; other text stays."));
             ui.add_space(6.0);
-            ui.strong("Languages");
+            ui.strong(t("Languages"));
             if langs.len() > 12 {
-                ui.add(egui::TextEdit::singleline(&mut state.filter).hint_text("Filter").desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut state.filter).hint_text(t("Filter")).desired_width(f32::INFINITY));
             }
             let filter = state.filter.to_lowercase();
             egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
@@ -235,7 +236,7 @@ impl OcrDialog {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let ready = !self.languages.is_empty();
-                if ui.add_enabled(ready, egui::Button::new("Recognise")).clicked() {
+                if ui.add_enabled(ready, egui::Button::new(t("Recognise"))).clicked() {
                     let pages = match state.scope {
                         Scope::All => (0..count).collect(),
                         Scope::Current => vec![tab.current_page],
@@ -251,7 +252,7 @@ impl OcrDialog {
                     state.error = None;
                     state.progress = Some((0, 1));
                 }
-                close |= ui.button("Cancel").clicked();
+                close |= ui.button(t("Cancel")).clicked();
             });
         });
         if (close || modal.should_close()) && state.progress.is_none() {

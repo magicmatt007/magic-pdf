@@ -214,7 +214,7 @@ pub enum AnnotKind {
 
 impl AnnotKind {
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::t(match self {
             AnnotKind::Highlight => "Highlight",
             AnnotKind::Underline => "Underline",
             AnnotKind::StrikeOut => "Strikeout",
@@ -233,7 +233,7 @@ impl AnnotKind {
             AnnotKind::Distance => "Distance",
             AnnotKind::Area => "Area",
             AnnotKind::Other => "Annotation",
-        }
+        })
     }
 
     /// Kinds whose appearance PDFium can regenerate after a style change.

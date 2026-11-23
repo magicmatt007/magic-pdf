@@ -1,6 +1,7 @@
 //! Application shell: tabs, menus, toolbar, keyboard shortcuts and engine plumbing.
 
 use std::collections::{HashMap, HashSet};
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -199,6 +200,7 @@ impl App {
         icons::install(&ctx);
         crate::fonts::install(&ctx);
         let settings = Settings::load();
+        crate::i18n::set_language(&settings.language);
         ctx.set_theme(if settings.dark_ui {
             egui::Theme::Dark
         } else {
@@ -343,14 +345,14 @@ impl App {
                     Ok(Some(r)) if manual || self.settings.skipped_version.as_deref() != Some(r.version()) => {
                         self.update = UpdateUi::Available(r);
                     }
-                    Ok(_) if manual => self.notice(&format!("magic-pdf {} is up to date", env!("CARGO_PKG_VERSION"))),
-                    Err(e) if manual => self.error = Some(format!("Could not check for updates: {e}")),
+                    Ok(_) if manual => self.notice(&tf("magic-pdf {version} is up to date", &[("version", &env!("CARGO_PKG_VERSION"))])),
+                    Err(e) if manual => self.error = Some(tf("Could not check for updates: {e}", &[("e", &e)])),
                     Err(e) => log::info!("update check failed: {e}"),
                     _ => {}
                 },
                 UpdateEvent::Downloaded(result) => match (result, std::mem::take(&mut self.update)) {
                     (Ok(path), UpdateUi::Downloading(r)) => self.update = UpdateUi::Ready(r, path),
-                    (Err(e), _) => self.error = Some(format!("The update could not be downloaded: {e}")),
+                    (Err(e), _) => self.error = Some(tf("The update could not be downloaded: {e}", &[("e", &e)])),
                     _ => {}
                 },
             }
@@ -360,7 +362,7 @@ impl App {
             UpdateUi::Available(r) | UpdateUi::Downloading(r) | UpdateUi::Ready(r, _) => r.clone(),
         };
         let mut action = None;
-        egui::Window::new("Update available")
+        egui::Window::new(t("Update available"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
@@ -382,7 +384,7 @@ impl App {
                     UpdateUi::Downloading(_) => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Downloading and verifying…");
+                            ui.label(t("Downloading and verifying…"));
                         });
                     }
                     UpdateUi::Ready(..) => {
@@ -392,30 +394,30 @@ impl App {
                             "Ready. magic-pdf closes to install the update and then starts again."
                         });
                         ui.horizontal(|ui| {
-                            if ui.button("Install now").clicked() {
+                            if ui.button(t("Install now")).clicked() {
                                 action = Some("install");
                             }
-                            if ui.button("Later").clicked() {
+                            if ui.button(t("Later")).clicked() {
                                 action = Some("later");
                             }
                         });
                     }
                     _ => {
                         if !can_install {
-                            ui.weak("Update from source: git pull, then packaging/linux/install.sh");
+                            ui.weak(t("Update from source: git pull, then packaging/linux/install.sh"));
                         }
                         ui.horizontal(|ui| {
                             if can_install {
-                                if ui.button("Install").clicked() {
+                                if ui.button(t("Install")).clicked() {
                                     action = Some("download");
                                 }
-                            } else if ui.button("Open download page").clicked() {
+                            } else if ui.button(t("Open download page")).clicked() {
                                 action = Some("page");
                             }
-                            if ui.button("Later").clicked() {
+                            if ui.button(t("Later")).clicked() {
                                 action = Some("later");
                             }
-                            if ui.button("Skip this version").clicked() {
+                            if ui.button(t("Skip this version")).clicked() {
                                 action = Some("skip");
                             }
                         });
@@ -461,7 +463,7 @@ impl App {
     fn take(&mut self, t: crate::ipc::TabTransfer) {
         let original = simplify_path(t.original.clone());
         if self.tabs.iter().any(|tab| tab.path == original) {
-            self.error = Some(format!("{} is already open in this window.", original.display()));
+            self.error = Some(tf("{file} is already open in this window.", &[("file", &original.display())]));
             return;
         }
         let id = self.next_id;
@@ -536,7 +538,7 @@ impl App {
                 if file != self.tabs[index].path {
                     let _ = std::fs::remove_file(&file);
                 }
-                self.error = Some(format!("Could not move the tab: {e}"));
+                self.error = Some(tf("Could not move the tab: {e}", &[("e", &e)]));
             }
         }
     }
@@ -606,7 +608,7 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+        let mut dialog = rfd::FileDialog::new().add_filter(t("PDF documents"), &["pdf", "PDF"]);
         if let Some(dir) = self.current_dir() {
             dialog = dialog.set_directory(dir);
         }
@@ -632,7 +634,7 @@ impl App {
         }
         let path = if save_as {
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("PDF documents", &["pdf"])
+                .add_filter(t("PDF documents"), &["pdf"])
                 .set_file_name(&tab.name);
             if let Some(dir) = tab.path.parent() {
                 dialog = dialog.set_directory(dir);
@@ -956,7 +958,7 @@ impl App {
             }
             Response::Printed { pages } => {
                 if let Some(n) = pages {
-                    self.notice(&format!("Sent {n} page(s) to the printer"));
+                    self.notice(&tf("Sent {n} page(s) to the printer", &[("n", &n)]));
                 }
             }
             Response::Error { doc, message } => {
@@ -1007,7 +1009,7 @@ impl App {
                 size: info.page_sizes[last.min(count - 1)],
             })),
             PageAction::InsertFileAfter => {
-                let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+                let mut dialog = rfd::FileDialog::new().add_filter(t("PDF documents"), &["pdf", "PDF"]);
                 if let Some(d) = &dir {
                     dialog = dialog.set_directory(d);
                 }
@@ -1022,7 +1024,7 @@ impl App {
             }
             PageAction::Extract => {
                 let mut dialog = rfd::FileDialog::new()
-                    .add_filter("PDF documents", &["pdf"])
+                    .add_filter(t("PDF documents"), &["pdf"])
                     .set_file_name(format!("{stem}-pages.pdf"));
                 if let Some(d) = &dir {
                     dialog = dialog.set_directory(d);
@@ -1049,7 +1051,7 @@ impl App {
         let b = match other {
             Some(b) => b,
             None => {
-                let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+                let mut dialog = rfd::FileDialog::new().add_filter(t("PDF documents"), &["pdf", "PDF"]);
                 if let Some(dir) = self.current_dir() {
                     dialog = dialog.set_directory(dir);
                 }
@@ -1136,37 +1138,37 @@ impl App {
         let mut go: Option<usize> = None;
         let mut end = false;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("Comparing {na} ↔ {nb}")).strong());
+            ui.label(egui::RichText::new(tf("Comparing {na} ↔ {nb}", &[("na", &na), ("nb", &nb)])).strong());
             ui.separator();
             match &c.diffs {
                 None => {
                     ui.spinner();
-                    ui.label("Comparing the text…");
+                    ui.label(t("Comparing the text…"));
                 }
                 Some(d) if d.is_empty() => {
-                    ui.label("The text is the same.");
+                    ui.label(t("The text is the same."));
                 }
                 Some(d) => {
                     let changes: usize = d.iter().map(|p| p.summary.len()).sum();
                     let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
                     ui.label(format!("{} on {}", plural(changes, "change", "changes"), plural(d.len(), "page", "pages")));
                     let cur = c.current;
-                    if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text("Previous page with changes").clicked() {
+                    if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text(t("Previous page with changes")).clicked() {
                         go = Some(cur.map_or(d.len() - 1, |i| (i + d.len() - 1) % d.len()));
                     }
-                    if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text("Next page with changes").clicked() {
+                    if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text(t("Next page with changes")).clicked() {
                         go = Some(cur.map_or(0, |i| (i + 1) % d.len()));
                     }
                     if let Some(p) = cur.and_then(|i| d.get(i)) {
                         let text = p.summary.iter().take(3).cloned().collect::<Vec<_>>().join("   ·   ");
                         let more = if p.summary.len() > 3 { format!("  (+{})", p.summary.len() - 3) } else { String::new() };
-                        ui.label(format!("Page {}: {text}{more}", p.page + 1)).on_hover_text(p.summary.join("\n"));
+                        ui.label(format!("{}: {text}{more}", tf("Page {page}", &[("page", &(p.page + 1))]))).on_hover_text(p.summary.join("\n"));
                     }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                end = ui.button("End comparison").clicked();
-                ui.weak("Red: only on the left · Green: only on the right");
+                end = ui.button(t("End comparison")).clicked();
+                ui.weak(t("Red: only on the left · Green: only on the right"));
             });
         });
         if end {
@@ -1233,20 +1235,20 @@ impl App {
         let dir = tab.path.parent().map(Path::to_path_buf);
         let mut go = false;
         let mut cancel = false;
-        egui::Window::new("Split document")
+        egui::Window::new(t("Split document"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Pages per file");
+                    ui.label(t("Pages per file"));
                     ui.add(egui::DragValue::new(&mut every).range(1..=count.max(1)));
                 });
                 let files = count.div_ceil(every.max(1));
                 ui.weak(format!("Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …"));
                 ui.horizontal(|ui| {
-                    go = ui.button("Choose folder…").clicked();
-                    cancel = ui.button("Cancel").clicked();
+                    go = ui.button(t("Choose folder…")).clicked();
+                    cancel = ui.button(t("Cancel")).clicked();
                 });
             });
         self.split_every = Some(every);
@@ -1269,7 +1271,7 @@ impl App {
     fn make_default_viewer(&mut self) {
         if cfg!(windows) {
             if let Err(e) = open::that_detached("ms-settings:defaultapps?registeredAppUser=magic-pdf") {
-                self.error = Some(format!("Could not open Windows Settings: {e}"));
+                self.error = Some(tf("Could not open Windows Settings: {e}", &[("e", &e)]));
             }
             return;
         }
@@ -1333,8 +1335,8 @@ impl App {
         while let Ok(result) = self.print_results.1.try_recv() {
             match result {
                 Ok(msg) if msg.is_empty() => self.notice("Sent to the printer"),
-                Ok(msg) => self.notice(&format!("Sent to the printer ({msg})")),
-                Err(e) => self.error = Some(format!("Printing failed: {e}")),
+                Ok(msg) => self.notice(&tf("Sent to the printer ({msg})", &[("msg", &msg)])),
+                Err(e) => self.error = Some(tf("Printing failed: {e}", &[("e", &e)])),
             }
         }
         let Some(dlg) = &mut self.print_dialog else { return };
@@ -1345,13 +1347,13 @@ impl App {
         let (count, current, title) = (tab.page_count(), tab.current_page, tab.name.clone());
         let mut submit = None;
         let mut close = false;
-        egui::Window::new("Print")
+        egui::Window::new(t("Print"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 egui::Grid::new("print_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label("Printer");
+                    ui.label(t("Printer"));
                     egui::ComboBox::from_id_salt("printer")
                         .selected_text(dlg.printer.clone().unwrap_or_default())
                         .width(220.0)
@@ -1361,15 +1363,15 @@ impl App {
                             }
                         });
                     ui.end_row();
-                    ui.label("Copies");
+                    ui.label(t("Copies"));
                     ui.add(egui::DragValue::new(&mut dlg.copies).range(1..=99));
                     ui.end_row();
-                    ui.label("Pages");
+                    ui.label(t("Pages"));
                     ui.vertical(|ui| {
-                        ui.radio_value(&mut dlg.pages, PageChoice::All, format!("All ({count})"));
-                        ui.radio_value(&mut dlg.pages, PageChoice::Current, format!("Current page ({})", current + 1));
+                        ui.radio_value(&mut dlg.pages, PageChoice::All, tf("All ({count})", &[("count", &count)]));
+                        ui.radio_value(&mut dlg.pages, PageChoice::Current, tf("Current page ({page})", &[("page", &(current + 1))]));
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut dlg.pages, PageChoice::Range, "Pages:");
+                            ui.radio_value(&mut dlg.pages, PageChoice::Range, t("Pages:"));
                             let r = ui.add(
                                 egui::TextEdit::singleline(&mut dlg.range)
                                     .hint_text("e.g. 1-3, 5")
@@ -1381,10 +1383,10 @@ impl App {
                         });
                     });
                     ui.end_row();
-                    ui.label("Options");
+                    ui.label(t("Options"));
                     ui.vertical(|ui| {
-                        ui.checkbox(&mut dlg.two_sided, "Print on both sides");
-                        ui.checkbox(&mut dlg.fit_to_page, "Fit to paper");
+                        ui.checkbox(&mut dlg.two_sided, t("Print on both sides"));
+                        ui.checkbox(&mut dlg.fit_to_page, t("Fit to paper"));
                     });
                     ui.end_row();
                 });
@@ -1393,7 +1395,7 @@ impl App {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Print").clicked() {
+                    if ui.button(t("Print")).clicked() {
                         let pages = match dlg.pages {
                             PageChoice::All => Ok(None),
                             PageChoice::Current => Ok(Some((current + 1).to_string())),
@@ -1413,7 +1415,7 @@ impl App {
                             Err(e) => dlg.error = Some(e),
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         close = true;
                     }
                 });
@@ -1713,7 +1715,7 @@ impl App {
             };
             ctx.copy_text(text.clone());
             self.annot_clip_text = Some(text);
-            self.notice = Some((format!("{kind} copied (Ctrl+V pastes it under the mouse)"), ctx.input(|i| i.time)));
+            self.notice = Some((tf("{kind} copied (Ctrl+V pastes it under the mouse)", &[("kind", &kind)]), ctx.input(|i| i.time)));
         }
         if !typing
             && tab.form_focus.is_none()
@@ -1826,13 +1828,13 @@ impl App {
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             let has_tab = self.tabs.get(self.active).is_some_and(|t| t.info().is_some());
-            ui.menu_button("File", |ui| {
-                if ui.button(kb("Open…\tCtrl+O")).clicked() {
+            ui.menu_button(t("File"), |ui| {
+                if ui.button(kb(t("Open…\tCtrl+O"))).clicked() {
                     self.open_dialog();
                 }
                 let any_recent = !self.settings.recent.is_empty() || !self.settings.pinned.is_empty();
                 ui.add_enabled_ui(any_recent, |ui| {
-                    ui.menu_button("Open recent", |ui| {
+                    ui.menu_button(t("Open recent"), |ui| {
                         if let Some(a) = recent_list(ui, &self.settings, true) {
                             self.recent_action(a);
                             ui.close();
@@ -1840,17 +1842,17 @@ impl App {
                     });
                 });
                 ui.separator();
-                if ui.add_enabled(has_tab, egui::Button::new(kb("Save\tCtrl+S"))).clicked() {
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Save\tCtrl+S")))).clicked() {
                     self.save_active(false);
                 }
                 if ui
-                    .add_enabled(has_tab, egui::Button::new(kb("Save as…\tCtrl+Shift+S")))
+                    .add_enabled(has_tab, egui::Button::new(kb(t("Save as…\tCtrl+Shift+S"))))
                     .clicked()
                 {
                     self.save_active(true);
                 }
                 ui.add_enabled_ui(has_tab, |ui| {
-                    ui.menu_button("Compare with", |ui| {
+                    ui.menu_button(t("Compare with"), |ui| {
                         let others: Vec<(DocId, String)> = self
                             .tabs
                             .iter()
@@ -1864,57 +1866,57 @@ impl App {
                                 ui.close();
                             }
                         }
-                        if ui.button("Another file…").clicked() {
+                        if ui.button(t("Another file…")).clicked() {
                             self.start_compare(None);
                             ui.close();
                         }
                     });
                 });
-                if ui.add_enabled(has_tab, egui::Button::new("Save optimized copy…")).clicked() {
+                if ui.add_enabled(has_tab, egui::Button::new(t("Save optimized copy…"))).clicked() {
                     self.optimize_dialog = Some(Default::default());
                 }
-                if ui.add_enabled(has_tab, egui::Button::new(kb("Print…\tCtrl+P"))).clicked() {
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Print…\tCtrl+P")))).clicked() {
                     self.print();
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(!self.tabs.is_empty(), egui::Button::new(kb("Close tab\tCtrl+W")))
+                    .add_enabled(!self.tabs.is_empty(), egui::Button::new(kb(t("Close tab\tCtrl+W"))))
                     .clicked()
                     && let Some(t) = self.tabs.get(self.active)
                 {
                     self.request_close(vec![t.id], false);
                 }
-                if ui.button(kb("Quit\tCtrl+Q")).clicked() {
+                if ui.button(kb(t("Quit\tCtrl+Q"))).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            ui.menu_button(t("Edit"), |ui| {
                 let (can_undo, can_redo, has_sel) = self
                     .tabs
                     .get(self.active)
                     .map(|t| (t.can_undo, t.can_redo, t.selected_annot.is_some()))
                     .unwrap_or_default();
-                if ui.add_enabled(can_undo, egui::Button::new(kb("Undo\tCtrl+Z"))).clicked() {
+                if ui.add_enabled(can_undo, egui::Button::new(kb(t("Undo\tCtrl+Z")))).clicked() {
                     self.undo(false);
                 }
-                if ui.add_enabled(can_redo, egui::Button::new(kb("Redo\tCtrl+Y"))).clicked() {
+                if ui.add_enabled(can_redo, egui::Button::new(kb(t("Redo\tCtrl+Y")))).clicked() {
                     self.undo(true);
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(has_sel, egui::Button::new("Delete annotation\tDel"))
+                    .add_enabled(has_sel, egui::Button::new(t("Delete annotation\tDel")))
                     .clicked()
                 {
                     self.delete_selected_annot();
                 }
                 if ui
-                    .add_enabled(has_sel, egui::Button::new(kb("Copy annotation\tCtrl+C")))
+                    .add_enabled(has_sel, egui::Button::new(kb(t("Copy annotation\tCtrl+C"))))
                     .clicked()
                 {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestCopy);
                 }
                 if ui
-                    .add_enabled(self.annot_clip_text.is_some() && has_tab, egui::Button::new(kb("Paste annotation\tCtrl+V")))
+                    .add_enabled(self.annot_clip_text.is_some() && has_tab, egui::Button::new(kb(t("Paste annotation\tCtrl+V"))))
                     .clicked()
                     && let Some(tab) = self.tabs.get_mut(self.active)
                 {
@@ -1923,11 +1925,11 @@ impl App {
                     tab.outbox.push(Request::PasteAnnot { doc: tab.id, page, at: None });
                 }
                 ui.separator();
-                if ui.button(kb("Settings…\tCtrl+,")).clicked() {
+                if ui.button(kb(t("Settings…\tCtrl+,"))).clicked() {
                     self.show_settings = true;
                 }
             });
-            ui.menu_button("Pages", |ui| {
+            ui.menu_button(t("Pages"), |ui| {
                 let (n, total) = self
                     .tabs
                     .get(self.active)
@@ -1938,27 +1940,27 @@ impl App {
                     ui.weak(if n == 1 {
                         "Acts on the selected (or current) page".to_string()
                     } else {
-                        format!("Acts on {n} selected pages")
+                        tf("Acts on {n} selected pages", &[("n", &n)])
                     });
                     if let Some(a) = sidebar::page_menu(ui, n, total) {
                         self.page_action(a);
                     }
                     ui.separator();
-                    if ui.button("Recognise text (OCR)…").clicked()
+                    if ui.button(t("Recognise text (OCR)…")).clicked()
                         && let Some(t) = self.tabs.get(self.active)
                     {
                         self.ocr.open(t.id, t.page_selection.len() > 1);
                     }
                     ui.separator();
-                    if ui.button("Crop pages…").clicked() {
+                    if ui.button(t("Crop pages…")).clicked() {
                         self.crop_dialog = Some(Default::default());
                     }
-                    if ui.button("Header and footer…").clicked() {
+                    if ui.button(t("Header and footer…")).clicked() {
                         self.hf_dialog = Some(Default::default());
                     }
                     if ui
-                        .button("Remove header and footer")
-                        .on_hover_text("Removes what magic-pdf added, on all pages")
+                        .button(t("Remove header and footer"))
+                        .on_hover_text(t("Removes what magic-pdf added, on all pages"))
                         .clicked()
                         && let Some(tab) = self.tabs.get_mut(self.active)
                     {
@@ -1967,7 +1969,7 @@ impl App {
                     }
                 });
             });
-            ui.menu_button("View", |ui| {
+            ui.menu_button(t("View"), |ui| {
                 for (i, mode) in LayoutMode::ALL.into_iter().enumerate() {
                     let selected = self.tabs.get(self.active).is_some_and(|t| t.mode == mode);
                     if ui
@@ -1989,52 +1991,52 @@ impl App {
                         t.viewport.fit = fit;
                     }
                 }
-                if ui.add_enabled(has_tab, egui::Button::new(kb("Actual size\tCtrl+0"))).clicked()
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Actual size\tCtrl+0")))).clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.set_zoom(ACTUAL_SIZE);
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(has_tab, egui::Button::new(kb("Rotate clockwise\tCtrl+R")))
+                    .add_enabled(has_tab, egui::Button::new(kb(t("Rotate clockwise\tCtrl+R"))))
                     .clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(true);
                 }
                 if ui
-                    .add_enabled(has_tab, egui::Button::new(kb("Rotate counter-clockwise\tCtrl+Shift+R")))
+                    .add_enabled(has_tab, egui::Button::new(kb(t("Rotate counter-clockwise\tCtrl+Shift+R"))))
                     .clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(false);
                 }
                 ui.separator();
-                ui.checkbox(&mut self.settings.show_sidebar, "Sidebar\tF9");
+                ui.checkbox(&mut self.settings.show_sidebar, t("Sidebar\tF9"));
                 let mut night = self.settings.night_mode;
-                if ui.checkbox(&mut night, "Night mode (invert pages)").changed() {
+                if ui.checkbox(&mut night, t("Night mode (invert pages)")).changed() {
                     self.set_night_mode(night);
                 }
                 let mut dark = self.settings.dark_ui;
-                if ui.checkbox(&mut dark, "Dark interface").changed() {
+                if ui.checkbox(&mut dark, t("Dark interface")).changed() {
                     self.settings.dark_ui = dark;
                     ui.ctx().set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
                     self.settings.save();
                 }
             });
-            ui.menu_button("Help", |ui| {
-                if cfg!(any(windows, target_os = "linux")) && ui.button("Make magic-pdf the default PDF viewer…").clicked() {
+            ui.menu_button(t("Help"), |ui| {
+                if cfg!(any(windows, target_os = "linux")) && ui.button(t("Make magic-pdf the default PDF viewer…")).clicked() {
                     self.make_default_viewer();
                 }
-                if ui.button("Check for updates…").clicked() {
+                if ui.button(t("Check for updates…")).clicked() {
                     self.check_for_updates(true);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Keyboard shortcuts").clicked() {
+                if ui.button(t("Keyboard shortcuts")).clicked() {
                     self.show_shortcuts = true;
                 }
-                if ui.button("About magic-pdf").clicked() {
+                if ui.button(t("About magic-pdf")).clicked() {
                     self.show_about = true;
                 }
             });
@@ -2044,9 +2046,9 @@ impl App {
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.settings.show_sidebar, icons::text(icons::SIDEBAR))
-                .on_hover_text("Show or hide the sidebar (F9)");
+                .on_hover_text(t("Show or hide the sidebar (F9)"));
             ui.separator();
-            if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text(kb("Open a PDF (Ctrl+O)")).clicked() {
+            if ui.button(icons::text(icons::FOLDER_OPEN)).on_hover_text(kb(t("Open a PDF (Ctrl+O)"))).clicked() {
                 self.open_dialog();
             }
             let (has_doc, dirty, can_undo, can_redo) = self
@@ -2056,28 +2058,28 @@ impl App {
                 .unwrap_or_default();
             if ui
                 .add_enabled(has_doc && dirty, egui::Button::new(icons::text(icons::FLOPPY_DISK)))
-                .on_hover_text(kb("Save (Ctrl+S)"))
+                .on_hover_text(kb(t("Save (Ctrl+S)")))
                 .clicked()
             {
                 self.save_active(false);
             }
             if ui
                 .add_enabled(has_doc, egui::Button::new(icons::text(icons::PRINTER)))
-                .on_hover_text(kb("Print (Ctrl+P)"))
+                .on_hover_text(kb(t("Print (Ctrl+P)")))
                 .clicked()
             {
                 self.print();
             }
             if ui
                 .add_enabled(can_undo, egui::Button::new(icons::text(icons::UNDO)))
-                .on_hover_text(kb("Undo (Ctrl+Z)"))
+                .on_hover_text(kb(t("Undo (Ctrl+Z)")))
                 .clicked()
             {
                 self.undo(false);
             }
             if ui
                 .add_enabled(can_redo, egui::Button::new(icons::text(icons::REDO)))
-                .on_hover_text(kb("Redo (Ctrl+Y)"))
+                .on_hover_text(kb(t("Redo (Ctrl+Y)")))
                 .clicked()
             {
                 self.undo(true);
@@ -2124,7 +2126,7 @@ impl App {
                             }
                         }
                     });
-                    menu.response.on_hover_text("More shapes");
+                    menu.response.on_hover_text(t("More shapes"));
                 }
             }
             ui.separator();
@@ -2133,7 +2135,7 @@ impl App {
             let ready = tab.info().is_some();
             ui.add_enabled_ui(ready, |ui| {
                 let n = tab.page_count();
-                if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text("Previous page (PgUp)").clicked() {
+                if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text(t("Previous page (PgUp)")).clicked() {
                     tab.step_page(false);
                 }
                 let resp = ui.add(
@@ -2150,12 +2152,12 @@ impl App {
                     tab.page_input = (tab.current_page + 1).to_string();
                 }
                 ui.label(format!("/ {n}"));
-                if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text("Next page (PgDn)").clicked() {
+                if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text(t("Next page (PgDn)")).clicked() {
                     tab.step_page(true);
                 }
                 ui.separator();
 
-                if ui.button(icons::text(icons::ZOOM_OUT)).on_hover_text(kb("Zoom out (Ctrl+-)")).clicked() {
+                if ui.button(icons::text(icons::ZOOM_OUT)).on_hover_text(kb(t("Zoom out (Ctrl+-)"))).clicked() {
                     tab.zoom_step(false);
                 }
                 let label = match tab.viewport.fit {
@@ -2178,7 +2180,7 @@ impl App {
                             }
                         }
                     });
-                if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text(kb("Zoom in (Ctrl++)")).clicked() {
+                if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text(kb(t("Zoom in (Ctrl++)"))).clicked() {
                     tab.zoom_step(true);
                 }
                 ui.separator();
@@ -2208,7 +2210,7 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text(format!("Page layout: {}", tab.mode.label()));
+                .on_hover_text(tf("Page layout: {layout}", &[("layout", &tab.mode.label())]));
             });
 
             // Search, right-aligned.
@@ -2216,10 +2218,10 @@ impl App {
             let mut clear = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(tab) = self.tabs.get_mut(self.active) else { return };
-                if ui.button(icons::text(icons::CARET_DOWN)).on_hover_text("Next match (F3)").clicked() {
+                if ui.button(icons::text(icons::CARET_DOWN)).on_hover_text(t("Next match (F3)")).clicked() {
                     tab.search_step(true);
                 }
-                if ui.button(icons::text(icons::CARET_UP)).on_hover_text("Previous match (Shift+F3)").clicked() {
+                if ui.button(icons::text(icons::CARET_UP)).on_hover_text(t("Previous match (Shift+F3)")).clicked() {
                     tab.search_step(false);
                 }
                 let all_before = self.search_all;
@@ -2231,12 +2233,12 @@ impl App {
                 let icon = icons::text(icons::TEXT_AA);
                 let icon = if any { icon.color(ui.visuals().selection.stroke.color) } else { icon };
                 ui.menu_button(icon, |ui| {
-                    ui.checkbox(&mut s.match_case, "Match case");
-                    ui.checkbox(&mut s.whole_word, "Whole words");
-                    ui.checkbox(&mut self.search_all, "All open tabs");
+                    ui.checkbox(&mut s.match_case, t("Match case"));
+                    ui.checkbox(&mut s.whole_word, t("Whole words"));
+                    ui.checkbox(&mut self.search_all, t("All open tabs"));
                 })
                 .response
-                .on_hover_text("Search options: match case, whole words, all open tabs");
+                .on_hover_text(t("Search options: match case, whole words, all open tabs"));
                 if (before != (s.match_case, s.whole_word) || all_before != self.search_all) && s.submitted.is_some() {
                     submit = true;
                 }
@@ -2253,7 +2255,7 @@ impl App {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut s.query)
                         .id(id)
-                        .hint_text(kb("Search (Ctrl+F)"))
+                        .hint_text(kb(t("Search (Ctrl+F)")))
                         .desired_width(150.0),
                 );
                 ui.label(icons::text(icons::MAGNIFYING_GLASS));
@@ -2301,7 +2303,7 @@ impl App {
                 };
                 let recent = &mut self.settings.recent_colors;
                 if let Some(slot) = tool.color(&mut self.settings.annot_style) {
-                    ui.label("Colour");
+                    ui.label(t("Colour"));
                     if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
                         *slot = c;
                         changed = true;
@@ -2324,7 +2326,7 @@ impl App {
             ui.label(egui::RichText::new(tool.label()).strong());
             ui.separator();
             if let Some(slot) = tool.color(style) {
-                ui.label(if tool == Tool::TextBox { "Border" } else { "Colour" });
+                ui.label(if tool == Tool::TextBox { t("Border") } else { t("Colour") });
                 if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
                     *slot = c;
                     changed = true;
@@ -2332,28 +2334,28 @@ impl App {
             }
             match tool {
                 Tool::Ink => {
-                    ui.label("Width");
+                    ui.label(t("Width"));
                     changed |= width(ui, &mut style.ink_width);
                 }
                 Tool::Line | Tool::Arrow => {
-                    ui.label("Width");
+                    ui.label(t("Width"));
                     changed |= width(ui, &mut style.shape_width);
                 }
                 Tool::Distance | Tool::Area => {
-                    ui.label("Width");
+                    ui.label(t("Width"));
                     changed |= width(ui, &mut style.shape_width);
                     if tool == Tool::Area {
-                        ui.label("Fill");
+                        ui.label(t("Fill"));
                         if let Some(f) = color_picker::color_button(ui, "tool_area_fill", style.shape_fill, true, recent) {
                             style.shape_fill = f;
                             changed = true;
                         }
                     }
                     ui.separator();
-                    ui.label("Scale 1 :");
+                    ui.label(t("Scale 1 :"));
                     changed |= ui
                         .add(egui::DragValue::new(&mut style.measure_ratio).range(0.001..=1_000_000.0).speed(1.0))
-                        .on_hover_text("1 for full size; 100 for a drawing at 1:100")
+                        .on_hover_text(t("1 for full size; 100 for a drawing at 1:100"))
                         .changed();
                     egui::ComboBox::from_id_salt("measure_unit")
                         .selected_text(style.measure_unit.clone())
@@ -2365,32 +2367,32 @@ impl App {
                         });
                 }
                 Tool::Rect | Tool::Ellipse | Tool::Polygon | Tool::Cloud => {
-                    ui.label("Width");
+                    ui.label(t("Width"));
                     changed |= width(ui, &mut style.shape_width);
-                    ui.label("Fill");
+                    ui.label(t("Fill"));
                     if let Some(f) = color_picker::color_button(ui, "tool_shape_fill", style.shape_fill, true, recent) {
                         style.shape_fill = f;
                         changed = true;
                     }
                 }
                 Tool::TextBox => {
-                    ui.label("Width");
+                    ui.label(t("Width"));
                     changed |= ui
                         .add(egui::Slider::new(&mut style.textbox_border_width, 0.0..=6.0).text("pt"))
                         .changed();
-                    ui.label("Fill");
+                    ui.label(t("Fill"));
                     if let Some(f) = color_picker::color_button(ui, "tool_box_fill", style.textbox_fill, true, recent) {
                         style.textbox_fill = f;
                         changed = true;
                     }
-                    ui.label("Text");
+                    ui.label(t("Text"));
                     if let Some(Some(c)) =
                         color_picker::color_button(ui, "tool_box_text", Some(style.textbox_text), false, recent)
                     {
                         style.textbox_text = c;
                         changed = true;
                     }
-                    ui.label("Size");
+                    ui.label(t("Size"));
                     changed |= ui
                         .add(egui::DragValue::new(&mut style.textbox_font_size).range(6.0..=72.0).suffix(" pt"))
                         .changed();
@@ -2412,7 +2414,7 @@ impl App {
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let resp = ui
                         .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
-                        .on_hover_text(format!("{}\nDrag out of the window to open it in its own window", tab.path.display()));
+                        .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag out of the window to open it in its own window")));
                     tab_rects.push(resp.rect);
                     if resp.clicked() {
                         self.active = i;
@@ -2433,12 +2435,12 @@ impl App {
                     }
                     let (doc, peers) = (tab.id, &self.tab_menu_peers);
                     resp.context_menu(|ui| {
-                        if ui.button("Move to new window").clicked() {
+                        if ui.button(t("Move to new window")).clicked() {
                             move_to = Some((doc, MoveTarget::NewWindow(None)));
                             ui.close();
                         }
                         ui.add_enabled_ui(!peers.is_empty(), |ui| {
-                            ui.menu_button("Move to window", |ui| {
+                            ui.menu_button(t("Move to window"), |ui| {
                                 for (peer, title) in peers {
                                     if ui.button(title).clicked() {
                                         move_to = Some((doc, MoveTarget::Peer(peer.clone())));
@@ -2448,12 +2450,12 @@ impl App {
                             });
                         });
                         ui.separator();
-                        if ui.button("Close").clicked() {
+                        if ui.button(t("Close")).clicked() {
                             close = Some(doc);
                             ui.close();
                         }
                     });
-                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb("Close (Ctrl+W)")).clicked() {
+                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb(t("Close (Ctrl+W)"))).clicked() {
                         close = Some(tab.id);
                     }
                     ui.add_space(6.0);
@@ -2495,7 +2497,7 @@ impl App {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.label(tab.title());
                             if outside {
-                                ui.weak("Release to move it to its own window");
+                                ui.weak(t("Release to move it to its own window"));
                             }
                         });
                     });
@@ -2528,14 +2530,14 @@ impl App {
         let LoadState::NeedsPassword { input, wrong } = &mut tab.state else { return };
         let mut submit = false;
         let mut cancel = false;
-        egui::Window::new("Password required")
+        egui::Window::new(t("Password required"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(format!("“{}” is protected by a password.", tab.name));
+                ui.label(tf("“{file}” is protected by a password.", &[("file", &tab.name)]));
                 if *wrong {
-                    ui.colored_label(ui.visuals().error_fg_color, "Incorrect password, try again.");
+                    ui.colored_label(ui.visuals().error_fg_color, t("Incorrect password, try again."));
                 }
                 let resp = ui.add(egui::TextEdit::singleline(input).password(true));
                 resp.request_focus();
@@ -2543,8 +2545,8 @@ impl App {
                     submit = true;
                 }
                 ui.horizontal(|ui| {
-                    submit |= ui.button("Open").clicked();
-                    cancel = ui.button("Cancel").clicked();
+                    submit |= ui.button(t("Open")).clicked();
+                    cancel = ui.button(t("Cancel")).clicked();
                 });
             });
         if submit {
@@ -2570,15 +2572,15 @@ impl App {
             .collect();
         let waiting = !intent.awaiting_save.is_empty();
         let mut choice = None;
-        egui::Window::new("Unsaved changes")
+        egui::Window::new(t("Unsaved changes"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 if dirty.len() == 1 {
-                    ui.label(format!("Save changes to “{}” before closing?", dirty[0].1));
+                    ui.label(tf("Save changes to “{file}” before closing?", &[("file", &dirty[0].1)]));
                 } else {
-                    ui.label("These documents have unsaved changes:");
+                    ui.label(t("These documents have unsaved changes:"));
                     for (_, name) in &dirty {
                         ui.label(format!("  • {name}"));
                     }
@@ -2587,18 +2589,18 @@ impl App {
                 if waiting {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Saving…");
+                        ui.label(t("Saving…"));
                     });
                     return;
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(t("Save")).clicked() {
                         choice = Some(0);
                     }
-                    if ui.button("Don't save").clicked() {
+                    if ui.button(t("Don't save")).clicked() {
                         choice = Some(1);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         choice = Some(2);
                     }
                 });
@@ -2634,13 +2636,13 @@ impl App {
     fn error_dialog(&mut self, ctx: &egui::Context) {
         let Some(message) = self.error.clone() else { return };
         let mut ok = false;
-        egui::Window::new("Error")
+        egui::Window::new(t("Error"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label(message);
-                ok = ui.button("OK").clicked();
+                ok = ui.button(t("OK")).clicked();
             });
         if ok {
             self.error = None;
@@ -2649,7 +2651,7 @@ impl App {
 
     fn info_windows(&mut self, ctx: &egui::Context) {
         self.settings_window(ctx);
-        egui::Window::new("Keyboard shortcuts")
+        egui::Window::new(t("Keyboard shortcuts"))
             .open(&mut self.show_shortcuts)
             .resizable(false)
             .show(ctx, |ui| {
@@ -2684,18 +2686,18 @@ impl App {
                         ("Middle-drag", "Pan with any tool"),
                     ] {
                         ui.strong(kb(k));
-                        ui.label(v);
+                        ui.label(t(v));
                         ui.end_row();
                     }
                 });
             });
-        egui::Window::new("About magic-pdf")
+        egui::Window::new(t("About magic-pdf"))
             .open(&mut self.show_about)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.heading(format!("magic-pdf {}", env!("CARGO_PKG_VERSION")));
-                ui.label("A lightweight PDF viewer built for wide screens.");
-                ui.label("Rendering by PDFium; UI by egui. Licensed under the AGPL-3.0.");
+                ui.label(t("A lightweight PDF viewer built for wide screens."));
+                ui.label(t("Rendering by PDFium; UI by egui. Licensed under the AGPL-3.0."));
             });
     }
 
@@ -2776,7 +2778,7 @@ impl App {
         for t in &self.tabs {
             let state = match &t.state {
                 LoadState::Ready(info) => format!("{} pages", info.page_sizes.len()),
-                LoadState::Failed(e) => format!("failed: {e}"),
+                LoadState::Failed(e) => tf("failed: {e}", &[("e", &e)]),
                 LoadState::Loading => "still loading".into(),
                 LoadState::NeedsPassword { .. } => "password required".into(),
             };
@@ -2799,7 +2801,7 @@ impl App {
                 if path.exists() {
                     self.open(&path);
                 } else {
-                    self.error = Some(format!("{} no longer exists.", path.display()));
+                    self.error = Some(tf("{file} no longer exists.", &[("file", &path.display())]));
                     self.settings.forget_recent(&path);
                 }
             }
@@ -2815,20 +2817,36 @@ impl App {
         let (mut dark, mut night) = (s.dark_ui, s.night_mode);
         let mut changed = false;
         let mut check_now = false;
-        egui::Window::new("Settings")
+        egui::Window::new(t("Settings"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
                 egui::Grid::new("settings").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                    ui.label("Author name");
+                    ui.label(t("Language"));
+                    let current = crate::i18n::CHOICES.iter().find(|c| c.0 == s.language).map_or("System", |c| c.1);
+                    egui::ComboBox::from_id_salt("language")
+                        .selected_text(if current == "System" { t("System") } else { current })
+                        .show_ui(ui, |ui| {
+                            for (code, name) in crate::i18n::CHOICES {
+                                let name = if code == "auto" { t(name) } else { name };
+                                if ui.selectable_label(s.language == code, name).clicked() && s.language != code {
+                                    s.language = code.to_string();
+                                    crate::i18n::set_language(code);
+                                    changed = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(t("Author name"));
                     changed |= ui
                         .add(egui::TextEdit::singleline(&mut s.author).desired_width(200.0))
-                        .on_hover_text("Stored with new annotations and comments")
+                        .on_hover_text(t("Stored with new annotations and comments"))
                         .changed();
                     ui.end_row();
 
-                    ui.label("Layout for new files");
+                    ui.label(t("Layout for new files"));
                     egui::ComboBox::from_id_salt("default_layout")
                         .selected_text(s.default_mode.label())
                         .show_ui(ui, |ui| {
@@ -2838,39 +2856,39 @@ impl App {
                         });
                     ui.end_row();
 
-                    ui.label("Appearance");
+                    ui.label(t("Appearance"));
                     ui.vertical(|ui| {
-                        ui.checkbox(&mut dark, "Dark interface");
-                        ui.checkbox(&mut night, "Night mode (invert pages)");
-                        changed |= ui.checkbox(&mut s.show_sidebar, kb("Show the sidebar (F9)")).changed();
+                        ui.checkbox(&mut dark, t("Dark interface"));
+                        ui.checkbox(&mut night, t("Night mode (invert pages)"));
+                        changed |= ui.checkbox(&mut s.show_sidebar, kb(t("Show the sidebar (F9)"))).changed();
                     });
                     ui.end_row();
 
-                    ui.label("Thumbnail size");
+                    ui.label(t("Thumbnail size"));
                     changed |= ui
                         .add(egui::Slider::new(&mut s.thumb_width, 60.0..=600.0).logarithmic(true).suffix(" pt"))
                         .changed();
                     ui.end_row();
 
-                    ui.label("Starting");
+                    ui.label(t("Starting"));
                     changed |= ui
-                        .checkbox(&mut s.restore_session, "Reopen the files from last time")
-                        .on_hover_text("When magic-pdf starts without a file, it opens the tabs of the last window you closed")
+                        .checkbox(&mut s.restore_session, t("Reopen the files from last time"))
+                        .on_hover_text(t("When magic-pdf starts without a file, it opens the tabs of the last window you closed"))
                         .changed();
                     ui.end_row();
 
-                    ui.label("Updates");
+                    ui.label(t("Updates"));
                     ui.horizontal(|ui| {
-                        changed |= ui.checkbox(&mut s.check_updates, "Check daily").changed();
-                        check_now = ui.button("Check now").clicked();
+                        changed |= ui.checkbox(&mut s.check_updates, t("Check daily")).changed();
+                        check_now = ui.button(t("Check now")).clicked();
                     });
                     ui.end_row();
 
-                    ui.label("Recent files");
+                    ui.label(t("Recent files"));
                     ui.horizontal(|ui| {
                         let n = s.recent.len() + s.pinned.len();
-                        ui.weak(format!("{n} in the list ({} pinned)", s.pinned.len()));
-                        if ui.add_enabled(!s.recent.is_empty(), egui::Button::new("Clear")).on_hover_text("Pinned files stay").clicked() {
+                        ui.weak(tf("{n} in the list ({pinned} pinned)", &[("n", &n), ("pinned", &s.pinned.len())]));
+                        if ui.add_enabled(!s.recent.is_empty(), egui::Button::new(t("Clear"))).on_hover_text(t("Pinned files stay")).clicked() {
                             s.recent.clear();
                             changed = true;
                         }
@@ -2900,19 +2918,19 @@ impl App {
         ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
-            ui.heading("magic-pdf");
+            ui.heading(t("magic-pdf"));
             ui.add_space(8.0);
             if let Err(e) = &self.engine {
                 ui.colored_label(ui.visuals().error_fg_color, e);
                 return;
             }
-            if ui.button("Open a PDF…").clicked() {
+            if ui.button(t("Open a PDF…")).clicked() {
                 self.open_dialog();
             }
-            ui.weak("or drop files here");
+            ui.weak(t("or drop files here"));
             if !self.settings.recent.is_empty() || !self.settings.pinned.is_empty() {
                 ui.add_space(16.0);
-                ui.strong("Recent files");
+                ui.strong(t("Recent files"));
                 ui.add_space(4.0);
                 let width = 520.0_f32.min(ui.available_width());
                 ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
@@ -2950,17 +2968,16 @@ impl eframe::App for App {
         if let Some(tab) = self.tabs.get(self.active) {
             let status = match &tab.state {
                 LoadState::Ready(info) => format!(
-                    "Page {} of {}   ·   {}   ·   {:.0}%{}{}",
-                    tab.current_page + 1,
-                    info.page_sizes.len(),
+                    "{}   ·   {}   ·   {:.0}%{}{}",
+                    tf("Page {page} of {pages}", &[("page", &(tab.current_page + 1)), ("pages", &info.page_sizes.len())]),
                     tab.mode.label(),
                     tab.zoom_percent(),
                     info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default(),
-                    if tab.dirty { "   ·   unsaved changes" } else { "" }
+                    if tab.dirty { format!("   ·   {}", t("unsaved changes")) } else { String::new() }
                 ),
-                LoadState::Loading => "Loading…".into(),
-                LoadState::NeedsPassword { .. } => "Password required".into(),
-                LoadState::Failed(_) => "Failed to open".into(),
+                LoadState::Loading => t("Loading…").into(),
+                LoadState::NeedsPassword { .. } => t("Password required").into(),
+                LoadState::Failed(_) => t("Failed to open").into(),
             };
             let now = ctx.input(|i| i.time);
             let notice = self
@@ -3292,7 +3309,7 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
                     action = Some(RecentAction::TogglePin(path.clone()));
                     ui.close();
                 }
-                if ui.button("Remove from list").clicked() {
+                if ui.button(t("Remove from list")).clicked() {
                     action = Some(RecentAction::Forget(path.clone()));
                     ui.close();
                 }
@@ -3403,7 +3420,7 @@ mod tests {
         };
         let frame = |ctx: &egui::Context, events| {
             let mut output = ctx.run_ui(input(events), |ui| {
-                let _ = ui.button("File");
+                let _ = ui.button(t("File"));
             });
             output.textures_delta.clear();
         };

@@ -1,6 +1,7 @@
 //! Left sidebar: page thumbnails, document outline and search results.
 
 use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use crate::i18n::{t, tf};
 
 use crate::document::{DocTab, SearchHit};
 use crate::engine::{AnnotChange, AnnotInfo, AnnotKind, OutlineItem, RenderKey, Reply, Request, STATUSES, pdf_date_now};
@@ -58,15 +59,15 @@ pub fn show(
 pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
     // Wraps onto several lines in a narrow sidebar instead of keeping it wide.
     ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
-        ui.selectable_value(sidebar, SidebarTab::Outline, "Outline");
+        ui.selectable_value(sidebar, SidebarTab::Pages, t("Pages"));
+        ui.selectable_value(sidebar, SidebarTab::Outline, t("Outline"));
         let n: usize = tab.annots.values().flatten().filter(|a| a.in_reply_to.is_none()).count();
-        let label = if n == 0 { "Comments".to_string() } else { format!("Comments ({n})") };
+        let label = if n == 0 { t("Comments").to_string() } else { tf("Comments ({n})", &[("n", &n)]) };
         ui.selectable_value(sidebar, SidebarTab::Comments, label);
         let label = if tab.search.hits.is_empty() {
-            "Search".to_string()
+            t("Search").to_string()
         } else {
-            format!("Search ({})", tab.search.hits.len())
+            tf("Search ({n})", &[("n", &tab.search.hits.len())])
         };
         ui.selectable_value(sidebar, SidebarTab::Search, label);
     });
@@ -93,26 +94,26 @@ pub enum PageAction {
 /// Menu entries for page operations (used by the Pages menu and the thumbnail
 /// context menu). `n` is the number of pages they would act on.
 pub fn page_menu(ui: &mut Ui, n: usize, total: usize) -> Option<PageAction> {
-    let pages = if n == 1 { "page".to_string() } else { format!("{n} pages") };
+    let pages = if n == 1 { t("page").to_string() } else { tf("{n} pages", &[("n", &n)]) };
     let mut action = None;
     let mut item = |ui: &mut Ui, enabled: bool, label: String, a: PageAction| {
         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
             action = Some(a);
         }
     };
-    item(ui, true, format!("Rotate {pages} clockwise"), PageAction::Rotate(1));
-    item(ui, true, format!("Rotate {pages} counter-clockwise"), PageAction::Rotate(-1));
+    item(ui, true, tf("Rotate {pages} clockwise", &[("pages", &pages)]), PageAction::Rotate(1));
+    item(ui, true, tf("Rotate {pages} counter-clockwise", &[("pages", &pages)]), PageAction::Rotate(-1));
     ui.separator();
-    item(ui, true, format!("Move {pages} to the start"), PageAction::MoveToStart);
-    item(ui, true, format!("Move {pages} to the end"), PageAction::MoveToEnd);
+    item(ui, true, tf("Move {pages} to the start", &[("pages", &pages)]), PageAction::MoveToStart);
+    item(ui, true, tf("Move {pages} to the end", &[("pages", &pages)]), PageAction::MoveToEnd);
     ui.separator();
     item(ui, true, "Insert blank page after".into(), PageAction::InsertBlankAfter);
     item(ui, true, "Insert pages from file…".into(), PageAction::InsertFileAfter);
     ui.separator();
-    item(ui, true, format!("Extract {pages} to new file…"), PageAction::Extract);
+    item(ui, true, tf("Extract {pages} to new file…", &[("pages", &pages)]), PageAction::Extract);
     item(ui, total > 1, "Split document…".into(), PageAction::Split);
     ui.separator();
-    item(ui, n < total, format!("Delete {pages}\tDel"), PageAction::Delete);
+    item(ui, n < total, tf("Delete {pages}\tDel", &[("pages", &pages)]), PageAction::Delete);
     action
 }
 
@@ -183,10 +184,10 @@ fn thumbnails(
 
     // Thumbnail size: slider, or Ctrl+wheel / pinch over the thumbnails.
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Size").small().weak());
+        ui.label(egui::RichText::new(t("Size")).small().weak());
         ui.spacing_mut().slider_width = (ui.available_width() - 8.0).clamp(40.0, 160.0);
         ui.add(egui::Slider::new(thumb_width, THUMB_MIN..=THUMB_MAX).logarithmic(true).show_value(false))
-            .on_hover_text(format!("Thumbnail size ({} + mouse wheel over the thumbnails)", kb("Ctrl")));
+            .on_hover_text(tf("Thumbnail size ({key} + mouse wheel over the thumbnails)", &[("key", &kb("Ctrl"))]));
     });
     let list_rect = ui.available_rect_before_wrap();
     let zoom = ui.input(|i| {
@@ -462,18 +463,18 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
     let mut action = None;
     ui.horizontal(|ui| {
         if ui
-            .button("+ Bookmark")
-            .on_hover_text("Add a bookmark for the current page (named after the selected text, if any)")
+            .button(t("+ Bookmark"))
+            .on_hover_text(t("Add a bookmark for the current page (named after the selected text, if any)"))
             .clicked()
         {
             action = Some(OutlineAction::AddAfter(None));
         }
         if !items.is_empty() {
-            ui.weak("Right-click to edit");
+            ui.weak(t("Right-click to edit"));
         }
     });
     if items.is_empty() {
-        ui.weak("This document has no bookmarks.");
+        ui.weak(t("This document has no bookmarks."));
     }
     let mut commit_rename = None;
     egui::ScrollArea::both()
@@ -519,7 +520,7 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
                 .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
                 .filter(|t| !t.is_empty())
                 .map(|t| t.chars().take(80).collect())
-                .unwrap_or_else(|| format!("Page {}", current + 1));
+                .unwrap_or_else(|| tf("Page {page}", &[("page", &(current + 1))]));
             let item = OutlineItem {
                 title: title.clone(),
                 page: Some(current),
@@ -576,37 +577,37 @@ fn outline_item(
             *action = Some(OutlineAction::Rename(path.clone()));
         }
         let r = match item.page {
-            Some(p) => r.on_hover_text(format!("Page {} · double-click to rename", p + 1)),
+            Some(p) => r.on_hover_text(tf("Page {page} · double-click to rename", &[("page", &(p + 1))])),
             None => r,
         };
         r.context_menu(|ui| {
             let mut pick = |a: OutlineAction| {
                 *action = Some(a);
             };
-            if ui.button("Rename").clicked() {
+            if ui.button(t("Rename")).clicked() {
                 pick(OutlineAction::Rename(path.clone()));
             }
-            if ui.button("Add bookmark after").clicked() {
+            if ui.button(t("Add bookmark after")).clicked() {
                 pick(OutlineAction::AddAfter(Some(path.clone())));
             }
-            if ui.button("Point to the current page").clicked() {
+            if ui.button(t("Point to the current page")).clicked() {
                 pick(OutlineAction::SetPage(path.clone()));
             }
             ui.separator();
-            if ui.button("Move up").clicked() {
+            if ui.button(t("Move up")).clicked() {
                 pick(OutlineAction::Shift(path.clone(), -1));
             }
-            if ui.button("Move down").clicked() {
+            if ui.button(t("Move down")).clicked() {
                 pick(OutlineAction::Shift(path.clone(), 1));
             }
-            if ui.add_enabled(path.last() != Some(&0), egui::Button::new("Indent (make sub-bookmark)")).clicked() {
+            if ui.add_enabled(path.last() != Some(&0), egui::Button::new(t("Indent (make sub-bookmark)"))).clicked() {
                 pick(OutlineAction::Indent(path.clone()));
             }
-            if ui.add_enabled(path.len() > 1, egui::Button::new("Outdent")).clicked() {
+            if ui.add_enabled(path.len() > 1, egui::Button::new(t("Outdent"))).clicked() {
                 pick(OutlineAction::Outdent(path.clone()));
             }
             ui.separator();
-            if ui.button("Delete").clicked() {
+            if ui.button(t("Delete")).clicked() {
                 pick(OutlineAction::Delete(path.clone()));
             }
             if action.is_some() {
@@ -630,6 +631,11 @@ fn outline_item(
     }
 }
 
+/// A review status in the user's language.
+fn status_name(status: &str) -> &str {
+    STATUSES.iter().find(|s| **s == status).map_or(status, |s| t(s))
+}
+
 /// Colour of a review status chip.
 fn status_color(status: &str) -> Color32 {
     match status {
@@ -644,11 +650,11 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
     pages.sort_unstable();
     if pages.is_empty() {
         if tab.annots_scanned {
-            ui.weak("No annotations yet. Pick a tool from the toolbar to add one.");
+            ui.weak(t("No annotations yet. Pick a tool from the toolbar to add one."));
         } else {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.weak("Looking for annotations…");
+                ui.weak(t("Looking for annotations…"));
             });
         }
         return;
@@ -668,44 +674,44 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
     authors.sort();
     let f = &mut tab.comment_filter;
     ui.horizontal(|ui| {
-        ui.label(icons::text(icons::FUNNEL).size(14.0)).on_hover_text("Filter the list");
-        ui.add(egui::TextEdit::singleline(&mut f.text).hint_text("Search comments").desired_width(f32::INFINITY));
+        ui.label(icons::text(icons::FUNNEL).size(14.0)).on_hover_text(t("Filter the list"));
+        ui.add(egui::TextEdit::singleline(&mut f.text).hint_text(t("Search comments")).desired_width(f32::INFINITY));
     });
     ui.horizontal_wrapped(|ui| {
         let any = "All";
         egui::ComboBox::from_id_salt(("filter_kind", tab.id))
-            .selected_text(f.kind.map_or(any, |k| k.label()))
+            .selected_text(f.kind.map_or(t(any), |k| k.label()))
             .width(90.0)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.kind, None, "All types");
+                ui.selectable_value(&mut f.kind, None, t("All types"));
                 for k in &kinds {
                     ui.selectable_value(&mut f.kind, Some(*k), k.label());
                 }
             });
         egui::ComboBox::from_id_salt(("filter_author", tab.id))
-            .selected_text(f.author.as_deref().unwrap_or("Anyone"))
+            .selected_text(f.author.as_deref().unwrap_or(t("Anyone")))
             .width(90.0)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.author, None, "Anyone");
+                ui.selectable_value(&mut f.author, None, t("Anyone"));
                 for a in &authors {
                     ui.selectable_value(&mut f.author, Some(a.clone()), a);
                 }
             });
         egui::ComboBox::from_id_salt(("filter_status", tab.id))
             .selected_text(match f.status.as_deref() {
-                None => "Any status",
-                Some("") => "No status",
-                Some(s) => s,
+                None => t("Any status"),
+                Some("") => t("No status"),
+                Some(s) => status_name(s),
             })
             .width(90.0)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.status, None, "Any status");
-                ui.selectable_value(&mut f.status, Some(String::new()), "No status");
+                ui.selectable_value(&mut f.status, None, t("Any status"));
+                ui.selectable_value(&mut f.status, Some(String::new()), t("No status"));
                 for s in &STATUSES[1..] {
-                    ui.selectable_value(&mut f.status, Some(s.to_string()), *s);
+                    ui.selectable_value(&mut f.status, Some(s.to_string()), status_name(s));
                 }
             });
-        if f.active() && ui.small_button("Clear").clicked() {
+        if f.active() && ui.small_button(t("Clear")).clicked() {
             *f = Default::default();
         }
     });
@@ -729,7 +735,7 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                     continue;
                 }
                 ui.add_space(4.0);
-                ui.weak(format!("Page {}", page + 1));
+                ui.weak(tf("Page {page}", &[("page", &(page + 1))]));
                 for a in list {
                     shown += 1;
                     let is_selected = selected == Some((page, a.index));
@@ -751,7 +757,7 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                                 ui.strong(a.kind.label());
                                 ui.weak(format_pdf_date(&a.modified));
                                 if !a.status.is_empty() && a.status != "None" {
-                                    let chip = egui::RichText::new(&a.status).small().color(Color32::WHITE);
+                                    let chip = egui::RichText::new(status_name(&a.status)).small().color(Color32::WHITE);
                                     egui::Frame::new()
                                         .fill(status_color(&a.status))
                                         .corner_radius(CornerRadius::same(6))
@@ -789,10 +795,10 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                             ui.add_space(10.0);
                             let status = if a.status.is_empty() { "None" } else { a.status.as_str() };
                             egui::ComboBox::from_id_salt(("status", tab.id))
-                                .selected_text(format!("Status: {status}"))
+                                .selected_text(tf("Status: {status}", &[("status", &status_name(status))]))
                                 .show_ui(ui, |ui| {
                                     for s in STATUSES {
-                                        if ui.selectable_label(status == s, s).clicked() && status != s {
+                                        if ui.selectable_label(status == s, status_name(s)).clicked() && status != s {
                                             let change = AnnotChange {
                                                 status: Some(if s == "None" { String::new() } else { s.to_string() }),
                                                 ..Default::default()
@@ -806,13 +812,13 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                             ui.add_space(10.0);
                             let edit = ui.add(
                                 egui::TextEdit::multiline(&mut tab.reply_draft)
-                                    .hint_text("Reply…")
+                                    .hint_text(t("Reply…"))
                                     .desired_rows(1)
                                     .desired_width(ui.available_width() - 60.0),
                             );
                             let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
                             let text = tab.reply_draft.trim().to_string();
-                            if (ui.add_enabled(!text.is_empty(), egui::Button::new("Reply")).clicked() || enter) && !text.is_empty() {
+                            if (ui.add_enabled(!text.is_empty(), egui::Button::new(t("Reply"))).clicked() || enter) && !text.is_empty() {
                                 let mut replies = a.replies.clone();
                                 replies.push(Reply {
                                     author: author.to_string(),
@@ -833,7 +839,7 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                 }
             }
             if shown == 0 {
-                ui.weak("No comments match the filter.");
+                ui.weak(t("No comments match the filter."));
             }
         });
     if let Some((page, index, change)) = update {
@@ -899,18 +905,18 @@ fn hit_row(ui: &mut Ui, hit: &SearchHit, selected: bool) -> bool {
 fn search_status(ui: &mut Ui, s: &crate::document::SearchState) -> bool {
     match (&s.submitted, s.running) {
         (None, _) => {
-            ui.weak(kb("Use the search box (Ctrl+F) to search the document."));
+            ui.weak(kb(t("Use the search box (Ctrl+F) to search the document.")));
             false
         }
         (Some(q), true) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Searching for “{q}”… {} found", s.hits.len()));
+                ui.label(tf("Searching for “{q}”… {n} found", &[("q", q), ("n", &s.hits.len())]));
             });
             true
         }
         (Some(q), false) => {
-            ui.label(format!("{} results for “{q}”", s.hits.len()));
+            ui.label(tf("{n} results for “{q}”", &[("n", &s.hits.len()), ("q", q)]));
             true
         }
     }
@@ -942,7 +948,7 @@ pub fn search_all_results(ui: &mut Ui, tabs: &mut [DocTab], active: &mut usize) 
     let total: usize = tabs.iter().map(|t| t.search.hits.len()).sum();
     let running = tabs.iter().any(|t| t.search.running);
     let Some(query) = tabs.iter().find_map(|t| t.search.submitted.clone()) else {
-        ui.weak(kb("Use the search box (Ctrl+F) to search all open tabs."));
+        ui.weak(kb(t("Use the search box (Ctrl+F) to search all open tabs.")));
         return;
     };
     ui.horizontal(|ui| {
@@ -950,7 +956,7 @@ pub fn search_all_results(ui: &mut Ui, tabs: &mut [DocTab], active: &mut usize) 
             ui.spinner();
         }
         let files = tabs.iter().filter(|t| !t.search.hits.is_empty()).count();
-        ui.label(format!("{total} results for “{query}” in {files} of {} files", tabs.len()));
+        ui.label(tf("{total} results for “{query}” in {files} of {count} files", &[("total", &total), ("query", &query), ("files", &files), ("count", &tabs.len())]));
     });
     ui.separator();
     let mut clicked = None;

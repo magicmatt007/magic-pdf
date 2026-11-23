@@ -2,6 +2,7 @@
 //! a custom colour (colour square plus hex input) and optionally "No fill".
 
 use std::hash::Hash;
+use crate::i18n::t;
 
 use eframe::egui::{self, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Ui, vec2};
 
@@ -144,7 +145,7 @@ fn picker(ui: &mut Ui, id: Id, current: Option<Rgb>, allow_none: bool, recent: &
             if cell(ui, None, current.is_none(), CELL).clicked() {
                 picked = Some(None);
             }
-            ui.label("No fill");
+            ui.label(t("No fill"));
         });
         ui.add_space(4.0);
     }
@@ -163,7 +164,7 @@ fn picker(ui: &mut Ui, id: Id, current: Option<Rgb>, allow_none: bool, recent: &
     }
     if !recent.is_empty() {
         ui.add_space(6.0);
-        ui.weak("Recent");
+        ui.weak(t("Recent"));
         ui.horizontal(|ui| {
             for &c in recent {
                 if cell(ui, Some(c), current == Some(c), CELL).on_hover_text(to_hex(c)).clicked() {
@@ -204,7 +205,7 @@ fn picker(ui: &mut Ui, id: Id, current: Option<Rgb>, allow_none: bool, recent: &
                 ui.ctx().data_mut(|d| d.insert_temp(hex_id, hex));
                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
                 ui.painter().rect_filled(r, CornerRadius::same(3), work);
-                if ui.button("Use").clicked() {
+                if ui.button(t("Use")).clicked() {
                     picked = Some(Some([work.r(), work.g(), work.b()]));
                 }
             });

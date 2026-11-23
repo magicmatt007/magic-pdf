@@ -111,13 +111,20 @@ disk image and the Linux AppImage and publishes them as a GitHub release. Runnin
 workflow) builds the same files as a downloadable artifact without publishing anything.
 CI runs clippy and the tests on Linux, Windows and macOS for every push.
 
+## Languages
+
+The interface is in English and German (Edit → Settings → Language; "System" follows
+the computer's language). Texts in the code are English and go through `t("…")` /
+`tf("… {name} …", …)` in `src/i18n.rs`; the German texts are in `src/i18n/de.rs`, and a
+test fails when a text has no translation.
+
 ## Debugging
 
 `MAGIC_PDF_SCREENSHOT=out.ppm magic-pdf file.pdf` opens the file, saves a screenshot
 of the app's own window after three seconds and quits (`MAGIC_PDF_TOOL=highlight`, `note`, … picks
 the starting tool). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
 file's page count to `out.txt` and quits; the release workflow uses it to smoke-test the
-macOS app bundle.
+macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting.
 
 ## Tests
 

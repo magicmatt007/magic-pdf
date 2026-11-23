@@ -6,6 +6,7 @@ use eframe::egui::{
     Ui, Vec2, pos2, vec2,
 };
 
+use crate::i18n::{t, tf};
 use crate::icons;
 use crate::document::{AnnotDrag, AnnotSelection, DocTab, DragMode, Draft, LoadState, Selection, quad};
 use crate::engine::{
@@ -114,7 +115,7 @@ impl Tool {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
+        t(match self {
             Tool::Hand => "Hand (H)",
             Tool::SelectText => "Select text (S)",
             Tool::Highlight => "Highlight text (U)",
@@ -133,7 +134,7 @@ impl Tool {
             Tool::Signature => "Signature (G): click to place",
             Tool::Distance => "Measure distance (M), Shift: 45° steps",
             Tool::Area => "Measure area: click the corners, double-click or Enter to finish",
-        }
+        })
     }
 
     /// Colour slot this tool uses for new annotations.
@@ -197,7 +198,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
             return;
         }
         LoadState::Failed(e) => {
-            centered_text(ui, view, &format!("Could not open {}:\n{e}", tab.path.display()));
+            centered_text(ui, view, &tf("Could not open {file}:\n{e}", &[("file", &tab.path.display()), ("e", e)]));
             return;
         }
         LoadState::NeedsPassword { .. } => {
@@ -1613,7 +1614,7 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(icons::text(icons::COPY)).on_hover_text(kb("Copy (Ctrl+C)")).clicked() {
+                    if ui.button(icons::text(icons::COPY)).on_hover_text(kb(t("Copy (Ctrl+C)"))).clicked() {
                         action = Some(None);
                     }
                     for (kind, tool) in [
@@ -1686,7 +1687,7 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button(icons::sized(icons::TRASH, 14.0))
-                            .on_hover_text("Delete (Del)")
+                            .on_hover_text(t("Delete (Del)"))
                             .clicked()
                         {
                             delete = true;
@@ -1712,14 +1713,14 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                         }
                         ui.end_row();
                         if annot.kind.has_interior() {
-                            ui.label("Fill");
+                            ui.label(t("Fill"));
                             if let Some(c) = color_picker::color_button(ui, "annot_fill", annot.interior, true, recent) {
                                 change.interior = Some(c);
                             }
                             ui.end_row();
                         }
                         if is_box {
-                            ui.label("Text");
+                            ui.label(t("Text"));
                             if let Some(Some(c)) =
                                 color_picker::color_button(ui, "annot_text", annot.text_color, false, recent)
                             {
@@ -1740,13 +1741,13 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                     if let Some(size) = slider_field(ui, "Size", annot.font_size.unwrap_or(12.0), 4.0..=96.0, 1.0) {
                         change.font_size = Some(size);
                     }
-                    if ui.button("Edit text (double-click the box)").clicked() {
+                    if ui.button(t("Edit text (double-click the box)")).clicked() {
                         start_editing = true;
                     }
                 } else {
                     let edit = ui.add(
                         egui::TextEdit::multiline(&mut contents)
-                            .hint_text("Add a comment…")
+                            .hint_text(t("Add a comment…"))
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
@@ -1884,13 +1885,13 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     let toggle = |ui: &mut Ui, on: bool, icon: &str, tip: &str| {
                         ui.add(egui::Button::selectable(on, icons::text(icon))).on_hover_text(tip).clicked()
                     };
-                    if toggle(ui, current.bold, icons::TEXT_B, &kb("Bold (Ctrl+B)")) {
+                    if toggle(ui, current.bold, icons::TEXT_B, &kb(t("Bold (Ctrl+B)"))) {
                         apply(re, &|s| s.bold = !current.bold);
                     }
-                    if toggle(ui, current.italic, icons::TEXT_ITALIC, &kb("Italic (Ctrl+I)")) {
+                    if toggle(ui, current.italic, icons::TEXT_ITALIC, &kb(t("Italic (Ctrl+I)"))) {
                         apply(re, &|s| s.italic = !current.italic);
                     }
-                    if toggle(ui, current.underline, icons::TEXT_UNDERLINE, &kb("Underline (Ctrl+U)")) {
+                    if toggle(ui, current.underline, icons::TEXT_UNDERLINE, &kb(t("Underline (Ctrl+U)"))) {
                         apply(re, &|s| s.underline = !current.underline);
                     }
                     if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, "Strikethrough") {
@@ -1909,7 +1910,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                                 // Typed values apply on Enter, not per keystroke.
                                 .update_while_editing(false),
                     )
-                    .on_hover_text("Font size (drag, or click and type)");
+                    .on_hover_text(t("Font size (drag, or click and type)"));
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_bar_size"), size_field.rect));
                     if size_field.changed() {

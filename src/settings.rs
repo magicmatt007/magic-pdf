@@ -148,6 +148,8 @@ pub struct Settings {
     /// Recent files kept at the top of the list (never pushed out).
     pub pinned: Vec<PathBuf>,
     pub signatures: Vec<Signature>,
+    /// User interface language: "auto" (the system's), "en" or "de".
+    pub language: String,
     files: HashMap<String, StoredFileState>,
 }
 
@@ -172,6 +174,7 @@ impl Default for Settings {
             session_active: 0,
             pinned: Vec::new(),
             signatures: Vec::new(),
+            language: "auto".into(),
             files: HashMap::new(),
         }
     }
