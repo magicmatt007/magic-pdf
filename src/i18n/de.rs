@@ -428,6 +428,7 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("flat rate", "pauschal"),
     ("⚠ The invoice data has problems", "⚠ Die Rechnungsdaten haben Mängel"),
     ("⚠ see the invoice data", "⚠ Rechnungsdaten prüfen"),
+    ("The invoice data has no payment details (bank account); the recipient has to take them from the page", "Die Rechnungsdaten enthalten keine Zahlungsangaben (Bankverbindung); der Empfänger muss sie von der Seite übernehmen"),
     ("Missing: {field}, required by EN 16931; a validator would reject this invoice", "Fehlt: {field}, nach EN 16931 Pflicht; ein Prüfprogramm würde diese Rechnung ablehnen"),
     ("Invoice number (BT-1)", "Rechnungsnummer (BT-1)"),
     ("Invoice date (BT-2)", "Rechnungsdatum (BT-2)"),
@@ -439,6 +440,5 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Seller country (BT-40)", "Land des Verkäufers (BT-40)"),
     ("Invoice lines (BG-25)", "Rechnungspositionen (BG-25)"),
     ("VAT breakdown (BG-23)", "MwSt.-Aufschlüsselung (BG-23)"),
-    ("Payment means (BT-81)", "Zahlungsart (BT-81)"),
     ("Seller VAT ID or tax number (BT-31/BT-32)", "USt-IdNr. oder Steuernummer des Verkäufers (BT-31/BT-32)"),
 ];

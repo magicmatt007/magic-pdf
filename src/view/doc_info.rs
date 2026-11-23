@@ -279,6 +279,8 @@ fn invoice_body(ui: &mut Ui, inv: &Invoice, page_text: Option<&str>) {
         });
     }
     let all_ok = checks.iter().all(|c| c.ok);
+    // Not an error (EN 16931 makes payment instructions optional), but worth knowing.
+    let no_payment = inv.payment_means.is_empty() && inv.iban.is_empty();
     egui::CollapsingHeader::new(RichText::new(if all_ok {
         t("✔ The amounts in the invoice data add up")
     } else {
@@ -293,6 +295,12 @@ fn invoice_body(ui: &mut Ui, inv: &Invoice, page_text: Option<&str>) {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(color, mark);
                 ui.label(&c.what);
+            });
+        }
+        if no_payment {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("ℹ");
+                ui.weak(t("The invoice data has no payment details (bank account); the recipient has to take them from the page"));
             });
         }
         ui.weak(t("The invoice data (XML) is the binding part of an e-invoice."));

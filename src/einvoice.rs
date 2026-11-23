@@ -402,7 +402,6 @@ pub fn missing_required(inv: &Invoice) -> Vec<&'static str> {
         need(inv.seller.address.iter().any(|l| l.ends_with(char::is_alphabetic)), "Seller country (BT-40)");
         need(!inv.lines.is_empty(), "Invoice lines (BG-25)");
         need(!inv.taxes.is_empty(), "VAT breakdown (BG-23)");
-        need(!inv.payment_means.is_empty(), "Payment means (BT-81)");
         need(
             !inv.seller.vat_id.is_empty() || !inv.seller.tax_number.is_empty() || inv.taxes.iter().all(|t| t.category == "O"),
             "Seller VAT ID or tax number (BT-31/BT-32)",
@@ -599,9 +598,10 @@ mod tests {
         assert_eq!(inv.payment_means, ["58"]);
         assert!(missing_required(&inv).is_empty(), "{:?}", missing_required(&inv));
         let mut bad = inv.clone();
+        // EN 16931 does not require payment instructions (BG-16); only XRechnung does.
         bad.payment_means.clear();
         bad.seller.vat_id.clear();
-        assert_eq!(missing_required(&bad), ["Payment means (BT-81)", "Seller VAT ID or tax number (BT-31/BT-32)"]);
+        assert_eq!(missing_required(&bad), ["Seller VAT ID or tax number (BT-31/BT-32)"]);
     }
 
     #[test]
