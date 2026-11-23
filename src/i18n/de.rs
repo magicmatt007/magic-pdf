@@ -460,4 +460,10 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Mark for redaction", "Zum Schwärzen markieren"),
     ("Redact (X): drag over an area or click a word to mark it; click a mark to unmark it", "Schwärzen (X): Bereich aufziehen oder ein Wort anklicken, um es zu markieren; Markierung anklicken hebt sie auf"),
     ("Redact: mark areas or words, then apply", "Schwärzen: Bereiche oder Wörter markieren, dann anwenden"),
+    ("Export pages as pictures…", "Seiten als Bilder exportieren…"),
+    ("Export pages as pictures", "Seiten als Bilder exportieren"),
+    ("Format", "Format"),
+    ("Resolution", "Auflösung"),
+    ("One file per page, named after the document and the page number. PNG keeps text sharp; JPEG is smaller for photos.", "Eine Datei pro Seite, benannt nach Dokument und Seitenzahl. PNG hält Text scharf; JPEG ist bei Fotos kleiner."),
+    ("Saved {n} pictures to {dir}", "{n} Bilder gespeichert in {dir}"),
 ];

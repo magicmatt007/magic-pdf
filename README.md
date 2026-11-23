@@ -54,6 +54,7 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   dialog says how), as an invisible text layer over the page image
 - Compare two PDFs (File → Compare with): side by side, scrolling and zooming together,
   changed words marked red and green, a bar to step through pages with changes
+- File → Export pages as pictures: PNG or JPEG at a chosen resolution, one file per page
 - E-invoices (ZUGFeRD / Factur-X) shown and checked, document properties (Ctrl+D) and
   File → Save optimized copy (lossless compression, pictures scaled down to a chosen dpi);
   see [E-invoices](#e-invoices)

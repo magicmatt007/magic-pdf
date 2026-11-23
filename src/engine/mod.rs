@@ -1900,6 +1900,37 @@ mod tests {
     }
 
     #[test]
+    fn pages_export_as_pictures_at_the_chosen_resolution() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let dir = std::env::temp_dir().join(format!("magic-pdf-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for jpeg in [false, true] {
+            engine.send(Request::ExportImages {
+                doc: 1,
+                pages: vec![0, 5],
+                dpi: 144,
+                jpeg,
+                dir: dir.clone(),
+                stem: "sample".into(),
+            });
+            let message = recv_until(&engine, |r| match r {
+                Response::Exported { message } => Some(message),
+                Response::Error { message, .. } => panic!("{message}"),
+                _ => None,
+            });
+            assert!(message.contains("Saved 2 pictures"), "{message}");
+        }
+        let size = |name: &str| image::image_dimensions(dir.join(name)).unwrap();
+        assert_eq!(size("sample-p001.png"), (1190, 1684), "A4 at 144 dpi");
+        assert_eq!(size("sample-p006.png"), (1684, 1190), "page 6 is shown landscape");
+        assert_eq!(size("sample-p001.jpg"), (1190, 1684));
+        let px = image::open(dir.join("sample-p001.png")).unwrap().to_rgba8();
+        assert_eq!(px.get_pixel(1100, 1000).0, [255, 255, 255, 255], "white page margin");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn optimized_copies_are_smaller_and_still_show_the_picture() {
         let (_serial, engine) = start();
         let dir = std::env::temp_dir().join(format!("magic-pdf-opt-{}", std::process::id()));

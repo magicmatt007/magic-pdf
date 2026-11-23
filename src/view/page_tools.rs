@@ -199,6 +199,62 @@ pub fn header_footer_dialog(
     result
 }
 
+pub struct ImagesDialog {
+    scope: Scope,
+    dpi: u32,
+    jpeg: bool,
+}
+
+impl Default for ImagesDialog {
+    fn default() -> Self {
+        Self { scope: Scope::Selected, dpi: 150, jpeg: false }
+    }
+}
+
+pub fn images_dialog(ctx: &egui::Context, d: &mut ImagesDialog, tab: &DocTab) -> (Option<Request>, bool) {
+    let mut result = (None, true);
+    window(t("Export pages as pictures")).show(ctx, |ui| {
+        scope_ui(ui, &mut d.scope, tab);
+        ui.horizontal(|ui| {
+            ui.label(t("Format"));
+            ui.radio_value(&mut d.jpeg, false, "PNG");
+            ui.radio_value(&mut d.jpeg, true, "JPEG");
+        });
+        ui.horizontal(|ui| {
+            ui.label(t("Resolution"));
+            for dpi in [72, 150, 300] {
+                ui.radio_value(&mut d.dpi, dpi, format!("{dpi} dpi"));
+            }
+            ui.add(egui::DragValue::new(&mut d.dpi).range(36..=1200).suffix(" dpi"));
+        });
+        ui.weak(t("One file per page, named after the document and the page number. PNG keeps text sharp; JPEG is smaller for photos."));
+        let (ok, cancel) = buttons(ui, t("Choose folder…"));
+        if ok {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(dir) = tab.path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(dir) = dialog.pick_folder() {
+                let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "page".into());
+                result = (
+                    Some(Request::ExportImages {
+                        doc: tab.id,
+                        pages: pages(d.scope, tab),
+                        dpi: d.dpi,
+                        jpeg: d.jpeg,
+                        dir,
+                        stem,
+                    }),
+                    false,
+                );
+            }
+        } else if cancel {
+            result = (None, false);
+        }
+    });
+    result
+}
+
 pub struct OptimizeDialog {
     scale_images: bool,
     dpi: u32,

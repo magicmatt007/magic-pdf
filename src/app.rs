@@ -114,6 +114,7 @@ pub struct App {
     confirm_redact: Option<DocId>,
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
     optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
+    images_dialog: Option<crate::view::page_tools::ImagesDialog>,
     /// Tabs being moved to another window, waiting for their export.
     moves: HashMap<DocId, MoveTarget>,
     /// Temporary files of tabs received from other windows, deleted once opened.
@@ -258,6 +259,7 @@ impl App {
             confirm_redact: None,
             hf_dialog: None,
             optimize_dialog: None,
+            images_dialog: None,
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
@@ -1400,7 +1402,7 @@ impl App {
     fn page_tool_dialogs(&mut self, ctx: &egui::Context) {
         use crate::view::page_tools::*;
         let Some(tab) = self.tabs.get_mut(self.active).filter(|t| t.info().is_some()) else {
-            (self.crop_dialog, self.hf_dialog, self.optimize_dialog) = (None, None, None);
+            (self.crop_dialog, self.hf_dialog, self.optimize_dialog, self.images_dialog) = (None, None, None, None);
             return;
         };
         let mut reqs = Vec::new();
@@ -1423,6 +1425,13 @@ impl App {
             reqs.extend(req);
             if !open {
                 self.optimize_dialog = None;
+            }
+        }
+        if let Some(d) = &mut self.images_dialog {
+            let (req, open) = images_dialog(ctx, d, tab);
+            reqs.extend(req);
+            if !open {
+                self.images_dialog = None;
             }
         }
         tab.outbox.extend(reqs);
@@ -2107,6 +2116,9 @@ impl App {
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Save optimized copy…"))).clicked() {
                     self.optimize_dialog = Some(Default::default());
+                }
+                if ui.add_enabled(has_tab, egui::Button::new(t("Export pages as pictures…"))).clicked() {
+                    self.images_dialog = Some(Default::default());
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(kb(t("Print…\tCtrl+P")))).clicked() {
                     self.print();

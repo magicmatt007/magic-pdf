@@ -424,6 +424,12 @@ impl Worker {
                 Ok(message) => self.send(Response::Exported { message }),
                 Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
             },
+            Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => match self.export_images(doc, &pages, dpi, jpeg, &dir, &stem) {
+                Ok(n) => self.send(Response::Exported {
+                    message: format!("Saved {n} pictures to {}", dir.display()),
+                }),
+                Err(e) => self.error(doc, format!("Exporting pictures failed: {e}")),
+            },
             Request::ExtractPages { doc, pages, path } => {
                 let result = self.extract(doc, &[(pages, path.clone())]);
                 match result {
@@ -889,6 +895,45 @@ impl Worker {
     }
 
     /// Writes a smaller copy of the document; returns a summary for the user.
+    /// Renders `pages` (as displayed, with annotations and form fields) to picture
+    /// files. Returns how many were written.
+    fn export_images(&self, doc: DocId, pages: &[usize], dpi: u32, jpeg: bool, dir: &Path, stem: &str) -> Result<usize, String> {
+        let od = self.docs.get(&doc).ok_or("document not open")?;
+        let count = od.doc.page_count();
+        let digits = count.to_string().len().max(3);
+        let mut written = 0;
+        for &i in pages.iter().filter(|&&i| i < count) {
+            let page = od.doc.page(i).ok_or("page not found")?;
+            let (w, h) = od.doc.page_size(i);
+            let scale = (dpi.clamp(36, 1200) as f32 / 72.0).min(MAX_EXPORT_SIDE / w.max(h));
+            let (pw, ph) = ((w * scale).round().max(1.0) as usize, (h * scale).round().max(1.0) as usize);
+            let rgba = page.render(pw, ph, Rotation::R0).ok_or("could not render the page")?;
+            let ext = if jpeg { "jpg" } else { "png" };
+            let path = dir.join(format!("{stem}-p{:0digits$}.{ext}", i + 1));
+            let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let out = std::io::BufWriter::new(file);
+            let result = if jpeg {
+                // JPEG has no transparency: flatten onto white.
+                let rgb: Vec<u8> = rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| {
+                        let a = u16::from(p[3]);
+                        [0, 1, 2].map(|c| ((u16::from(p[c]) * a + 255 * (255 - a)) / 255) as u8)
+                    })
+                    .collect();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(out, 90).encode(&rgb, pw as u32, ph as u32, image::ExtendedColorType::Rgb8)
+            } else {
+                use image::ImageEncoder;
+                image::codecs::png::PngEncoder::new(out).write_image(&rgba, pw as u32, ph as u32, image::ExtendedColorType::Rgba8)
+            };
+            result.map_err(|e| format!("{}: {e}", path.display()))?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
     fn save_optimized(&self, doc: DocId, path: &Path, image_dpi: Option<u32>) -> Result<String, String> {
         let od = self.docs.get(&doc).ok_or("document not open")?;
         let original = od.export(self.lib)?;
@@ -1226,6 +1271,9 @@ impl Worker {
         }
     }
 }
+
+/// Longest side of exported page pictures, in pixels.
+const MAX_EXPORT_SIDE: f32 = 14000.0;
 
 /// Applies a page operation; bookmarks are rewritten in the saved bytes (PDFium
 /// cannot write them) and the document reopened from those.

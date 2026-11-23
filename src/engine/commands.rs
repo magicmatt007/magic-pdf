@@ -716,6 +716,15 @@ pub enum Request {
         path: PathBuf,
         image_dpi: Option<u32>,
     },
+    /// Save `pages` as pictures (`dir`/`stem`-p001.png …) at `dpi`, PNG or JPEG.
+    ExportImages {
+        doc: DocId,
+        pages: Vec<usize>,
+        dpi: u32,
+        jpeg: bool,
+        dir: PathBuf,
+        stem: String,
+    },
     /// Write `pages` to a new PDF file.
     ExtractPages {
         doc: DocId,
