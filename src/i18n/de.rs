@@ -164,6 +164,8 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Previous / next, first / last page", "Vorherige / nächste, erste / letzte Seite"),
     ("Scroll one screen", "Um eine Bildschirmhöhe blättern"),
     ("Horizontal, vertical, single, facing, grid", "Horizontal, vertikal, einzeln, Doppelseiten, Raster"),
+    ("Double-click a page in the grid", "Doppelklick auf eine Seite im Raster"),
+    ("Open it in the previous layout", "Öffnet sie im vorherigen Layout"),
     ("Rotate view", "Ansicht drehen"),
     ("Hand tool / text selection tool", "Hand / Textauswahl"),
     ("Highlight, note, text box, draw, rectangle, ellipse", "Hervorheben, Notiz, Textfeld, Zeichnen, Rechteck, Ellipse"),

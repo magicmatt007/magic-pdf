@@ -203,6 +203,8 @@ pub struct DocTab {
     pub state: LoadState,
 
     pub mode: LayoutMode,
+    /// Layout to return to when a page is opened from the grid overview.
+    pub mode_before_grid: LayoutMode,
     pub rotation: Rotation,
     pub viewport: Viewport,
     pub layout: Layout,
@@ -294,6 +296,7 @@ impl DocTab {
             name,
             state: LoadState::Loading,
             mode: default_mode,
+            mode_before_grid: reading_mode(default_mode),
             rotation: Rotation::R0,
             viewport: Viewport {
                 fit: default_fit(default_mode),
@@ -544,6 +547,9 @@ impl DocTab {
 
     pub fn set_mode(&mut self, mode: LayoutMode) {
         if self.mode != mode {
+            if mode == LayoutMode::Grid {
+                self.mode_before_grid = self.mode;
+            }
             self.mode = mode;
             self.viewport.fit = default_fit(mode);
             if mode == LayoutMode::Grid {
@@ -551,6 +557,12 @@ impl DocTab {
             }
             self.goto_page(self.current_page);
         }
+    }
+
+    /// Leaves the grid overview and shows `page` in the layout used before it.
+    pub fn open_from_grid(&mut self, page: usize) {
+        self.set_current_page(page);
+        self.set_mode(reading_mode(self.mode_before_grid));
     }
 
     pub fn rotate(&mut self, clockwise: bool) {
@@ -705,6 +717,11 @@ impl DocTab {
     }
 }
 
+/// `mode`, or the vertical layout if `mode` is the grid overview itself.
+fn reading_mode(mode: LayoutMode) -> LayoutMode {
+    if mode == LayoutMode::Grid { LayoutMode::Vertical } else { mode }
+}
+
 pub fn default_fit(mode: LayoutMode) -> FitMode {
     match mode {
         LayoutMode::Horizontal => FitMode::Height,
@@ -805,5 +822,19 @@ mod tests {
         f.kind = Some(AnnotKind::Highlight);
         assert!(!f.matches(&a));
     }
-}
 
+    #[test]
+    fn opening_a_page_from_the_grid_returns_to_the_previous_layout() {
+        let mut tab = DocTab::new(1, PathBuf::from("x.pdf"), LayoutMode::Facing, None);
+        tab.set_mode(LayoutMode::Grid);
+        tab.open_from_grid(7);
+        assert_eq!(tab.mode, LayoutMode::Facing);
+        assert_eq!(tab.current_page, 7);
+        assert_eq!(tab.pending_goto, Some(7));
+
+        // Starting in the grid falls back to the vertical layout.
+        let mut tab = DocTab::new(2, PathBuf::from("y.pdf"), LayoutMode::Grid, None);
+        tab.open_from_grid(3);
+        assert_eq!(tab.mode, LayoutMode::Vertical);
+    }
+}

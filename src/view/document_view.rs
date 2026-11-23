@@ -443,6 +443,12 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     }
     let Some((_, pdf_pt)) = screen_to_pdf(tab, pointer, view, Some(page)) else { return };
 
+    // Grid overview: double-click a page to open it in the previous layout.
+    if tab.mode == LayoutMode::Grid && matches!(tool, Tool::Hand | Tool::SelectText) && response.double_clicked() {
+        tab.open_from_grid(page);
+        return;
+    }
+
     // Stamps and signatures: a click places them.
     if matches!(tool, Tool::Stamp | Tool::Signature) {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
