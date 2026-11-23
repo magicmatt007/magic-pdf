@@ -1,12 +1,19 @@
 # Builds the Windows installer, a portable zip, the macOS disk image and the Linux
 # AppImage. A pushed version tag (v1.2.3) publishes them as a GitHub release; a manual
-# run ("Run workflow") only builds them and keeps them as workflow artifacts for testing.
+# run ("Run workflow") only builds them and keeps them as workflow artifacts for testing,
+# unless "publish" is ticked: then a run on master publishes the release for the version
+# in Cargo.toml and creates its tag (for when tags cannot be pushed).
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a release (and create its tag) for the version in Cargo.toml (master only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -161,10 +168,12 @@ jobs:
           path: dist/*.AppImage
 
   publish:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || (inputs.publish && github.ref == 'refs/heads/master')
     needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -174,7 +183,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.ref_type }}" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          fi
+          version="${tag#v}"
           cat > notes.md <<EOF
           ## Windows
 
@@ -216,6 +230,7 @@ jobs:
           such as Gear Lever or AppImageLauncher.
           EOF
           sed -i 's/^          //' notes.md
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+          # --target creates the tag at this commit when it does not exist yet.
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             dist/*.exe dist/*.zip dist/*.dmg dist/*.AppImage \
             --title "magic-pdf $version" --notes-file notes.md
