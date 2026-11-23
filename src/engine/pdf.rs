@@ -232,7 +232,7 @@ fn rgba_bitmap(lib: Lib, w: u32, h: u32, rgba: &[u8]) -> Option<FPDF_BITMAP> {
         return None;
     }
     // Only pixels that are not fully opaque need an alpha channel (a soft mask).
-    let alpha = rgba.chunks_exact(4).any(|p| p[3] != 255);
+    let alpha = rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 255);
     unsafe {
         let bmp = lib.FPDFBitmap_Create(w as c_int, h as c_int, alpha.into());
         if bmp.is_null() {
