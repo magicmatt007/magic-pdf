@@ -653,19 +653,35 @@ impl<'d> Page<'d> {
     /// Renders into an RGBA buffer `width` x `height` pixels (already rotated by
     /// `rotation`), including annotations and interactive form fields.
     pub fn render(&self, width: usize, height: usize, rotation: Rotation) -> Option<Vec<u8>> {
-        self.render_bitmap(width, height, rotation, true, false)
+        self.render_bitmap((width, height), (0, 0, width, height), rotation, true, false)
     }
 
     /// Renders for printing: BGRA byte order (as GDI expects) or RGBA, with print
     /// appearances and without form field highlights.
     #[allow(dead_code)]
     pub fn render_for_print(&self, width: usize, height: usize, rgba: bool) -> Option<Vec<u8>> {
-        self.render_bitmap(width, height, Rotation::R0, rgba, true)
+        self.render_bitmap((width, height), (0, 0, width, height), Rotation::R0, rgba, true)
     }
 
-    fn render_bitmap(&self, width: usize, height: usize, rotation: Rotation, rgba: bool, printing: bool) -> Option<Vec<u8>> {
+    /// Renders the part `region` (x, y, width, height in pixels) of the page drawn at
+    /// `full` size.
+    pub fn render_region(&self, full: (usize, usize), region: (usize, usize, usize, usize), rotation: Rotation) -> Option<Vec<u8>> {
+        self.render_bitmap(full, region, rotation, true, false)
+    }
+
+    fn render_bitmap(
+        &self,
+        full: (usize, usize),
+        region: (usize, usize, usize, usize),
+        rotation: Rotation,
+        rgba: bool,
+        printing: bool,
+    ) -> Option<Vec<u8>> {
         const FPDF_PRINTING: c_int = 0x800;
         let lib = self.lib();
+        let (rx, ry, width, height) = region;
+        let (fw, fh) = (full.0 as c_int, full.1 as c_int);
+        let (ox, oy) = (-(rx as c_int), -(ry as c_int));
         unsafe {
             let bitmap = lib.FPDFBitmap_CreateEx(width as c_int, height as c_int, FPDF_BITMAP_BGRA, ptr::null_mut(), 0);
             if bitmap.is_null() {
@@ -680,9 +696,9 @@ impl<'d> Page<'d> {
             if printing {
                 flags |= FPDF_PRINTING;
             }
-            lib.FPDF_RenderPageBitmap(bitmap, self.handle, 0, 0, width as c_int, height as c_int, rot, flags);
+            lib.FPDF_RenderPageBitmap(bitmap, self.handle, ox, oy, fw, fh, rot, flags);
             if !printing && !self.doc.form.is_null() {
-                lib.FPDF_FFLDraw(self.doc.form, bitmap, self.handle, 0, 0, width as c_int, height as c_int, rot, flags);
+                lib.FPDF_FFLDraw(self.doc.form, bitmap, self.handle, ox, oy, fw, fh, rot, flags);
             }
             let stride = lib.FPDFBitmap_GetStride(bitmap) as usize;
             let buf = lib.FPDFBitmap_GetBuffer(bitmap) as *const u8;
@@ -1115,7 +1131,8 @@ impl<'d> Page<'d> {
         text
     }
 
-    pub fn search(&self, query: &SearchQuery, limit: usize) -> Vec<Vec<PdfBox>> {
+    /// Search hits (rectangles) with the text around each.
+    pub fn search_with_context(&self, query: &SearchQuery, limit: usize) -> Vec<(Vec<PdfBox>, HitContext)> {
         let lib = self.lib();
         let Some(tp) = self.text_page() else { return Vec::new() };
         let mut flags = 0;
@@ -1149,7 +1166,41 @@ impl<'d> Page<'d> {
                     }
                 }
                 if !rects.is_empty() {
-                    hits.push(rects);
+                    const AROUND: c_int = 60;
+                    let total = lib.FPDFText_CountChars(tp.handle);
+                    let get = |from: c_int, n: c_int| {
+                        let n = n.min(total - from).max(0);
+                        if n == 0 {
+                            return String::new();
+                        }
+                        let mut buf = vec![0u16; n as usize + 1];
+                        let got = lib.FPDFText_GetText(tp.handle, from, n, buf.as_mut_ptr());
+                        // Line breaks and runs of spaces read as one space.
+                        utf16_buf_to_string(&buf[..(got.max(0) as usize).min(buf.len())])
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    let from = (start - AROUND).max(0);
+                    let mut before = get(from, start - from);
+                    let mut after = get(start + count, AROUND);
+                    // Whole words only, roughly 40 characters each side.
+                    if before.chars().count() > 40 {
+                        let cut: String = before.chars().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+                        before = format!("…{}", cut.split_once(' ').map_or(cut.as_str(), |(_, rest)| rest));
+                    }
+                    if after.chars().count() > 40 {
+                        let cut: String = after.chars().take(40).collect();
+                        after = format!("{}…", cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head));
+                    }
+                    let gap = |s: &str| !s.is_empty() && !s.ends_with('…');
+                    let context = HitContext {
+                        // Keep the space between the context and the match.
+                        before: if gap(&before) && lib.FPDFText_GetUnicode(tp.handle, (start - 1).max(0)) == ' ' as u32 { before + " " } else { before },
+                        text: get(start, count),
+                        after: if !after.is_empty() && lib.FPDFText_GetUnicode(tp.handle, start + count) == ' ' as u32 { format!(" {after}") } else { after },
+                    };
+                    hits.push((rects, context));
                 }
             }
             lib.FPDFText_FindClose(sch);

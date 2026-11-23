@@ -145,6 +145,7 @@ mod tests {
             width_px: 300,
             rotation,
             version,
+            tile: 0,
         };
         engine.send(Request::Render { key, priority: 0.0 });
         recv_until(engine, |r| match r {
@@ -844,6 +845,7 @@ mod tests {
                 width_px: 600,
                 rotation: Rotation::R0,
                 version,
+                tile: 0,
             };
             engine.send(Request::Render { key, priority: 0.0 });
             let (size, rgba) = recv_until(engine, |m| match m {
@@ -968,6 +970,7 @@ mod tests {
                 width_px: 1200,
                 rotation: Rotation::R0,
                 version,
+                tile: 0,
             };
             engine.send(Request::Render { key, priority: 0.0 });
             let (size, rgba) = recv_until(engine, |m| match m {
@@ -1807,6 +1810,79 @@ mod tests {
         let (x, y) = ((170.0 / 595.0 * size[0] as f32) as usize, (270.0 / 842.0 * size[1] as f32) as usize);
         assert!((mean(&before, x, y) - mean(&after, x, y)).abs() < 40, "picture kept");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn tiles_match_the_same_area_of_a_whole_page_render() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let full = RenderKey {
+            doc: 1,
+            page: 0,
+            width_px: 1100,
+            rotation: Rotation::R90,
+            version: 0,
+            tile: 0,
+        };
+        let get = |key: RenderKey| {
+            engine.send(Request::Render { key, priority: 0.0 });
+            recv_until(&engine, |r| match r {
+                Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
+                Response::RenderFailed { key: k } if k == key => panic!("render failed"),
+                _ => None,
+            })
+        };
+        let (fsize, frgba) = get(full);
+        // Tile (column 1, row 0) and the last, partial column (2).
+        for col in [1u32, 2] {
+            let (size, rgba) = get(RenderKey {
+                tile: RenderKey::tile_at(col, 0),
+                ..full
+            });
+            let x0 = (col * TILE) as usize;
+            assert_eq!(size, [(fsize[0] - x0).min(512), 512.min(fsize[1])]);
+            let mut differ = 0;
+            for y in 0..size[1] {
+                for x in 0..size[0] {
+                    let a = &rgba[(y * size[0] + x) * 4..][..3];
+                    let b = &frgba[(y * fsize[0] + x0 + x) * 4..][..3];
+                    if a.iter().zip(b).any(|(p, q)| p.abs_diff(*q) > 8) {
+                        differ += 1;
+                    }
+                }
+            }
+            assert!(differ * 200 < size[0] * size[1], "tile {col}: {differ} pixels differ");
+            assert!(rgba.chunks(4).any(|p| p[0] < 128), "tile {col} shows something");
+        }
+        assert_eq!(full.tile_pos(), None);
+        assert_eq!(RenderKey { tile: RenderKey::tile_at(3, 7), ..full }.tile_pos(), Some((3, 7)));
+    }
+
+    #[test]
+    fn search_hits_come_with_the_text_around_them() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        engine.send(Request::Search {
+            doc: 1,
+            generation: 1,
+            query: SearchQuery {
+                text: "LAYOUT LINE 3,".into(),
+                match_case: false,
+                whole_word: false,
+            },
+        });
+        let context = recv_until(&engine, |r| match r {
+            Response::SearchResults { page: 0, context, hits, .. } => {
+                assert_eq!(context.len(), hits.len());
+                Some(context)
+            }
+            _ => None,
+        });
+        let c = &context[0];
+        assert_eq!(c.text, "layout line 3,");
+        assert!(c.before.ends_with("Magic PDF horizontal "), "{c:?}");
+        assert!(c.after.starts_with(" page 1."), "{c:?}");
+        assert!(c.before.chars().count() <= 42 && c.after.chars().count() <= 42, "{c:?}");
     }
 }
 

@@ -12,14 +12,20 @@ const MAX_PIXELS: f32 = 16_000_000.0;
 /// Rounds a desired pixel width up to one of a geometric series of buckets
 /// (factor 2^(1/4) ≈ 1.19), so small zoom changes reuse existing renders.
 pub fn width_bucket(px: f32, aspect_h_over_w: f32) -> u32 {
-    let px = px.max(16.0);
-    let k = (px.log2() * 4.0).ceil();
-    let mut w = 2f32.powf(k / 4.0).round();
+    let mut w = bucket(px) as f32;
     let max_w = (MAX_PIXELS / aspect_h_over_w.max(0.01)).sqrt();
     if w > max_w {
         w = max_w.floor();
     }
     w.max(16.0) as u32
+}
+
+/// The bucket for a pixel width without the size limit (tiles have none).
+pub fn bucket(px: f32) -> u32 {
+    let px = px.max(16.0);
+    let k = (px.log2() * 4.0).ceil();
+    // Tiles address at most 65536 columns of 512 px.
+    2f32.powf(k / 4.0).round().min(1.0e7) as u32
 }
 
 /// Ordering key for [`TextureCache::best`] (higher is better).
@@ -111,11 +117,18 @@ impl TextureCache {
         let key = *self
             .entries
             .keys()
-            .filter(|k| k.doc == doc && k.page == page && k.rotation == rotation)
+            .filter(|k| k.doc == doc && k.page == page && k.rotation == rotation && k.tile == 0)
             .max_by_key(|k| rank(k, want_width, version))?;
         let entry = self.entries.get_mut(&key)?;
         entry.last_used = self.frame;
         Some((entry.texture.clone(), key))
+    }
+
+    /// The texture for exactly `key` (used for tiles).
+    pub fn get(&mut self, key: &RenderKey) -> Option<TextureHandle> {
+        let e = self.entries.get_mut(key)?;
+        e.last_used = self.frame;
+        Some(e.texture.clone())
     }
 
     pub fn touch(&mut self, key: &RenderKey) {
@@ -192,6 +205,7 @@ mod tests {
             width_px,
             rotation: Rotation::R0,
             version,
+            tile: 0,
         }
     }
 

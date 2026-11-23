@@ -62,6 +62,8 @@ pub struct App {
     tool: Tool,
     sidebar_tab: SidebarTab,
     focus_search: bool,
+    /// Search in every open tab, not only the active one.
+    search_all: bool,
     show_shortcuts: bool,
     show_about: bool,
     show_settings: bool,
@@ -213,6 +215,7 @@ impl App {
             tool: Tool::Hand,
             sidebar_tab: SidebarTab::Pages,
             focus_search: false,
+            search_all: false,
             show_shortcuts: false,
             show_about: false,
             show_settings: false,
@@ -285,6 +288,27 @@ impl App {
         }
         if let Some(t) = args.take {
             app.take(t);
+        }
+        if app.screenshot_to.is_some() {
+            // Debug aids for screenshots: a search, a zoom level, a sidebar tab.
+            if let Ok(q) = std::env::var("MAGIC_PDF_SEARCH") {
+                app.search_all = std::env::var_os("MAGIC_PDF_SEARCH_ALL").is_some();
+                for t in &mut app.tabs {
+                    t.search.query = q.clone();
+                }
+                app.start_search();
+            }
+            if let Some(z) = std::env::var("MAGIC_PDF_ZOOM").ok().and_then(|z| z.parse::<f32>().ok())
+                && let Some(t) = app.tabs.get_mut(app.active)
+            {
+                t.set_zoom(z / 100.0);
+            }
+            match std::env::var("MAGIC_PDF_SIDEBAR").as_deref() {
+                Ok("outline") => app.sidebar_tab = SidebarTab::Outline,
+                Ok("comments") => app.sidebar_tab = SidebarTab::Comments,
+                Ok("search") => app.sidebar_tab = SidebarTab::Search,
+                _ => {}
+            }
         }
         app
     }
@@ -748,16 +772,21 @@ impl App {
                 page,
                 geom,
                 hits,
+                context,
             } => {
+                let active_doc = self.tabs.get(self.active).map(|t| t.id);
                 if let Some(tab) = self.tab_mut(doc)
                     && tab.search.generation == generation
                 {
                     tab.geoms.insert(page, geom);
                     let first = tab.search.hits.is_empty();
-                    tab.search
-                        .hits
-                        .extend(hits.into_iter().map(|rects| SearchHit { page, rects }));
-                    if first {
+                    tab.search.hits.extend(
+                        hits.into_iter()
+                            .zip(context.into_iter().chain(std::iter::repeat_with(Default::default)))
+                            .map(|(rects, context)| SearchHit { page, rects, context }),
+                    );
+                    // Jump only in the tab being looked at.
+                    if first && active_doc == Some(doc) {
                         // Jump to the first hit at or after the current page.
                         let start = tab.current_page;
                         let idx = tab.search.hits.iter().position(|h| h.page >= start).unwrap_or(0);
@@ -1245,6 +1274,27 @@ impl App {
     }
 
     fn start_search(&mut self) {
+        if self.search_all
+            && let Some(active) = self.tabs.get(self.active)
+        {
+            // Every open document searches for the active tab's query.
+            let (q, case, word) = (active.search.query.clone(), active.search.match_case, active.search.whole_word);
+            let current = self.active;
+            for i in 0..self.tabs.len() {
+                if i == current || matches!(self.tabs[i].state, LoadState::Failed(_)) {
+                    continue;
+                }
+                let t = &mut self.tabs[i];
+                (t.search.query, t.search.match_case, t.search.whole_word) = (q.clone(), case, word);
+                self.active = i;
+                self.start_one_search();
+            }
+            self.active = current;
+        }
+        self.start_one_search();
+    }
+
+    fn start_one_search(&mut self) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let query = tab.search.query.trim().to_string();
         tab.search.generation += 1;
@@ -1273,7 +1323,9 @@ impl App {
     }
 
     fn clear_search(&mut self) {
-        if let Some(tab) = self.tabs.get_mut(self.active) {
+        let tabs: Vec<usize> = if self.search_all { (0..self.tabs.len()).collect() } else { vec![self.active] };
+        for i in tabs {
+            let Some(tab) = self.tabs.get_mut(i) else { continue };
             tab.search.hits.clear();
             tab.search.current = None;
             tab.search.submitted = None;
@@ -1952,13 +2004,16 @@ impl App {
                 if ui.button(icons::text(icons::CARET_UP)).on_hover_text("Previous match (Shift+F3)").clicked() {
                     tab.search_step(false);
                 }
+                let all_before = self.search_all;
+                ui.toggle_value(&mut self.search_all, icons::text(icons::COPY))
+                    .on_hover_text("Search all open tabs");
                 let s = &mut tab.search;
                 let before = (s.match_case, s.whole_word);
                 ui.toggle_value(&mut s.whole_word, egui::RichText::new("ab").strong().underline())
                     .on_hover_text("Whole words");
                 ui.toggle_value(&mut s.match_case, icons::text(icons::TEXT_AA))
                     .on_hover_text("Match case");
-                if before != (s.match_case, s.whole_word) && s.submitted.is_some() {
+                if (before != (s.match_case, s.whole_word) || all_before != self.search_all) && s.submitted.is_some() {
                     submit = true;
                 }
                 if s.submitted.is_some() {
@@ -2680,15 +2735,22 @@ impl eframe::App for App {
 
         let mut page_actions = Vec::new();
         if self.settings.show_sidebar && self.tabs.get(self.active).is_some_and(|t| t.info().is_some()) {
-            let tab = &mut self.tabs[self.active];
             let thumb_width = &mut self.settings.thumb_width;
             let author = &self.settings.author;
+            let all = self.search_all && self.sidebar_tab == SidebarTab::Search && self.tabs.len() > 1;
             let panel = egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(self.settings.sidebar_width)
                 .size_range(sidebar::MIN_WIDTH..=900.0)
                 .show(ui, |ui| {
-                    sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width, author)
+                    if all {
+                        sidebar::tab_row(ui, &self.tabs[self.active], &mut self.sidebar_tab);
+                        ui.separator();
+                        sidebar::search_all_results(ui, &mut self.tabs, &mut self.active);
+                    } else {
+                        let tab = &mut self.tabs[self.active];
+                        sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width, author)
+                    }
                 });
             // Remembered for the next start (dragging the edge resizes it).
             self.settings.sidebar_width = panel.response.rect.width();

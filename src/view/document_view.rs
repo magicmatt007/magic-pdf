@@ -1071,6 +1071,7 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
             width_px: want_w,
             rotation: tab.rotation,
             version,
+            tile: 0,
         };
         let is_visible = rect.intersects(visible);
         let distance = (rect.center() - center).length() / visible.size().length().max(1.0);
@@ -1119,9 +1120,67 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
             }
         }
 
+        // Above the size limit of whole-page renders, sharp tiles cover what is on screen.
+        let full_w = crate::view::cache::bucket(screen.width() * ppp);
+        if full_w > want_w {
+            paint_tiles(&painter, tab, cx, page, screen, view, full_w, version, distance);
+        }
+
         paint_overlays(&painter, tab, page, view);
     }
     paint_draft(&painter, tab, view, cx);
+}
+
+/// Draws the visible tiles of `page` rendered `full_w` pixels wide, and asks for the
+/// missing ones.
+#[allow(clippy::too_many_arguments)]
+fn paint_tiles(
+    painter: &egui::Painter,
+    tab: &mut DocTab,
+    cx: &mut ViewContext<'_>,
+    page: usize,
+    screen: Rect,
+    view: Rect,
+    full_w: u32,
+    version: u32,
+    distance: f32,
+) {
+    use crate::engine::TILE;
+    let scale = screen.width() / full_w as f32;
+    let full_h = (screen.height() / scale).round() as u32;
+    let vis = screen.intersect(view);
+    if !vis.is_positive() {
+        return;
+    }
+    let tile = TILE as f32;
+    let to_px = |p: Pos2| ((p - screen.min) / scale).to_pos2();
+    let (a, b) = (to_px(vis.min), to_px(vis.max));
+    let cols = (a.x / tile).floor().max(0.0) as u32..=((b.x / tile).ceil() as u32).min(full_w.div_ceil(TILE)).saturating_sub(1);
+    let rows = (a.y / tile).floor().max(0.0) as u32..=((b.y / tile).ceil() as u32).min(full_h.div_ceil(TILE)).saturating_sub(1);
+    for row in rows {
+        for col in cols.clone() {
+            let key = RenderKey {
+                doc: tab.id,
+                page,
+                width_px: full_w,
+                rotation: tab.rotation,
+                version,
+                tile: RenderKey::tile_at(col, row),
+            };
+            let (x, y) = (col * TILE, row * TILE);
+            let (w, h) = (TILE.min(full_w - x), TILE.min(full_h.saturating_sub(y)).max(1));
+            let r = Rect::from_min_size(
+                screen.min + vec2(x as f32, y as f32) * scale,
+                vec2(w as f32, h as f32) * scale,
+            );
+            match cx.cache.get(&key) {
+                Some(tex) => {
+                    painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                None => tab.wanted.push((key, distance * 0.5 + 0.01)),
+            }
+        }
+    }
 }
 
 fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect) {

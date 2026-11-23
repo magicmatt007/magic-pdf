@@ -113,6 +113,23 @@ pub struct RenderKey {
     pub rotation: Rotation,
     /// Bumped whenever the page content changes (annotation edits).
     pub version: u32,
+    /// 0: the whole page. Otherwise one `TILE`-pixel square of the page rendered at
+    /// `width_px`: `(row << 16 | column) + 1` (used at high zoom).
+    pub tile: u32,
+}
+
+/// Edge length of render tiles in pixels.
+pub const TILE: u32 = 512;
+
+impl RenderKey {
+    pub fn tile_at(column: u32, row: u32) -> u32 {
+        (row << 16 | column) + 1
+    }
+
+    /// (column, row) of a tile key.
+    pub fn tile_pos(self) -> Option<(u32, u32)> {
+        (self.tile > 0).then(|| ((self.tile - 1) & 0xFFFF, (self.tile - 1) >> 16))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +170,14 @@ pub struct PageLink {
 pub struct PageText {
     pub chars: Vec<TextChar>,
     pub links: Vec<PageLink>,
+}
+
+/// A search hit with the text around it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HitContext {
+    pub before: String,
+    pub text: String,
+    pub after: String,
 }
 
 #[derive(Clone, Debug)]
@@ -696,6 +721,8 @@ pub enum Response {
         geom: PageGeom,
         /// Each hit may span several rectangles (e.g. across line breaks).
         hits: Vec<Vec<PdfBox>>,
+        /// For each hit: text before it, the matched text, text after it.
+        context: Vec<HitContext>,
     },
     SearchDone {
         doc: DocId,

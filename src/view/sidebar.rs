@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::document::DocTab;
+use crate::document::{DocTab, SearchHit};
 use crate::engine::{AnnotChange, AnnotInfo, AnnotKind, OutlineItem, RenderKey, Reply, Request, STATUSES, pdf_date_now};
 use crate::icons;
 #[cfg(test)]
@@ -44,6 +44,18 @@ pub fn show(
     thumb_width: &mut f32,
     author: &str,
 ) {
+    tab_row(ui, tab, sidebar);
+    ui.separator();
+    match sidebar {
+        SidebarTab::Pages => thumbnails(ui, tab, cache, actions, thumb_width),
+        SidebarTab::Outline => outline(ui, tab),
+        SidebarTab::Comments => comments(ui, tab, author),
+        SidebarTab::Search => search_results(ui, tab),
+    }
+}
+
+/// The row choosing what the sidebar shows.
+pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
     // Wraps onto several lines in a narrow sidebar instead of keeping it wide.
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(sidebar, SidebarTab::Pages, "Pages");
@@ -58,13 +70,6 @@ pub fn show(
         };
         ui.selectable_value(sidebar, SidebarTab::Search, label);
     });
-    ui.separator();
-    match sidebar {
-        SidebarTab::Pages => thumbnails(ui, tab, cache, actions, thumb_width),
-        SidebarTab::Outline => outline(ui, tab),
-        SidebarTab::Comments => comments(ui, tab, author),
-        SidebarTab::Search => search_results(ui, tab),
-    }
 }
 
 /// Page operations requested from the sidebar or the Pages menu.
@@ -262,6 +267,7 @@ fn thumbnails(
                 width_px: want,
                 rotation: tab.rotation,
                 version,
+                tile: 0,
             };
             tab.wanted.push((key, 10.0 + (page as f32 - tab.current_page as f32).abs() / 1000.0));
             if let Some((tex, _)) = cache.best(tab.id, page, tab.rotation, want, version) {
@@ -849,43 +855,131 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
     }
 }
 
-fn search_results(ui: &mut Ui, tab: &mut DocTab) {
-    let s = &tab.search;
+/// A search hit as "…text before **match** text after…".
+fn hit_text(ui: &Ui, hit: &SearchHit) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::FontId::proportional(12.5);
+    let mut job = LayoutJob::default();
+    let weak = TextFormat::simple(font.clone(), ui.visuals().weak_text_color());
+    job.append(&hit.context.before, 0.0, weak.clone());
+    let text = if hit.context.text.is_empty() { "…" } else { hit.context.text.as_str() };
+    job.append(
+        text,
+        0.0,
+        TextFormat {
+            background: Color32::from_rgba_unmultiplied(255, 200, 0, 110),
+            ..TextFormat::simple(font, ui.visuals().strong_text_color())
+        },
+    );
+    job.append(&hit.context.after, 0.0, weak);
+    job.wrap.max_width = ui.available_width();
+    job
+}
+
+/// One search hit in the list; true if clicked.
+fn hit_row(ui: &mut Ui, hit: &SearchHit, selected: bool) -> bool {
+    let frame = egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(4, 3))
+        .corner_radius(CornerRadius::same(3))
+        .fill(if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.4) } else { Color32::TRANSPARENT });
+    frame
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.add_sized([34.0, 14.0], egui::Label::new(egui::RichText::new(format!("p.{}", hit.page + 1)).small().weak()));
+                ui.add(egui::Label::new(hit_text(ui, hit)).wrap());
+            });
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+fn search_status(ui: &mut Ui, s: &crate::document::SearchState) -> bool {
     match (&s.submitted, s.running) {
         (None, _) => {
             ui.weak(kb("Use the search box (Ctrl+F) to search the document."));
-            return;
+            false
         }
         (Some(q), true) => {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!("Searching for “{q}”… {} found", s.hits.len()));
             });
+            true
         }
         (Some(q), false) => {
             ui.label(format!("{} results for “{q}”", s.hits.len()));
+            true
         }
+    }
+}
+
+fn search_results(ui: &mut Ui, tab: &mut DocTab) {
+    if !search_status(ui, &tab.search) {
+        return;
     }
     ui.separator();
     let mut clicked = None;
-    let n = tab.search.hits.len();
     egui::ScrollArea::vertical()
         .id_salt(("search", tab.id))
         .auto_shrink([false, false])
-        .show_rows(ui, 18.0, n, |ui, rows| {
-            for i in rows {
-                let hit = &tab.search.hits[i];
-                let selected = tab.search.current == Some(i);
-                if ui
-                    .selectable_label(selected, format!("Page {} — match {}", hit.page + 1, i + 1))
-                    .clicked()
-                {
+        .show(ui, |ui| {
+            for (i, hit) in tab.search.hits.iter().enumerate() {
+                if hit_row(ui, hit, tab.search.current == Some(i)) {
                     clicked = Some(i);
                 }
             }
         });
     if let Some(i) = clicked {
         tab.show_search_hit(i);
+    }
+}
+
+/// Search results of every open tab, grouped by document.
+pub fn search_all_results(ui: &mut Ui, tabs: &mut [DocTab], active: &mut usize) {
+    let total: usize = tabs.iter().map(|t| t.search.hits.len()).sum();
+    let running = tabs.iter().any(|t| t.search.running);
+    let Some(query) = tabs.iter().find_map(|t| t.search.submitted.clone()) else {
+        ui.weak(kb("Use the search box (Ctrl+F) to search all open tabs."));
+        return;
+    };
+    ui.horizontal(|ui| {
+        if running {
+            ui.spinner();
+        }
+        let files = tabs.iter().filter(|t| !t.search.hits.is_empty()).count();
+        ui.label(format!("{total} results for “{query}” in {files} of {} files", tabs.len()));
+    });
+    ui.separator();
+    let mut clicked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("search_all")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (ti, tab) in tabs.iter().enumerate() {
+                if tab.search.hits.is_empty() {
+                    continue;
+                }
+                let id = ui.make_persistent_id(("search_doc", tab.id));
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                    .show_header(ui, |ui| {
+                        ui.strong(tab.title());
+                        ui.weak(format!("({})", tab.search.hits.len()));
+                    })
+                    .body(|ui| {
+                        for (i, hit) in tab.search.hits.iter().enumerate() {
+                            if hit_row(ui, hit, ti == *active && tab.search.current == Some(i)) {
+                                clicked = Some((ti, i));
+                            }
+                        }
+                    });
+            }
+        });
+    if let Some((ti, i)) = clicked {
+        *active = ti;
+        tabs[ti].show_search_hit(i);
     }
 }
 

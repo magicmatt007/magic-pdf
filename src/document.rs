@@ -32,6 +32,8 @@ pub enum LoadState {
 pub struct SearchHit {
     pub page: usize,
     pub rects: Vec<PdfBox>,
+    /// The hit with the text around it.
+    pub context: crate::engine::HitContext,
 }
 
 #[derive(Default)]

@@ -665,7 +665,18 @@ impl Worker {
             let (out_w, out_h) = if key.rotation.swaps_axes() { (h, w) } else { (w, h) };
             let width = key.width_px.max(1) as usize;
             let height = ((out_h / out_w) * width as f32).round().max(1.0) as usize;
-            page.render(width, height, key.rotation).map(|rgba| ([width, height], rgba))
+            match key.tile_pos() {
+                None => page.render(width, height, key.rotation).map(|rgba| ([width, height], rgba)),
+                Some((col, row)) => {
+                    let tile = TILE as usize;
+                    let (x, y) = (col as usize * tile, row as usize * tile);
+                    if x >= width || y >= height {
+                        return None;
+                    }
+                    let (w, h) = (tile.min(width - x), tile.min(height - y));
+                    page.render_region((width, height), (x, y, w, h), key.rotation).map(|rgba| ([w, h], rgba))
+                }
+            }
         });
         match result {
             Some((size, rgba)) => self.send(Response::Rendered { key, size, rgba }),
@@ -701,7 +712,7 @@ impl Worker {
         job.next_page += 1;
         let (doc, generation) = (job.doc, job.generation);
         let Some(page) = od.doc.page(page_index) else { return };
-        let hits = page.search(&job.query, MAX_SEARCH_HITS_PER_PAGE);
+        let (hits, context): (Vec<_>, Vec<_>) = page.search_with_context(&job.query, MAX_SEARCH_HITS_PER_PAGE).into_iter().unzip();
         let geom = page.geom();
         if !hits.is_empty() {
             self.send(Response::SearchResults {
@@ -710,6 +721,7 @@ impl Worker {
                 page: page_index,
                 geom,
                 hits,
+                context,
             });
         }
     }
