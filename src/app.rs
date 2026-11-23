@@ -2806,6 +2806,7 @@ impl App {
                         ("PgUp / PgDn, Home / End", "Previous / next, first / last page"),
                         ("Space / Shift+Space", "Scroll one screen"),
                         ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
+                        ("Double-click a page in the grid", "Open it in the previous layout"),
                         ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
                         ("H / S", "Hand tool / text selection tool"),
                         ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
