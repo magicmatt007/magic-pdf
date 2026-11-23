@@ -60,6 +60,10 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Compare two PDFs (File → Compare with): side by side, scrolling and zooming together,
   changed words marked red and green, a bar to step through pages with changes
 - File → Export pages as pictures: PNG or JPEG at a chosen resolution, one file per page
+- Digital signatures checked on opening: a bar shows whether the signed content is
+  unchanged, the signature matches the signer's certificate and the file was changed
+  afterwards; details list signer, time, reason and certification (whether the
+  certificate is trusted or revoked is not checked)
 - E-invoices (ZUGFeRD / Factur-X) shown and checked, document properties (Ctrl+D) and
   File → Save optimized copy (lossless compression, pictures scaled down to a chosen dpi);
   see [E-invoices](#e-invoices)
@@ -185,6 +189,7 @@ macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting.
 python3 tests/fixtures/make_sample.py   # regenerates tests/fixtures/sample.pdf
 python3 tests/fixtures/make_form.py     # regenerates tests/fixtures/form.pdf
 python3 tests/fixtures/make_scanned.py  # regenerates tests/fixtures/scanned.pdf
+python3 tests/fixtures/make_signed.py   # regenerates signed.pdf, signed-ec.pdf (needs `cryptography`)
 cargo test                               # unit tests + PDFium engine tests
 ```
 

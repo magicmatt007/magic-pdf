@@ -427,6 +427,46 @@ impl Doc {
         }
     }
 
+    /// The document's signatures (raw), checked against the bytes the document was
+    /// opened from.
+    pub fn signatures(&self) -> Vec<SignatureInfo> {
+        let lib = self.lib;
+        let data: &[u8] = &self._data;
+        let n = unsafe { lib.FPDF_GetSignatureCount(self.handle) };
+        (0..n.max(0))
+            .filter_map(|i| unsafe {
+                let sig = lib.FPDF_GetSignatureObject(self.handle, i);
+                if sig.is_null() {
+                    return None;
+                }
+                let len = lib.FPDFSignatureObj_GetContents(sig, ptr::null_mut(), 0) as usize;
+                let mut contents = vec![0u8; len];
+                lib.FPDFSignatureObj_GetContents(sig, contents.as_mut_ptr().cast(), len as c_ulong);
+                let n = lib.FPDFSignatureObj_GetByteRange(sig, ptr::null_mut(), 0) as usize;
+                let mut range = vec![0 as c_int; n];
+                lib.FPDFSignatureObj_GetByteRange(sig, range.as_mut_ptr(), n as c_ulong);
+                let ranges: Vec<(usize, usize)> = range.chunks_exact(2).map(|p| (p[0].max(0) as usize, p[1].max(0) as usize)).collect();
+                let ascii = |f: &dyn Fn(*mut std::os::raw::c_char, c_ulong) -> c_ulong| {
+                    let len = f(ptr::null_mut(), 0) as usize;
+                    let mut buf = vec![0u8; len];
+                    f(buf.as_mut_ptr().cast(), len as c_ulong);
+                    String::from_utf8_lossy(&buf).trim_end_matches('\0').to_string()
+                };
+                let subfilter = ascii(&|b, l| lib.FPDFSignatureObj_GetSubFilter(sig, b, l));
+                let time = ascii(&|b, l| lib.FPDFSignatureObj_GetTime(sig, b, l));
+                let rlen = lib.FPDFSignatureObj_GetReason(sig, ptr::null_mut(), 0) as usize;
+                let mut rbuf = vec![0u16; rlen.div_ceil(2)];
+                lib.FPDFSignatureObj_GetReason(sig, rbuf.as_mut_ptr().cast(), rlen as c_ulong);
+                Some(SignatureInfo {
+                    check: super::signatures::check(data, &ranges, &contents, &subfilter),
+                    reason: utf16_buf_to_string(&rbuf),
+                    time,
+                    permission: lib.FPDFSignatureObj_GetDocMDPPermission(sig),
+                })
+            })
+            .collect()
+    }
+
     /// An empty document (for extracting pages into).
     pub fn create(lib: Lib) -> Result<Doc, String> {
         let handle = unsafe { lib.FPDF_CreateNewDocument() };

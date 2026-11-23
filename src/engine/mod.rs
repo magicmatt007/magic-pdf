@@ -5,6 +5,7 @@ pub mod commands;
 pub mod compare;
 pub mod pages;
 pub mod redact;
+pub mod signatures;
 pub mod ocr;
 mod lopdf_ops;
 pub mod rich;
@@ -2038,6 +2039,42 @@ mod tests {
         let left: Vec<f32> = annots(&engine, 2).iter().filter(|x| x.kind == AnnotKind::Square).map(|x| x.rect.left.round()).collect();
         assert_eq!(left, vec![400.0, 540.0], "B and D are left: A redacted, C deleted");
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn signatures_are_checked_when_opening() {
+        use signatures::SigStatus;
+        let (_serial, engine) = start();
+        let fixture = |name: &str| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        for (doc, name) in [(1, "signed.pdf"), (2, "signed-ec.pdf")] {
+            let info = open(&engine, doc, fixture(name));
+            assert_eq!(info.signatures.len(), 1, "{name}");
+            let s = &info.signatures[0];
+            assert_eq!(s.check.status, SigStatus::Valid, "{name}");
+            assert_eq!(s.check.signer, "magic-pdf Test Signer");
+            assert!(s.check.self_signed);
+            assert_eq!(s.reason, "Approved");
+            assert!(s.time.starts_with("D:20261123"), "{}", s.time);
+        }
+        assert!(open(&engine, 3, sample()).signatures.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("magic-pdf-sig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = std::fs::read(fixture("signed.pdf")).unwrap();
+        // The signed text changed: the signature no longer matches.
+        let at = original.windows(6).position(|w| w == b"signed").unwrap();
+        let mut forged = original.clone();
+        forged[at..at + 6].copy_from_slice(b"forged");
+        std::fs::write(dir.join("forged.pdf"), &forged).unwrap();
+        let info = open(&engine, 4, dir.join("forged.pdf"));
+        assert!(matches!(&info.signatures[0].check.status, SigStatus::Invalid(m) if m.contains("changed")), "{:?}", info.signatures[0].check.status);
+        // Something added after signing (an incremental update).
+        let mut added = original.clone();
+        added.extend_from_slice(b"% added later\n");
+        std::fs::write(dir.join("added.pdf"), &added).unwrap();
+        let info = open(&engine, 5, dir.join("added.pdf"));
+        assert_eq!(info.signatures[0].check.status, SigStatus::ChangedAfter);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

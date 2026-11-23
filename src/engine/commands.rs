@@ -162,6 +162,20 @@ pub struct DocInfo {
     pub properties: DocProperties,
     /// Files embedded in the document.
     pub attachments: Vec<AttachmentInfo>,
+    /// Digital signatures, checked when the file was opened.
+    pub signatures: Vec<SignatureInfo>,
+}
+
+/// A digital signature of the file and the result of checking it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignatureInfo {
+    pub check: super::signatures::SignatureCheck,
+    pub reason: String,
+    /// Signing time as recorded in the signature (PDF date string).
+    pub time: String,
+    /// What the signature still allows to change (1 nothing, 2 form filling and
+    /// signing, 3 also annotations); 0 when not a certifying signature.
+    pub permission: u32,
 }
 
 /// Document properties (the PDF's information dictionary).

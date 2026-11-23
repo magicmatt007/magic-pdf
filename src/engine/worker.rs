@@ -61,6 +61,8 @@ struct OpenDoc {
     colors: HashMap<(usize, usize), (Option<Rgb>, Option<Rgb>)>,
     /// Form field values changed since the last save (not part of undo history).
     form_dirty: bool,
+    /// Signatures as checked when the file was opened.
+    signatures: Vec<SignatureInfo>,
 }
 
 impl OpenDoc {
@@ -658,6 +660,7 @@ impl Worker {
                     title: doc.title(),
                     properties: doc.properties(),
                     attachments: doc.attachments(),
+                    signatures: doc.signatures(),
                 };
                 self.docs.insert(
                     id,
@@ -669,6 +672,7 @@ impl Worker {
                         deleted: HashMap::new(),
                         colors: HashMap::new(),
                         form_dirty: false,
+                        signatures: info.signatures.clone(),
                     },
                 );
                 self.send(Response::Opened { doc: id, info });
@@ -798,6 +802,7 @@ impl Worker {
             title: od.doc.title(),
             properties: od.doc.properties(),
             attachments: od.doc.attachments(),
+            signatures: od.signatures.clone(),
         }
     }
 

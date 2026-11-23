@@ -106,6 +106,8 @@ pub struct App {
     /// E-invoice data found in open documents, and the one shown.
     einvoices: HashMap<DocId, crate::view::doc_info::EInvoice>,
     show_einvoice: Option<DocId>,
+    /// The document whose signature details are shown.
+    show_signatures: Option<DocId>,
     /// What to do with attached files the engine is reading.
     attachment_actions: HashMap<(DocId, usize), crate::view::doc_info::AttachmentAction>,
     /// Page tool dialogs (None: closed).
@@ -121,6 +123,8 @@ pub struct App {
     presenting: Option<Presentation>,
     /// Debug aid (screenshots): start a presentation once the document is ready.
     present_on_load: bool,
+    /// Debug aid (screenshots): show the signature details once the document is ready.
+    signatures_on_load: bool,
     /// Tabs being moved to another window, waiting for their export.
     moves: HashMap<DocId, MoveTarget>,
     /// Temporary files of tabs received from other windows, deleted once opened.
@@ -272,6 +276,7 @@ impl App {
             props_dialog: None,
             einvoices: HashMap::new(),
             show_einvoice: None,
+            show_signatures: None,
             attachment_actions: HashMap::new(),
             crop_dialog: None,
             confirm_redact: None,
@@ -282,6 +287,7 @@ impl App {
             flatten_dialog: None,
             presenting: None,
             present_on_load: false,
+            signatures_on_load: false,
             moves: HashMap::new(),
             temp_files: HashMap::new(),
             was_focused: true,
@@ -300,6 +306,7 @@ impl App {
                 app.tool = *t;
             }
             app.show_settings = wanted == "settings";
+            app.signatures_on_load = wanted == "signatures";
             app.present_on_load = wanted == "present";
         }
         let day = 24 * 60 * 60;
@@ -1847,6 +1854,17 @@ impl App {
         }
         if self.tabs.get(self.active).is_some_and(|t| self.einvoices.contains_key(&t.id)) {
             egui::Panel::top("einvoice").show(ui, |ui| self.einvoice_bar(ui));
+        }
+        if let Some(tab) = self.tabs.get(self.active)
+            && let Some(info) = tab.info().filter(|i| !i.signatures.is_empty())
+        {
+            let doc = tab.id;
+            let sigs = info.signatures.clone();
+            egui::Panel::top("signatures").show(ui, |ui| {
+                if crate::view::signatures::bar(ui, &sigs) {
+                    self.show_signatures = Some(doc);
+                }
+            });
         }
         if self.tabs.get(self.active).is_some_and(|t| self.tool == Tool::Redact || !t.redactions.is_empty()) {
             egui::Panel::top("redaction").show(ui, |ui| self.redaction_bar(ui));
@@ -3543,6 +3561,18 @@ impl eframe::App for App {
         self.split_dialog(&ctx);
         self.page_tool_dialogs(&ctx);
         self.doc_info_windows(&ctx);
+        if self.signatures_on_load
+            && let Some(t) = self.tabs.get(self.active).filter(|t| t.info().is_some())
+        {
+            self.signatures_on_load = false;
+            self.show_signatures = Some(t.id);
+        }
+        if let Some(doc) = self.show_signatures {
+            let sigs = self.tabs.iter().find(|t| t.id == doc).and_then(|t| t.info()).map(|i| i.signatures.clone());
+            if !sigs.is_some_and(|s| crate::view::signatures::window(&ctx, &s)) {
+                self.show_signatures = None;
+            }
+        }
         for r in self.ocr.show(&ctx, self.tabs.get(self.active)) {
             self.send(r);
         }

@@ -6,5 +6,6 @@ pub mod layout;
 pub mod outline_edit;
 pub mod page_tools;
 pub mod sidebar;
+pub mod signatures;
 pub mod stamps;
 pub mod viewport;
