@@ -16,7 +16,7 @@ use crate::engine::{
 use crate::engine::StampSpec;
 use crate::settings::{AnnotStyle, Signature};
 use crate::keys::kb;
-use crate::view::cache::{TextureCache, width_bucket};
+use crate::view::cache::{TextureCache, exact_width, snap_to_pixels, width_bucket};
 use crate::view::color_picker;
 use crate::view::layout::{GAP, LayoutMode, geom_box_to_local, geom_local_to_pdf, geom_pdf_to_local};
 use crate::view::viewport::{FitMode, Viewport};
@@ -1204,8 +1204,9 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
     for page in tab.layout.pages_in(prefetch) {
         let Some(rect) = tab.layout.page_rect(page) else { continue };
         let size = rect.size();
-        let screen = tab.viewport.rect_to_screen(rect, view);
-        let want_w = width_bucket(screen.width() * ppp, size.y / size.x.max(1.0));
+        // Rendered at exactly the pixel size it is shown at, on whole pixels: sharp.
+        let screen = snap_to_pixels(tab.viewport.rect_to_screen(rect, view), ppp);
+        let want_w = exact_width(screen.width() * ppp, size.y / size.x.max(1.0));
         let version = tab.page_version(page);
         let key = RenderKey {
             doc: tab.id,
@@ -1263,7 +1264,7 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
         }
 
         // Above the size limit of whole-page renders, sharp tiles cover what is on screen.
-        let full_w = crate::view::cache::bucket(screen.width() * ppp);
+        let full_w = (screen.width() * ppp).round() as u32;
         if full_w > want_w {
             paint_tiles(&painter, tab, cx, page, screen, view, full_w, version, distance);
         }
