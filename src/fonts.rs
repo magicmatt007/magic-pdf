@@ -43,3 +43,25 @@ pub fn install(ctx: &egui::Context) {
         ));
     }
 }
+
+/// Makes the interface sharper on ordinary (1x) screens: Noto Sans Regular as the
+/// interface font instead of egui's thin Ubuntu Light, hinted onto the pixel grid in
+/// both directions, and glyphs placed on whole pixels (sub-pixel placement blurs them).
+pub fn install_ui(ctx: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, HintingTarget, InsertFontFamily, SmoothHinting};
+    let mut data = egui::FontData::from_static(REGULAR);
+    data.tweak.hinting_target = HintingTarget::Smooth(SmoothHinting {
+        light: false,
+        symmetric_rendering: false,
+        preserve_linear_metrics: false,
+    });
+    ctx.add_font(FontInsert::new(
+        "noto-sans-ui",
+        data,
+        vec![InsertFontFamily {
+            family: egui::FontFamily::Proportional,
+            priority: FontPriority::Highest,
+        }],
+    ));
+    ctx.all_styles_mut(|style| style.visuals.text_options.subpixel_binning = false);
+}

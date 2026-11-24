@@ -10,7 +10,7 @@ use crate::icons;
 use crate::engine::PageOp;
 use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
 use crate::keys::kb;
-use crate::view::cache::{TextureCache, width_bucket};
+use crate::view::cache::{TextureCache, exact_width, snap_to_pixels};
 use crate::view::layout::rotated_size;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -269,8 +269,9 @@ fn thumbnails(
             } else if response.hovered() {
                 painter.rect_filled(rect, CornerRadius::same(4), ui.visuals().widgets.hovered.weak_bg_fill);
             }
+            let thumb = snap_to_pixels(thumb, ppp);
             painter.rect_filled(thumb, CornerRadius::ZERO, Color32::WHITE);
-            let want = width_bucket(thumb.width() * ppp, s.y / s.x.max(1.0));
+            let want = exact_width(thumb.width() * ppp, s.y / s.x.max(1.0));
             let version = tab.page_version(page);
             let key = RenderKey {
                 doc: tab.id,

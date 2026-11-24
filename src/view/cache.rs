@@ -20,6 +20,23 @@ pub fn width_bucket(px: f32, aspect_h_over_w: f32) -> u32 {
     w.max(16.0) as u32
 }
 
+/// The pixel width to render a page at so it is drawn 1:1 on screen (scaling a render
+/// up or down blurs it), within the size limit of whole-page renders.
+pub fn exact_width(px: f32, aspect_h_over_w: f32) -> u32 {
+    let max_w = (MAX_PIXELS / aspect_h_over_w.max(0.01)).sqrt().floor();
+    px.round().clamp(16.0, max_w.max(16.0)) as u32
+}
+
+/// `rect` moved and sized to whole screen pixels, so a render of exactly that many
+/// pixels is drawn without resampling.
+pub fn snap_to_pixels(rect: egui::Rect, pixels_per_point: f32) -> egui::Rect {
+    let snap = |v: f32| (v * pixels_per_point).round() / pixels_per_point;
+    egui::Rect::from_min_size(
+        egui::pos2(snap(rect.min.x), snap(rect.min.y)),
+        egui::vec2(snap(rect.width()), snap(rect.height())),
+    )
+}
+
 /// The bucket for a pixel width without the size limit (tiles have none).
 pub fn bucket(px: f32) -> u32 {
     let px = px.max(16.0);
@@ -285,6 +302,17 @@ mod tests {
             assert!(b >= last);
             assert!((b as f32) < px as f32 * 1.2 + 2.0);
             last = b;
+        }
+    }
+
+    #[test]
+    fn pages_render_at_their_exact_screen_size() {
+        use eframe::egui::{pos2, vec2};
+        assert_eq!(exact_width(612.4, 1.414), 612);
+        assert_eq!(exact_width(100_000.0, 1.414), width_bucket(100_000.0, 1.414).min(3363));
+        let r = snap_to_pixels(egui::Rect::from_min_size(pos2(10.3, 20.6), vec2(100.4, 141.2)), 1.25);
+        for v in [r.min.x, r.min.y, r.width(), r.height()] {
+            assert!(((v * 1.25) - (v * 1.25).round()).abs() < 1e-3, "{v} is not on a whole pixel");
         }
     }
 

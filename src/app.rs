@@ -261,6 +261,7 @@ impl App {
         }
         icons::install(&ctx);
         crate::fonts::install(&ctx);
+        crate::fonts::install_ui(&ctx);
         let settings = Settings::load();
         crate::i18n::set_language(&settings.language);
         ctx.set_theme(if settings.dark_ui {
