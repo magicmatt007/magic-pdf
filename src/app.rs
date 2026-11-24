@@ -183,8 +183,35 @@ enum TabDrop {
     Reorder(usize),
     /// Over another magic-pdf window (index into the peer list).
     Peer(usize),
-    /// Outside every window: open a new one (at this screen position if known).
+    /// Outside every window, or pulled well away from the tab bar: open a new one
+    /// (at this screen position if known).
     NewWindow(Option<[f32; 2]>),
+}
+
+/// How far below the tab bar a dragged tab must be released to get its own window.
+/// Like in web browsers, this also works in a maximized window, which has no
+/// "outside" to drop on (the usual case on Windows).
+const TAB_DETACH_DISTANCE: f32 = 80.0;
+
+/// The mouse position on the screen (in pixels) and whether the primary button is
+/// held, asked from Windows directly. While a tab is dragged out of the window,
+/// the window's own mouse events can't be relied on there (the release outside the
+/// window can get lost), so the drag follows the real mouse instead.
+#[cfg(windows)]
+fn os_pointer() -> Option<(egui::Pos2, bool)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_SWAPBUTTON};
+    let mut p = POINT { x: 0, y: 0 };
+    // SAFETY: plain Win32 calls; `p` is a valid out pointer.
+    unsafe {
+        if GetCursorPos(&mut p) == 0 {
+            return None;
+        }
+        let button = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        let down = (GetAsyncKeyState(button as i32) as u16 & 0x8000) != 0;
+        Some((egui::pos2(p.x as f32, p.y as f32), down))
+    }
 }
 
 /// Decides what dropping a dragged tab at `pointer` (window coordinates) means.
@@ -198,17 +225,20 @@ fn decide_tab_drop(
     peer_rects: &[Option<[f32; 4]>],
 ) -> TabDrop {
     let Some(p) = pointer else { return TabDrop::NewWindow(None) };
+    let global = origin.map(|o| o + p.to_vec2());
     if window.contains(p) {
         // The whole width of the tab bar counts (dropping right of the last tab moves
         // the tab to the end).
         let tabs = tab_rects.iter().fold(egui::Rect::NOTHING, |a, r| a.union(*r));
-        if !(tabs.top() - 12.0..=tabs.bottom() + 12.0).contains(&p.y) {
-            return TabDrop::Stay;
+        if (tabs.top() - 12.0..=tabs.bottom() + 12.0).contains(&p.y) {
+            let index = tab_rects.iter().position(|r| p.x < r.center().x).unwrap_or(tab_rects.len().saturating_sub(1));
+            return TabDrop::Reorder(index);
         }
-        let index = tab_rects.iter().position(|r| p.x < r.center().x).unwrap_or(tab_rects.len().saturating_sub(1));
-        return TabDrop::Reorder(index);
+        if p.y > tabs.bottom() + TAB_DETACH_DISTANCE {
+            return TabDrop::NewWindow(global.map(|g| [g.x, g.y]));
+        }
+        return TabDrop::Stay;
     }
-    let global = origin.map(|o| o + p.to_vec2());
     if let Some(g) = global
         && let Some(i) = peer_rects
             .iter()
@@ -2916,7 +2946,7 @@ impl App {
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let resp = ui
                         .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
-                        .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag out of the window to open it in its own window")));
+                        .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag it down onto the page or out of the window to open it in its own window")));
                     tab_rects.push(resp.rect);
                     if resp.clicked() {
                         self.active = i;
@@ -2988,9 +3018,19 @@ impl App {
                 inp.viewport().inner_rect.map(|r| r.min),
             )
         });
+        #[cfg(windows)]
+        let (pointer, down) = match (os_pointer(), origin) {
+            (Some((screen, os_down)), Some(o)) => {
+                let ppp = ctx.pixels_per_point();
+                (Some(egui::pos2(screen.x / ppp, screen.y / ppp) - o.to_vec2()), os_down)
+            }
+            _ => (pointer, down),
+        };
         if down {
+            // Keep following the mouse even when no window events arrive.
+            ctx.request_repaint();
             if let Some(p) = pointer {
-                let outside = !window.contains(p);
+                let outside = matches!(decide_tab_drop(Some(p), window, origin, tab_rects, &[]), TabDrop::NewWindow(_));
                 egui::Area::new(egui::Id::unique("tab_drag"))
                     .fixed_pos(p + egui::vec2(12.0, 8.0))
                     .order(egui::Order::Tooltip)
@@ -3849,8 +3889,14 @@ mod tests {
         // In the tab bar: reorder.
         assert_eq!(decide_tab_drop(Some(pos2(130.0, 60.0)), window, origin, &tabs, &other), TabDrop::Reorder(1));
         assert_eq!(decide_tab_drop(Some(pos2(900.0, 60.0)), window, origin, &tabs, &other), TabDrop::Reorder(2));
-        // On the page: nothing happens.
-        assert_eq!(decide_tab_drop(Some(pos2(500.0, 500.0)), window, origin, &tabs, &other), TabDrop::Stay);
+        // Just below the tab bar: nothing happens.
+        assert_eq!(decide_tab_drop(Some(pos2(500.0, 120.0)), window, origin, &tabs, &other), TabDrop::Stay);
+        // Pulled well down onto the page (e.g. in a maximized window): new window there.
+        assert_eq!(
+            decide_tab_drop(Some(pos2(500.0, 500.0)), window, origin, &tabs, &other),
+            TabDrop::NewWindow(Some([1000.0, 800.0]))
+        );
+        assert_eq!(decide_tab_drop(Some(pos2(500.0, 500.0)), window, None, &tabs, &other), TabDrop::NewWindow(None));
         // Over the other window (screen x = 500 + 1200 = 1700).
         assert_eq!(decide_tab_drop(Some(pos2(1200.0, 100.0)), window, origin, &tabs, &other), TabDrop::Peer(0));
         // Elsewhere outside: new window at the drop point.

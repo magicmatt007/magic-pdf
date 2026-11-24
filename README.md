@@ -69,7 +69,7 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   see [E-invoices](#e-invoices)
 
 - One window, many tabs: PDFs opened from the desktop join the running window;
-  drag a tab out to give it its own window, or onto another magic-pdf window to
+  drag a tab out of the window (or down onto the page) to give it its own window, or onto another magic-pdf window to
   move it there (unsaved changes included; on Wayland use the tab's right-click
   menu, as Wayland does not report window positions)
 - Update notices: checks GitHub at most once a day (Help menu to turn off); on

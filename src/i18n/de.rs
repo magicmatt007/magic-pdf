@@ -105,7 +105,7 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("1 for full size; 100 for a drawing at 1:100", "1 für Originalgrösse; 100 für einen Plan im Massstab 1:100"),
     ("Text", "Text"),
     ("Size", "Grösse"),
-    ("Drag out of the window to open it in its own window", "Aus dem Fenster ziehen, um ihn in einem eigenen Fenster zu öffnen"),
+    ("Drag it down onto the page or out of the window to open it in its own window", "Nach unten auf die Seite oder aus dem Fenster ziehen, um ihn in einem eigenen Fenster zu öffnen"),
     ("Move to new window", "In neues Fenster verschieben"),
     ("Move to window", "In Fenster verschieben"),
     ("Close", "Schliessen"),
