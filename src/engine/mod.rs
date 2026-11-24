@@ -2077,6 +2077,131 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A one-page PDF with two text boxes: one as PDF-XChange and Acrobat write them
+    /// (/C yellow fill, /DA red border, /DS black text) and one as magic-pdf wrote them
+    /// before (/C blue border, /IC green fill, black text).
+    fn text_boxes_pdf() -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let font = doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let ap = |doc: &mut Document, rect: [f32; 4], ops: &str| {
+            doc.add_object(Stream::new(
+                dictionary! { "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => rect.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+                    "Resources" => dictionary! { "Font" => dictionary! { "F0" => font } } },
+                ops.as_bytes().to_vec(),
+            ))
+        };
+        let xchange_ap = ap(&mut doc, [100.0, 600.0, 200.0, 660.0],
+            "1 1 0 rg 1 0 0 RG 1 w 100.5 600.5 99 59 re B BT 0 0 0 rg /F0 12 Tf 104 640 Td (Box 1) Tj ET");
+        let legacy_ap = ap(&mut doc, [300.0, 600.0, 400.0, 660.0],
+            "0 1 0 rg 300 600 100 60 re f 0 0 1 RG 1 w 300.5 600.5 99 59 re S BT 0 0 0 rg /F0 12 Tf 304 640 Td (Box 2) Tj ET");
+        let rect = |r: [f32; 4]| r.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>();
+        let color = |c: [f32; 3]| c.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>();
+        let s = |t: &str| Object::string_literal(t);
+        let xchange = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect([100.0, 600.0, 200.0, 660.0]),
+            "C" => color([1.0, 1.0, 0.0]), "DA" => s("1 0 0 rg /F1 12 Tf"),
+            "DS" => s("font-family:Arial;font-size:12pt;color:#000000;"), "Contents" => s("Box 1"),
+            "F" => 4, "IT" => "FreeText", "AP" => dictionary! { "N" => xchange_ap },
+        });
+        let legacy = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect([300.0, 600.0, 400.0, 660.0]),
+            "C" => color([0.0, 0.0, 1.0]), "IC" => color([0.0, 1.0, 0.0]), "DA" => s("/Helv 12.0 Tf 0 0 0 rg"),
+            "DS" => s("font: 12.0pt Helvetica; color:#000000; text-align:left"), "Contents" => s("Box 2"),
+            "F" => 4, "AP" => dictionary! { "N" => legacy_ap },
+        });
+        let pages_id = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Annots" => vec![xchange.into(), legacy.into()],
+        });
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn text_boxes_from_other_applications_keep_their_colours_when_moved() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-boxes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("boxes.pdf");
+        std::fs::write(&path, text_boxes_pdf()).unwrap();
+        open(&engine, 1, path);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let list = annots(&engine, 1);
+        let by_text = |list: &[AnnotInfo], t: &str| list.iter().find(|a| a.contents == t).unwrap().clone();
+        // Read right in both conventions: colour = border, interior = fill.
+        let (b1, b2) = (by_text(&list, "Box 1"), by_text(&list, "Box 2"));
+        assert_eq!((b1.color, b1.interior, b1.text_color), (Some([255, 0, 0]), Some([255, 255, 0]), Some([0, 0, 0])));
+        assert_eq!((b2.color, b2.interior, b2.text_color), (Some([0, 0, 255]), Some([0, 255, 0]), Some([0, 0, 0])));
+
+        // Move both down by 100 pt; magic-pdf redraws them.
+        for a in [&b1, &b2] {
+            let r = a.rect;
+            engine.send(Request::UpdateAnnot {
+                doc: 1,
+                page: 0,
+                index: a.index,
+                change: AnnotChange {
+                    rect: Some(PdfBox { bottom: r.bottom - 100.0, top: r.top - 100.0, ..r }),
+                    ..Default::default()
+                },
+            });
+            let _ = annots(&engine, 1);
+        }
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let at = |x: f32, y: f32| {
+            let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
+            rgba[(py * size[0] + px) * 4..][..3].to_vec()
+        };
+        assert_eq!(at(190.0, 505.0), vec![255, 255, 0], "box 1 still filled yellow");
+        let p = at(100.5, 530.0);
+        assert!(p[0] > 200 && p[1] < 120 && p[2] < 80, "box 1 border still red: {p:?}");
+        assert_eq!(at(390.0, 505.0), vec![0, 255, 0], "box 2 still filled green");
+        let p = at(300.5, 530.0);
+        assert!(p[2] > 200 && p[0] < 80, "box 2 border still blue: {p:?}");
+        // Text stays black: no red or blue pixels inside either box apart from the border.
+        let inside = |x0: f32, x1: f32, f: &dyn Fn(&[u8]) -> bool| {
+            (0..20).flat_map(|i| (0..10).map(move |j| (x0 + (x1 - x0) * i as f32 / 20.0, 510.0 + 4.0 * j as f32))).filter(|&(x, y)| f(&at(x, y))).count()
+        };
+        assert_eq!(inside(103.0, 197.0, &|p| p[0] > 200 && p[1] < 80 && p[2] < 80), 0, "no red text in box 1");
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let list = annots(&engine, 1);
+        let (m1, m2) = (by_text(&list, "Box 1"), by_text(&list, "Box 2"));
+        assert_eq!((m1.color, m1.interior), (Some([255, 0, 0]), Some([255, 255, 0])));
+        assert_eq!((m2.color, m2.interior), (Some([0, 0, 255]), Some([0, 255, 0])));
+
+        // Saved, both are stored the way other applications read them: /C fill, /DA border.
+        let out = dir.join("moved.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = lopdf::Document::load(&out).unwrap();
+        let boxes: Vec<&lopdf::Dictionary> = saved
+            .objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .filter(|d| d.get(b"Subtype").and_then(|s| s.as_name()).is_ok_and(|n| n == b"FreeText"))
+            .collect();
+        assert_eq!(boxes.len(), 2);
+        for d in boxes {
+            let text = |k: &[u8]| d.get(k).ok().and_then(|o| o.as_str().ok()).map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+            let c: Vec<f32> = d.get(b"C").unwrap().as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect();
+            if text(b"Contents") == "Box 1" {
+                assert_eq!(c, vec![1.0, 1.0, 0.0]);
+                assert_eq!(textbox::parse_default_appearance(&text(b"DA")).1, Some([255, 0, 0]), "/DA holds the border");
+            } else {
+                assert_eq!(c, vec![0.0, 1.0, 0.0], "old magic-pdf box converted: /C is the fill");
+                assert_eq!(textbox::parse_default_appearance(&text(b"DA")).1, Some([0, 0, 255]), "/DA holds the border");
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn optimized_copies_are_smaller_and_still_show_the_picture() {
         let (_serial, engine) = start();

@@ -257,6 +257,49 @@ pub fn default_appearance(size: f32, color: Rgb) -> String {
     format!("/Helv {size:.1} Tf {} rg", rgb(color))
 }
 
+/// The text colour of a /DS default style string ("…; color:#ff0000; …").
+pub fn parse_default_style_color(ds: &str) -> Option<Rgb> {
+    let lower = ds.to_ascii_lowercase();
+    let at = lower.find("color:")? + "color:".len();
+    let hex = lower[at..].trim_start().strip_prefix('#')?;
+    let hex: String = hex.chars().take_while(char::is_ascii_hexdigit).collect();
+    let v = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+    match hex.len() {
+        6 => Some([v(0)?, v(2)?, v(4)?]),
+        3 => {
+            let c = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).ok().map(|d| d * 17);
+            Some([c(0)?, c(1)?, c(2)?])
+        }
+        _ => None,
+    }
+}
+
+/// The colour a drawing fills its first rectangle with (a text box's background),
+/// as opposed to the colour of its text.
+pub fn rectangle_fill(content: &str) -> Option<Rgb> {
+    let tokens: Vec<&str> = content.split_whitespace().collect();
+    let num = |t: &str| t.parse::<f32>().ok().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let mut fill = Some([0, 0, 0]);
+    let mut after_re = false;
+    for (i, t) in tokens.iter().enumerate() {
+        match *t {
+            "rg" if i >= 3 => fill = (|| Some([num(tokens[i - 3])?, num(tokens[i - 2])?, num(tokens[i - 1])?]))(),
+            "g" if i >= 1 => fill = num(tokens[i - 1]).map(|v| [v, v, v]),
+            "re" => after_re = true,
+            "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" if after_re => return fill,
+            "S" | "s" | "n" | "W" | "W*" => after_re = false,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a /DS string is the one magic-pdf wrote before text boxes used the
+/// Acrobat colour convention ("font: 12.0pt Helvetica; color:#…; text-align:…").
+pub fn is_legacy_magic_style(ds: &str) -> bool {
+    ds.starts_with("font: ") && ds.contains("pt Helvetica; color:#") && ds.contains("text-align:")
+}
+
 /// Reads font size and text colour back from a /DA string.
 pub fn parse_default_appearance(da: &str) -> (Option<f32>, Option<Rgb>) {
     let tokens: Vec<&str> = da.split_whitespace().collect();
@@ -286,6 +329,19 @@ pub fn parse_default_appearance(da: &str) -> (Option<f32>, Option<Rgb>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_box_background_is_the_colour_its_rectangle_is_filled_with() {
+        // PDF-XChange: filled and stroked in one go.
+        assert_eq!(rectangle_fill("1 1 0 rg 1 0 0 RG 1 w 79 671 78 49 re B BT 0 0 0 rg (Box 1) Tj ET"), Some([255, 255, 0]));
+        // magic-pdf: fill, then border.
+        assert_eq!(rectangle_fill("0 1 0 rg 300 600 100 60 re f 0 0 1 RG 300 600 100 60 re S"), Some([0, 255, 0]));
+        // Only a stroked rectangle and red text: no background.
+        assert_eq!(rectangle_fill("1 1 0 RG 1 w 239 619 78 49 re S 1 0 0 rg 246 661 m 247 661 l h f"), None);
+        assert_eq!(parse_default_style_color("font-family:Arial;font-size:12pt;color:#00FF80;"), Some([0, 255, 128]));
+        assert!(is_legacy_magic_style("font: 12.0pt Helvetica; color:#000000; text-align:left"));
+        assert!(!is_legacy_magic_style("font: Helvetica,sans-serif 12.0pt; text-align:left; color:#000000"));
+    }
     use crate::engine::rich::Span;
 
     /// Regular characters are 0.5 em wide, bold ones 0.6 em; glyphs are markers.

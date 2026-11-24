@@ -37,6 +37,9 @@ const FPDF_MATCHWHOLEWORD: c_ulong = 0x2;
 
 /// Marked-content tag of header and footer texts magic-pdf adds.
 const HEADER_FOOTER_MARK: &str = "MagicPdfHeaderFooter";
+/// Set on text boxes whose colours follow the Acrobat convention (/C fill, /DA border,
+/// /DS text). Boxes without it that carry magic-pdf's old /DS used /C border, /IC fill.
+const BOX_STYLE_KEY: &str = "MagicPdfBoxStyle";
 /// Marked-content tag of watermarks magic-pdf adds.
 const WATERMARK_MARK: &str = "MagicPdfWatermark";
 const SUBTYPE_TEXT: c_int = 1;
@@ -1876,7 +1879,12 @@ impl<'d> Page<'d> {
             let (mut hr, mut vr, mut w) = (0.0, 0.0, 1.0);
             unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut w) };
             let (mut color, mut interior) = (self.annot_color(&a, COLORTYPE_COLOR), self.annot_color(&a, COLORTYPE_INTERIOR));
-            if color.is_none() || interior.is_none() {
+            let box_colors = (kind == AnnotKind::FreeText).then(|| self.box_colors(&a));
+            if let Some((border, fill)) = box_colors {
+                color = border;
+                interior = fill;
+            }
+            if box_colors.is_none() && (color.is_none() || interior.is_none()) {
                 // PDFium hides colours once an annotation has an appearance stream;
                 // read them from the drawing instructions instead.
                 let ap = read_utf16(|buf, len| unsafe {
@@ -2172,10 +2180,12 @@ impl<'d> Page<'d> {
             };
             lib.FPDFAnnot_SetRect(a.handle, &rect);
             lib.FPDFAnnot_SetFlags(a.handle, FPDF_ANNOT_FLAG_PRINT);
-            let [r, g, b] = n.color;
-            lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_COLOR, r.into(), g.into(), b.into(), 255);
-            if let Some([r, g, b]) = n.interior {
-                lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_INTERIOR, r.into(), g.into(), b.into(), 255);
+            if n.kind != AnnotKind::FreeText {
+                let [r, g, b] = n.color;
+                lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_COLOR, r.into(), g.into(), b.into(), 255);
+                if let Some([r, g, b]) = n.interior {
+                    lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_INTERIOR, r.into(), g.into(), b.into(), 255);
+                }
             }
             if n.kind.has_border_width() {
                 lib.FPDFAnnot_SetBorder(a.handle, 0.0, 0.0, n.width);
@@ -2219,6 +2229,7 @@ impl<'d> Page<'d> {
                 };
                 let rich = n.rich.clone().unwrap_or_else(|| RichText::plain(&n.contents, style));
                 self.write_rich(&a, &rich);
+                self.write_box_colors(&a, n.color, n.interior, rich.first_style(style).size);
             }
             if let Some(shape) = shape {
                 lib.FPDFAnnot_SetStringValue_str(a.handle, SHAPE_KEY, shape.name());
@@ -2285,11 +2296,24 @@ impl<'d> Page<'d> {
                 // PDFium regenerates it from the new style when the page is rendered.
                 lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
             }
-            if let Some([r, g, b]) = change.color {
+            let is_box = lib.FPDFAnnot_GetSubtype(a.handle) == SUBTYPE_FREETEXT;
+            if is_box && (change.color.is_some() || change.interior.is_some()) {
+                let (border, fill) = self.box_colors(&a);
+                let border = border.unwrap_or([0, 0, 0]);
+                if change.color.is_some() {
+                    undo.color = Some(border);
+                }
+                if change.interior.is_some() {
+                    undo.interior = Some(fill);
+                }
+                let size = self.read_rich(&a).first_style(CharStyle::default()).size;
+                self.write_box_colors(&a, change.color.unwrap_or(border), change.interior.unwrap_or(fill), size);
+            }
+            if let Some([r, g, b]) = change.color.filter(|_| !is_box) {
                 undo.color = Some(self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]));
                 lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_COLOR, r.into(), g.into(), b.into(), 255);
             }
-            if let Some(interior) = change.interior {
+            if let Some(interior) = change.interior.filter(|_| !is_box) {
                 undo.interior = Some(self.annot_color(&a, COLORTYPE_INTERIOR));
                 match interior {
                     Some([r, g, b]) => {
@@ -2307,7 +2331,6 @@ impl<'d> Page<'d> {
                 undo.width = Some(old);
                 lib.FPDFAnnot_SetBorder(a.handle, hr, vr, w);
             }
-            let is_box = lib.FPDFAnnot_GetSubtype(a.handle) == SUBTYPE_FREETEXT;
             let text_change = change.rich.is_some()
                 || change.font_size.is_some()
                 || change.text_color.is_some()
@@ -2465,11 +2488,14 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_GetRect(a.handle, &mut r);
             let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
             lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width);
+            let (border, fill) = self.box_colors(&a);
             let style = BoxStyle {
-                border: (self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]), width),
-                fill: self.annot_color(&a, COLORTYPE_INTERIOR),
+                border: (border.unwrap_or([0, 0, 0]), width),
+                fill,
             };
             let rich = self.read_rich(&a);
+            // Older magic-pdf boxes switch to the convention other applications use.
+            self.write_box_colors(&a, style.border.0, fill, rich.first_style(CharStyle::default()).size);
             let (rect, content) = textbox::appearance(to_box(&r), &rich, &style, fonts);
             let new = FS_RECTF {
                 left: rect.left,
@@ -2492,7 +2518,10 @@ impl<'d> Page<'d> {
         let string = |key: &str| {
             read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len) })
         };
-        let (size, color) = textbox::parse_default_appearance(&string("DA"));
+        let (size, da_color) = textbox::parse_default_appearance(&string("DA"));
+        // The text colour is in /DS; /DA holds it only for boxes without /DS (in the
+        // Acrobat convention its colour is the border's).
+        let color = textbox::parse_default_style_color(&string("DS")).or(da_color);
         let default = CharStyle {
             size: size.unwrap_or(12.0),
             color: color.unwrap_or([0, 0, 0]),
@@ -2515,7 +2544,62 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "Contents", &rich.text());
             lib.FPDFAnnot_SetStringValue_str(a.handle, "RC", &rich.to_xhtml());
             lib.FPDFAnnot_SetStringValue_str(a.handle, "DS", &rich.default_style_string());
-            lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(first.size, first.color));
+            // /DA's colour is the border's; keep it, update the size.
+            let (_, border) = textbox::parse_default_appearance(&self.annot_string(a, "DA"));
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(first.size, border.unwrap_or([0, 0, 0])));
+        }
+    }
+
+    /// A text box's border and fill colour, from either colour convention: Acrobat's
+    /// (/C fill, /DA border; what other applications write and magic-pdf now writes) or
+    /// the one older magic-pdf versions wrote (/C border, /IC fill).
+    fn box_colors(&self, a: &Annot) -> (Option<Rgb>, Option<Rgb>) {
+        const FPDF_OBJECT_ARRAY: FPDF_OBJECT_TYPE = 5;
+        let lib = self.lib();
+        let legacy = self.annot_string(a, BOX_STYLE_KEY).is_empty() && textbox::is_legacy_magic_style(&self.annot_string(a, "DS"));
+        let ap = || {
+            read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, buf as *mut FPDF_WCHAR, len) })
+        };
+        if legacy {
+            let (stroke, fill) = appearance_colors(&ap());
+            let fill = if unsafe { lib.FPDFAnnot_GetValueType(a.handle, "IC") } == FPDF_OBJECT_ARRAY {
+                self.annot_color(a, COLORTYPE_INTERIOR).or(fill)
+            } else {
+                None
+            };
+            return (self.annot_color(a, COLORTYPE_COLOR).or(stroke), fill);
+        }
+        let (_, border) = textbox::parse_default_appearance(&self.annot_string(a, "DA"));
+        // Only a /C array is a fill. PDFium does not hand out colours while an
+        // appearance exists; the background is then the first colour it fills with.
+        let fill = if unsafe { lib.FPDFAnnot_GetValueType(a.handle, "C") } == FPDF_OBJECT_ARRAY {
+            self.annot_color(a, COLORTYPE_COLOR).or_else(|| textbox::rectangle_fill(&ap()))
+        } else {
+            None
+        };
+        (border.or(Some([0, 0, 0])), fill)
+    }
+
+    /// Stores a text box's colours the way Acrobat and other applications read them:
+    /// /C the fill (none: not an array), /DA the border colour (and default font size).
+    fn write_box_colors(&self, a: &Annot, border: Rgb, fill: Option<Rgb>, size: f32) {
+        let lib = self.lib();
+        unsafe {
+            match fill {
+                Some([r, g, b]) => {
+                    lib.FPDFAnnot_SetColor(a.handle, COLORTYPE_COLOR, r.into(), g.into(), b.into(), 255);
+                }
+                // There is no API to remove a key; a non-array /C is no colour.
+                None => {
+                    lib.FPDFAnnot_SetStringValue_str(a.handle, "C", "");
+                }
+            }
+            // An old magic-pdf fill must not be read as one any more.
+            if lib.FPDFAnnot_GetValueType(a.handle, "IC") != 0 {
+                lib.FPDFAnnot_SetStringValue_str(a.handle, "IC", "");
+            }
+            lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(size, border));
+            lib.FPDFAnnot_SetStringValue_str(a.handle, BOX_STYLE_KEY, "1");
         }
     }
 
