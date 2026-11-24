@@ -399,6 +399,12 @@ impl App {
                 Ok("search") => app.sidebar_tab = SidebarTab::Search,
                 _ => {}
             }
+            // The update window with the latest release (asks GitHub).
+            if std::env::var_os("MAGIC_PDF_SHOW_UPDATE").is_some()
+                && let Ok(release) = crate::update::latest_release()
+            {
+                app.update = UpdateUi::Available(release);
+            }
         }
         app
     }
@@ -453,10 +459,9 @@ impl App {
                     release.version(),
                     env!("CARGO_PKG_VERSION")
                 ));
-                if let Some(body) = release.body.as_deref().filter(|b| !b.trim().is_empty()) {
-                    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                        ui.weak(body.trim());
-                    });
+                // Only the "What's new" part; the rest are installation notes.
+                if let Some(blocks) = release.body.as_deref().and_then(crate::update::whats_new) {
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| release_notes(ui, &blocks, 370.0));
                 }
                 ui.separator();
                 let can_install = crate::update::can_install() && release.installer().is_some();
@@ -3650,6 +3655,49 @@ impl eframe::App for App {
             && let Err(e) = crate::update::run_installer(&installer)
         {
             log::error!("{e}");
+        }
+    }
+}
+
+/// Shows a release's "What's new" text: bold headings, bullets and **bold** words.
+/// Lines wrap at `width` (the window sizes itself to its content, so the available
+/// width can't be used).
+fn release_notes(ui: &mut Ui, blocks: &[crate::update::NoteBlock], width: f32) {
+    use crate::update::NoteBlock;
+    let rich = |ui: &Ui, text: &str, width: f32| {
+        let size = ui.style().text_styles[&egui::TextStyle::Body].size;
+        let mut job = egui::text::LayoutJob::default();
+        for (part, bold) in crate::update::bold_parts(text) {
+            let format = egui::TextFormat {
+                font_id: egui::FontId::new(size, crate::fonts::family(bold, false)),
+                color: if bold { ui.visuals().strong_text_color() } else { ui.visuals().text_color() },
+                ..Default::default()
+            };
+            job.append(&part, 0.0, format);
+        }
+        job.wrap.max_width = width;
+        job
+    };
+    // Labels wrap at the width they may use, so limit it.
+    ui.set_max_width(width);
+    for (i, block) in blocks.iter().enumerate() {
+        match block {
+            NoteBlock::Heading(text) => {
+                if i > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.add(egui::Label::new(rich(ui, &format!("**{text}**"), width)).wrap());
+            }
+            NoteBlock::Bullet(text) => {
+                ui.horizontal_top(|ui| {
+                    ui.set_max_width(width);
+                    let bullet = ui.label("•").rect.width() + ui.spacing().item_spacing.x;
+                    ui.add(egui::Label::new(rich(ui, text, width - bullet)).wrap());
+                });
+            }
+            NoteBlock::Paragraph(text) => {
+                ui.add(egui::Label::new(rich(ui, text, width)).wrap());
+            }
         }
     }
 }

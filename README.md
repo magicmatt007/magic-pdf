@@ -131,9 +131,10 @@ packaging/linux/install.sh      # builds and installs into ~/.local
 packaging/linux/uninstall.sh    # removes it again
 ```
 
-This adds magic-pdf to the application menu and to "Open with" for PDF files. Builds
-from source are updated with `git pull` and the install script again (the update notice
-links to the release page). Use
+This adds magic-pdf to the application menu and to "Open with" for PDF files. When a
+new release comes out, magic-pdf offers to install it: it downloads the release's
+AppImage, checks it and replaces the installed program and PDFium with the ones inside.
+To install your own changes instead, run `git pull` and the install script again. Use
 `sudo PREFIX=/usr/local packaging/linux/install.sh` for a system-wide install.
 
 ## Releasing
