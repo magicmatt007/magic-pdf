@@ -90,6 +90,9 @@ pub struct App {
     ocr: crate::ocr_dialog::OcrDialog,
     /// Connection to other magic-pdf windows.
     ipc: Option<crate::ipc::Server>,
+    /// Touchpad pinch on Wayland, which winit does not report.
+    #[cfg(target_os = "linux")]
+    pinch: Option<crate::pinch::Pinch>,
     /// Index of the tab being dragged in the tab bar.
     tab_drag: Option<usize>,
     /// Other windows, listed in a tab's "Move to window" menu.
@@ -308,6 +311,8 @@ impl App {
             split_every: None,
             ocr: Default::default(),
             ipc: None,
+            #[cfg(target_os = "linux")]
+            pinch: crate::pinch::Pinch::start(cc),
             tab_drag: None,
             tab_menu_peers: Vec::new(),
             stamps: Default::default(),
@@ -3659,10 +3664,19 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(target_os = "linux")]
+        if let Some(factor) = self.pinch.as_ref().and_then(|p| p.take_zoom()) {
+            raw_input.events.push(egui::Event::Zoom(factor));
+        }
         self.route_form_keys(ctx, &mut raw_input.events);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Before the window (and its Wayland connection) goes away.
+        #[cfg(target_os = "linux")]
+        if let Some(mut pinch) = self.pinch.take() {
+            pinch.stop();
+        }
         for tab in &self.tabs {
             if tab.info().is_some() {
                 self.settings.set_file_state(&tab.path, tab.file_state());

@@ -37,6 +37,13 @@ winresource = "0.1"
 # proper one (with the window title) among its default features, which we turn off.
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+# Touchpad pinch-to-zoom on Wayland (winit does not report it there). The same
+# versions winit already uses, so nothing new is built.
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+raw-window-handle = "0.6"
+libc = "0.2"
 
 # macOS: receive "open document" requests from Finder.
 [target.'cfg(target_os = "macos")'.dependencies]
