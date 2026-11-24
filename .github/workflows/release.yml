@@ -1,13 +1,22 @@
 # Builds the Windows installer, a portable zip, the macOS disk image and the Linux
-# AppImage. A pushed version tag (v1.2.3) publishes them as a GitHub release; a manual
-# run ("Run workflow") only builds them and keeps them as workflow artifacts for testing,
-# unless "publish" is ticked: then a run on master publishes the release for the version
-# in Cargo.toml and creates its tag (for when tags cannot be pushed).
+# AppImage, and publishes them as a GitHub release.
+#
+# Normal way to release: bump the version (scripts/bump-version.sh) in a pull request
+# and merge it. When a push to master changes Cargo.toml and the tag v<version> does
+# not exist yet, this workflow builds, creates the tag and publishes the release, with
+# release-notes/<version>.md at the top of the release text. Nobody pushes tags, so
+# this works the same from local and cloud sessions.
+#
+# Fallbacks: a pushed tag (v1.2.3) also publishes. A manual run ("Run workflow") only
+# builds and keeps the files as workflow artifacts for testing, unless "publish" is
+# ticked: then a run on master publishes the release for the version in Cargo.toml.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: [master]
+    paths: [Cargo.toml]
   workflow_dispatch:
     inputs:
       publish:
@@ -23,7 +32,38 @@ env:
   PDFIUM_VERSION: "8165"
 
 jobs:
+  # Decides whether anything is built and whether it is published.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+      release: ${{ steps.c.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: c
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref_type }}" = branch ]; then
+            # A push to master that changed Cargo.toml: release only a new version
+            # (not, say, a new dependency).
+            if [ -n "$(git ls-remote --tags origin "refs/tags/v$version")" ]; then
+              echo "v$version already exists; nothing to release."
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "New version $version: building and publishing it."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
   windows:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +119,8 @@ jobs:
             dist/*.zip
 
   macos:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +161,8 @@ jobs:
           path: dist/*.dmg
 
   linux:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     # The oldest supported runner: the AppImage uses the host's glibc, so building
     # against an old one keeps it running on older distributions.
     runs-on: ubuntu-22.04
@@ -168,8 +212,11 @@ jobs:
           path: dist/*.AppImage
 
   publish:
-    if: github.ref_type == 'tag' || (inputs.publish && github.ref == 'refs/heads/master')
-    needs: [windows, macos, linux]
+    if: >-
+      github.ref_type == 'tag'
+      || needs.check.outputs.release == 'true'
+      || (inputs.publish && github.ref == 'refs/heads/master')
+    needs: [check, windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,6 +277,13 @@ jobs:
           such as Gear Lever or AppImageLauncher.
           EOF
           sed -i 's/^          //' notes.md
+          # What's new, written in the pull request that bumped the version.
+          if [ -f "release-notes/$version.md" ]; then
+            { cat "release-notes/$version.md"; echo; cat notes.md; } > notes-full.md
+            mv notes-full.md notes.md
+          else
+            echo "::warning::release-notes/$version.md is missing; the release has only the installation notes."
+          fi
           # --target creates the tag at this commit when it does not exist yet.
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             dist/*.exe dist/*.zip dist/*.dmg dist/*.AppImage \
