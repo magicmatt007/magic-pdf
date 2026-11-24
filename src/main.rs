@@ -10,6 +10,8 @@ mod icons;
 mod ipc;
 mod keys;
 mod ocr_dialog;
+#[cfg(target_os = "linux")]
+mod pinch;
 #[cfg(target_os = "macos")]
 mod macos;
 mod print;
