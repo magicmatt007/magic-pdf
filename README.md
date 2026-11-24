@@ -138,11 +138,14 @@ links to the release page). Use
 
 ## Releasing
 
-1. Set the new `version` in `Cargo.toml` and commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+1. In a pull request, run `scripts/bump-version.sh 0.8.0` and write the "What's new"
+   text in the `release-notes/0.8.0.md` it creates.
+2. Merge the pull request into `master`.
 
 The *Release* workflow then builds the Windows installer, the portable zip, the macOS
-disk image and the Linux AppImage and publishes them as a GitHub release. Running the workflow by hand (Actions → Release → Run
+disk image and the Linux AppImage, creates the tag `v0.8.0` and publishes them as a GitHub
+release with the notes at the top. No tags need to be pushed, so this works the same from
+any machine or cloud session. Running the workflow by hand (Actions → Release → Run
 workflow) builds the same files as a downloadable artifact without publishing anything.
 CI runs clippy and the tests on Linux, Windows and macOS for every push.
 
