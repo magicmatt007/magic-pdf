@@ -10,6 +10,10 @@
 # Fallbacks: a pushed tag (v1.2.3) also publishes. A manual run ("Run workflow") only
 # builds and keeps the files as workflow artifacts for testing, unless "publish" is
 # ticked: then a run on master publishes the release for the version in Cargo.toml.
+#
+# For speed, the builds don't run the tests again (CI ran them on the same code in the
+# pull request), and the release is published without waiting for macOS, whose build
+# is the slowest: its disk image is added to the release when it is ready.
 name: Release
 
 on:
@@ -86,9 +90,6 @@ jobs:
         shell: pwsh
         run: ./scripts/fetch-pdfium.ps1
 
-      - name: Test
-        run: cargo test --release
-
       - name: Build
         run: cargo build --release
 
@@ -140,9 +141,6 @@ jobs:
       - name: Fetch PDFium
         run: ./scripts/fetch-pdfium.sh
 
-      - name: Test
-        run: cargo test --release
-
       - name: Build app and disk image
         run: packaging/macos/build-app.sh
 
@@ -159,6 +157,23 @@ jobs:
         with:
           name: magic-pdf-macos
           path: dist/*.dmg
+
+      # The release doesn't wait for this (slowest) build: the disk image is added
+      # to it once the release has been published.
+      - name: Add the disk image to the release
+        if: >-
+          github.ref_type == 'tag'
+          || needs.check.outputs.release == 'true'
+          || (inputs.publish && github.ref == 'refs/heads/master')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$VERSION"
+          for i in $(seq 1 60); do
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+            sleep 20
+          done
+          gh release upload "$tag" dist/*.dmg --repo "$GITHUB_REPOSITORY" --clobber
 
   linux:
     needs: check
@@ -189,9 +204,6 @@ jobs:
       - name: Fetch PDFium
         run: ./scripts/fetch-pdfium.sh
 
-      - name: Test
-        run: cargo test --release
-
       - name: Build AppImage
         run: packaging/linux/build-appimage.sh
 
@@ -216,7 +228,8 @@ jobs:
       github.ref_type == 'tag'
       || needs.check.outputs.release == 'true'
       || (inputs.publish && github.ref == 'refs/heads/master')
-    needs: [check, windows, macos, linux]
+    # Not macOS: it adds its disk image to the release itself when it is ready.
+    needs: [check, windows, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -286,5 +299,5 @@ jobs:
           fi
           # --target creates the tag at this commit when it does not exist yet.
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            dist/*.exe dist/*.zip dist/*.dmg dist/*.AppImage \
+            dist/*.exe dist/*.zip dist/*.AppImage \
             --title "magic-pdf $version" --notes-file notes.md
