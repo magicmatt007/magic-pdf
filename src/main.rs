@@ -14,6 +14,7 @@ mod ocr_dialog;
 mod macos;
 mod print;
 mod settings;
+mod theme;
 mod update;
 mod view;
 
