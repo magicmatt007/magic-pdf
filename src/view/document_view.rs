@@ -196,7 +196,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
     } else if cx.night {
         Color32::from_gray(24)
     } else {
-        Color32::from_gray(96)
+        crate::theme::canvas(ui.visuals().dark_mode)
     };
     ui.painter().rect_filled(view, CornerRadius::ZERO, bg);
 

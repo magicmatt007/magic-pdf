@@ -54,6 +54,8 @@ struct PrintDialog {
 
 pub struct App {
     engine: Result<Engine, String>,
+    /// The app icon, shown at the start of the menu bar.
+    app_icon: egui::TextureHandle,
     ctx: egui::Context,
     tabs: Vec<DocTab>,
     active: usize,
@@ -262,6 +264,7 @@ impl App {
         icons::install(&ctx);
         crate::fonts::install(&ctx);
         crate::fonts::install_ui(&ctx);
+        crate::theme::install(&ctx);
         let settings = Settings::load();
         crate::i18n::set_language(&settings.language);
         ctx.set_theme(if settings.dark_ui {
@@ -271,8 +274,15 @@ impl App {
         });
         let mut cache = TextureCache::new(TEXTURE_BUDGET);
         cache.invert = settings.night_mode;
+        let app_icon = ctx.load_texture(
+            "app-icon",
+            egui::ColorImage::from_rgba_unmultiplied([64, 64], include_bytes!("../assets/icons/magic-pdf-64.rgba")),
+            // Mipmaps keep it smooth at menu bar size.
+            egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR },
+        );
         let mut app = Self {
             engine,
+            app_icon,
             ctx,
             tabs: Vec::new(),
             active: 0,
@@ -400,6 +410,11 @@ impl App {
                 Ok("search") => app.sidebar_tab = SidebarTab::Search,
                 _ => {}
             }
+            match std::env::var("MAGIC_PDF_THEME").as_deref() {
+                Ok("dark") => app.ctx.set_theme(egui::Theme::Dark),
+                Ok("light") => app.ctx.set_theme(egui::Theme::Light),
+                _ => {}
+            }
             // The update window with the latest release (asks GitHub).
             if std::env::var_os("MAGIC_PDF_SHOW_UPDATE").is_some()
                 && let Ok(release) = crate::update::latest_release()
@@ -480,7 +495,7 @@ impl App {
                             "Ready. magic-pdf closes to install the update and then starts again."
                         });
                         ui.horizontal(|ui| {
-                            if ui.button(t("Install now")).clicked() {
+                            if ui.add(crate::theme::primary_button(t("Install now"))).clicked() {
                                 action = Some("install");
                             }
                             if ui.button(t("Later")).clicked() {
@@ -494,7 +509,7 @@ impl App {
                         }
                         ui.horizontal(|ui| {
                             if can_install {
-                                if ui.button(t("Install")).clicked() {
+                                if ui.add(crate::theme::primary_button(t("Install"))).clicked() {
                                     action = Some("download");
                                 }
                             } else if ui.button(t("Open download page")).clicked() {
@@ -2319,6 +2334,8 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
+            ui.add(egui::Image::new(&self.app_icon).fit_to_exact_size(egui::vec2(18.0, 18.0)));
+            ui.add_space(4.0);
             let has_tab = self.tabs.get(self.active).is_some_and(|t| t.info().is_some());
             ui.menu_button(t("File"), |ui| {
                 if ui.button(kb(t("Open…\tCtrl+O"))).clicked() {
