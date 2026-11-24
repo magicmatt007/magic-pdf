@@ -56,6 +56,56 @@ impl Release {
     }
 }
 
+/// One block of a release's "What's new" text (a small part of Markdown).
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteBlock {
+    /// A line that is bold as a whole: "**Tabs**".
+    Heading(String),
+    /// "- text", including its wrapped continuation lines.
+    Bullet(String),
+    Paragraph(String),
+}
+
+/// The "What's new" part of a release text: everything after a "## What's new" heading
+/// up to the next "## " heading (the installation notes). None when the release has
+/// no such part.
+pub fn whats_new(body: &str) -> Option<Vec<NoteBlock>> {
+    let mut lines = body.lines().skip_while(|l| l.trim().is_empty());
+    if !lines.next()?.trim_start().starts_with("## What's new") {
+        return None;
+    }
+    let mut blocks: Vec<NoteBlock> = Vec::new();
+    let mut open = false;
+    for line in lines.take_while(|l| !l.starts_with("## ")) {
+        let text = line.trim();
+        if text.is_empty() {
+            open = false;
+        } else if let Some(item) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            blocks.push(NoteBlock::Bullet(item.trim().to_string()));
+            open = true;
+        } else if !open && text.len() > 4 && text.starts_with("**") && text.ends_with("**") && !text[2..text.len() - 2].contains("**") {
+            blocks.push(NoteBlock::Heading(text[2..text.len() - 2].to_string()));
+        } else if open && let Some(NoteBlock::Bullet(t) | NoteBlock::Paragraph(t)) = blocks.last_mut() {
+            t.push(' ');
+            t.push_str(text);
+        } else {
+            blocks.push(NoteBlock::Paragraph(text.to_string()));
+            open = true;
+        }
+    }
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+/// Splits "a **b** `c`" into text parts and whether each is bold; code marks are dropped.
+pub fn bold_parts(text: &str) -> Vec<(String, bool)> {
+    text.replace('`', "")
+        .split("**")
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(i, part)| (part.to_string(), i % 2 == 1))
+        .collect()
+}
+
 /// Compares dotted version numbers ("0.10.2" > "0.9.9"). Non-numeric parts count as 0.
 pub fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
@@ -80,21 +130,64 @@ fn running_appimage() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE").filter(|p| !p.is_empty()).map(PathBuf::from)
 }
 
+/// A copy installed with packaging/linux/install.sh that this user may replace:
+/// `<prefix>/bin/magic-pdf` with PDFium in `<prefix>/lib/magic-pdf`. Returns the
+/// program and the library. Builds run from `target/` don't qualify.
+fn installed_copy() -> Option<(PathBuf, PathBuf)> {
+    if !cfg!(target_os = "linux") || running_appimage().is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    // Linux names a program that was replaced while it runs "… (deleted)".
+    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(s) => PathBuf::from(s),
+        None => exe,
+    };
+    installed_layout(&exe)
+}
+
+fn installed_layout(exe: &Path) -> Option<(PathBuf, PathBuf)> {
+    let bin_dir = exe.parent()?;
+    if bin_dir.file_name()? != "bin" {
+        return None;
+    }
+    let lib = bin_dir.parent()?.join("lib/magic-pdf/libpdfium.so");
+    (lib.is_file() && writable(bin_dir) && writable(lib.parent()?)).then(|| (exe.to_path_buf(), lib))
+}
+
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".magic-pdf-write-test-{}", std::process::id()));
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 /// Whether this build can install updates itself: always on Windows and macOS; on
-/// Linux only when running from an AppImage (builds from source are updated with git).
+/// Linux when running from an AppImage or installed with install.sh (then the
+/// release's AppImage is unpacked and its program and PDFium replace the installed
+/// ones). Builds run straight from the source folder are updated with git.
 pub fn can_install() -> bool {
     cfg!(any(windows, target_os = "macos"))
-        || (cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") && running_appimage().is_some())
+        || (cfg!(target_os = "linux")
+            && cfg!(target_arch = "x86_64")
+            && (running_appimage().is_some() || installed_copy().is_some()))
 }
 
 /// Where a download goes: next to the running AppImage on Linux (so it can replace it
-/// with an atomic rename on the same file system), the temp directory elsewhere.
+/// with an atomic rename on the same file system), next to the installed PDFium for a
+/// copy installed with install.sh, the temp directory elsewhere.
 fn download_path(asset: &Asset) -> Result<PathBuf, String> {
     if cfg!(target_os = "linux")
         && let Some(appimage) = running_appimage()
     {
         let dir = appimage.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         return Ok(dir.join(format!(".{}.part", asset.name)));
+    }
+    if let Some((_, lib)) = installed_copy() {
+        let dir = lib.with_file_name(".update");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        return Ok(dir.join(&asset.name));
     }
     let dir = std::env::temp_dir().join("magic-pdf-update");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -173,12 +266,23 @@ pub fn download_installer(asset: &Asset) -> Result<PathBuf, String> {
 
 /// Starts the installer. Windows: updates in place and restarts magic-pdf. macOS:
 /// opens the disk image so the new app can be dragged to Applications. Linux: replaces
-/// the running AppImage with the downloaded one and starts it.
+/// the running AppImage with the downloaded one (or, for a copy installed with
+/// install.sh, the program and PDFium with the ones inside it) and starts it.
 pub fn run_installer(path: &Path) -> Result<(), String> {
     if cfg!(target_os = "linux") {
-        let appimage = running_appimage().ok_or("not running from an AppImage")?;
-        replace_file(path, &appimage)?;
-        return Command::new(&appimage)
+        let program = if let Some(appimage) = running_appimage() {
+            replace_file(path, &appimage, true)?;
+            appimage
+        } else {
+            let (program, lib) = installed_copy().ok_or("not running from an AppImage or an installed copy")?;
+            let result = install_from_appimage(path, &program, &lib);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            result?;
+            program
+        };
+        return Command::new(&program)
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("could not start the new version: {e}"));
@@ -195,17 +299,48 @@ pub fn run_installer(path: &Path) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| format!("could not start the installer: {e}"))
 }
 
-/// Makes `new` executable and moves it over `target` in one step (`rename` within one
-/// directory is atomic, so `target` is never missing or half written). A running
-/// AppImage keeps using the old file until it exits.
-fn replace_file(new: &Path, target: &Path) -> Result<(), String> {
+/// Unpacks the downloaded AppImage next to it (`--appimage-extract`, no FUSE needed)
+/// and moves its program and PDFium over the installed ones.
+fn install_from_appimage(appimage: &Path, program: &Path, lib: &Path) -> Result<(), String> {
+    let dir = appimage.parent().ok_or("no folder for unpacking")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(target).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o755);
-        std::fs::set_permissions(new, std::fs::Permissions::from_mode(mode | 0o111))
-            .map_err(|e| format!("could not make the update executable: {e}"))?;
+        std::fs::set_permissions(appimage, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
+    let status = Command::new(appimage)
+        .arg("--appimage-extract")
+        .current_dir(dir)
+        .env_remove("APPIMAGE_EXTRACT_AND_RUN")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("could not unpack the update: {e}"))?;
+    let root = dir.join("squashfs-root");
+    let (new_program, new_lib) = (root.join("usr/bin/magic-pdf"), root.join("usr/lib/magic-pdf/libpdfium.so"));
+    if !status.success() || !new_program.is_file() || !new_lib.is_file() {
+        return Err("could not unpack the update".into());
+    }
+    // PDFium first: a new program always comes with the PDFium it was built against.
+    replace_file(&new_lib, lib, false)?;
+    replace_file(&new_program, program, true)
+}
+
+/// Moves `new` over `target` in one step (`rename` within one file system is atomic,
+/// so `target` is never missing or half written), keeping `target`'s permissions and
+/// making it executable if asked. A running program keeps using the old file until
+/// it exits.
+fn replace_file(new: &Path, target: &Path, executable: bool) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let default = if executable { 0o755 } else { 0o644 };
+        let mode = std::fs::metadata(target).map(|m| m.permissions().mode() & 0o777).unwrap_or(default);
+        let mode = if executable { mode | 0o111 } else { mode };
+        std::fs::set_permissions(new, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("could not set the permissions of the update: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
     std::fs::rename(new, target).map_err(|e| format!("could not replace {}: {e}", target.display()))
 }
 
@@ -253,11 +388,71 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o750)).unwrap();
         std::fs::write(&new, b"new").unwrap();
-        replace_file(&new, &old).unwrap();
+        replace_file(&new, &old, true).unwrap();
         assert_eq!(std::fs::read(&old).unwrap(), b"new");
         assert_eq!(std::fs::metadata(&old).unwrap().permissions().mode() & 0o777, 0o751);
         assert!(!new.exists());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A copy installed with install.sh is updated from the files inside the AppImage.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn updates_an_installed_copy_from_an_appimage() {
+        use std::os::unix::fs::PermissionsExt;
+        let prefix = std::env::temp_dir().join(format!("magic-pdf-installed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&prefix);
+        let (program, lib) = (prefix.join("bin/magic-pdf"), prefix.join("lib/magic-pdf/libpdfium.so"));
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        std::fs::write(&program, "old program").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&lib, "old pdfium").unwrap();
+        std::fs::set_permissions(&lib, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(installed_layout(&program), Some((program.clone(), lib.clone())));
+        assert_eq!(installed_layout(&prefix.join("target/release/magic-pdf")), None);
+
+        // Stands in for the AppImage: unpacks like `--appimage-extract` does.
+        let update = lib.with_file_name(".update");
+        std::fs::create_dir_all(&update).unwrap();
+        let appimage = update.join("magic-pdf-9.9.9-x86_64.AppImage");
+        std::fs::write(
+            &appimage,
+            "#!/bin/sh\n[ \"$1\" = --appimage-extract ] || exit 1\n\
+             mkdir -p squashfs-root/usr/bin squashfs-root/usr/lib/magic-pdf\n\
+             echo new program > squashfs-root/usr/bin/magic-pdf\n\
+             echo new pdfium > squashfs-root/usr/lib/magic-pdf/libpdfium.so\n",
+        )
+        .unwrap();
+        install_from_appimage(&appimage, &program, &lib).unwrap();
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "new program\n");
+        assert_eq!(std::fs::read_to_string(&lib).unwrap(), "new pdfium\n");
+        assert_eq!(std::fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::metadata(&lib).unwrap().permissions().mode() & 0o777, 0o644);
+        std::fs::remove_dir_all(prefix).ok();
+    }
+
+    #[test]
+    fn release_text_shows_only_whats_new() {
+        let body = "## What's new in 0.7.4\n\nThis release collects\nthe fixes.\n\n**Tabs**\n\
+            - On Windows, dragging **works**:\n  let go outside.\n- Second `item`.\n\n\
+            ## Windows\n\nDownload the installer.\n";
+        assert_eq!(
+            whats_new(body).unwrap(),
+            [
+                NoteBlock::Paragraph("This release collects the fixes.".into()),
+                NoteBlock::Heading("Tabs".into()),
+                NoteBlock::Bullet("On Windows, dragging **works**: let go outside.".into()),
+                NoteBlock::Bullet("Second `item`.".into()),
+            ]
+        );
+        // Releases without a "What's new" part (only installation notes).
+        assert_eq!(whats_new("## Windows\n\nDownload it."), None);
+        assert_eq!(whats_new("## What's new in 1.0\n\n## Windows\n"), None);
+        assert_eq!(
+            bold_parts("dragging **works**, see `x`"),
+            [("dragging ".to_string(), false), ("works".to_string(), true), (", see x".to_string(), false)]
+        );
     }
 
     #[test]
@@ -284,6 +479,24 @@ mod live {
         eprintln!("update available for this build: {}", super::check().unwrap().is_some());
         let path = super::download_installer(r.installer().unwrap()).unwrap();
         eprintln!("downloaded and verified: {} ({} bytes)", path.display(), std::fs::metadata(&path).unwrap().len());
+        // Linux: update a copy installed with install.sh (in a throwaway prefix).
+        if cfg!(target_os = "linux") {
+            let prefix = std::env::temp_dir().join(format!("magic-pdf-live-{}", std::process::id()));
+            let (program, lib) = (prefix.join("bin/magic-pdf"), prefix.join("lib/magic-pdf/libpdfium.so"));
+            std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+            std::fs::write(&program, "old").unwrap();
+            std::fs::write(&lib, "old").unwrap();
+            let update = lib.with_file_name(".update");
+            std::fs::create_dir_all(&update).unwrap();
+            let appimage = update.join(path.file_name().unwrap());
+            std::fs::copy(&path, &appimage).unwrap();
+            super::install_from_appimage(&appimage, &program, &lib).unwrap();
+            let size = |p: &std::path::Path| std::fs::metadata(p).unwrap().len();
+            eprintln!("installed: program {} bytes, PDFium {} bytes", size(&program), size(&lib));
+            assert!(size(&program) > 1_000_000 && size(&lib) > 1_000_000);
+            std::fs::remove_dir_all(prefix).ok();
+        }
         std::fs::remove_file(path).ok();
     }
 }
