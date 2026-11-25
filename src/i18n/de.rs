@@ -527,4 +527,6 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("the signer is not named", "der Unterzeichner ist nicht angegeben"),
     ("the signer's certificate is not included", "das Zertifikat des Unterzeichners fehlt"),
     ("this signature format is not supported", "dieses Signaturformat wird nicht unterstützt"),
+    ("With comment", "Mit Kommentar"),
+    ("Only annotations someone wrote a comment on or replied to", "Nur Anmerkungen mit einem geschriebenen Kommentar oder einer Antwort"),
 ];

@@ -648,6 +648,14 @@ pub enum Request {
         page: usize,
         index: usize,
     },
+    /// Move an annotation to another page, to `rect` (PDF space of `to_page`).
+    MoveAnnotToPage {
+        doc: DocId,
+        page: usize,
+        index: usize,
+        to_page: usize,
+        rect: PdfBox,
+    },
     /// Paste the copied annotation on `page`, centred on `at` (PDF space), or next to
     /// the original when `at` is None.
     PasteAnnot {

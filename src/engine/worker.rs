@@ -23,6 +23,9 @@ enum Edit {
     Add { page: usize, index: usize },
     Delete { page: usize, index: usize },
     Update { page: usize, index: usize, undo: Box<AnnotChange>, redo: Box<AnnotChange> },
+    /// An annotation moved to another page: a copy added at `to`, the original at
+    /// `from` deleted (one undo step).
+    Move { from: (usize, usize), to: (usize, usize) },
     /// A page operation. Undo restores the document from `snapshot` (taken before the
     /// operation, with the annotation bookkeeping of that moment); redo re-applies `op`.
     Pages(Box<PagesEdit>),
@@ -316,6 +319,7 @@ impl Worker {
                 }
             }
             Request::PasteAnnot { doc, page, at } => self.paste_annot(doc, page, at),
+            Request::MoveAnnotToPage { doc, page, index, to_page, rect } => self.move_annot_to_page(doc, page, index, to_page, rect),
             Request::Undo { doc } => self.undo_redo(doc, true),
             Request::Redo { doc } => self.undo_redo(doc, false),
             Request::Save { doc, path } => self.save(doc, &path),
@@ -1067,6 +1071,34 @@ impl Worker {
         self.add_annot(doc, page, &n);
     }
 
+    /// Moves an annotation to another page: a copy (with its comment, replies and
+    /// status) is placed at `rect` there and the original is deleted.
+    fn move_annot_to_page(&mut self, doc: DocId, page: usize, index: usize, to_page: usize, rect: PdfBox) {
+        let Some(od) = self.docs.get_mut(&doc) else { return };
+        let clip = od.doc.page(page).ok_or_else(|| "page not found".to_string()).and_then(|p| p.annot_clip(index));
+        let mut n = match clip {
+            Ok(n) => n,
+            Err(e) => return self.error(doc, e),
+        };
+        let center = |r: &PdfBox| ((r.left + r.right) / 2.0, (r.bottom + r.top) / 2.0);
+        let ((fx, fy), (tx, ty)) = (center(&n.rect), center(&rect));
+        n.translate(tx - fx, ty - fy);
+        let added = od.doc.page(to_page).ok_or_else(|| "page not found".to_string()).and_then(|p| p.add_annot(&n));
+        let new_index = match added {
+            Ok(i) => i,
+            Err(e) => return self.error(doc, e),
+        };
+        od.colors.insert((to_page, new_index), (Some(n.color), n.interior));
+        if let Some(flags) = od.doc.page(page).and_then(|p| p.set_annot_hidden(index, true)) {
+            od.deleted.insert((page, index), flags);
+        }
+        Self::push_edit(od, Edit::Move { from: (page, index), to: (to_page, new_index) });
+        self.refresh_text_box(doc, to_page, new_index);
+        self.send(Response::AnnotAdded { doc, page: to_page, index: new_index });
+        self.after_edit(doc, page);
+        self.after_edit(doc, to_page);
+    }
+
     fn fonts(&mut self, doc: DocId) -> Option<&FontFamily> {
         if self.text_font.is_none() {
             match FontFamily::load_noto_sans(self.lib) {
@@ -1208,7 +1240,24 @@ impl Worker {
     fn undo_redo(&mut self, doc: DocId, undo: bool) {
         let Some(od) = self.docs.get_mut(&doc) else { return };
         let Some(edit) = (if undo { od.undo.pop() } else { od.redo.pop() }) else { return };
+        if let Edit::Move { from, to } = edit {
+            // Undo shows the original and hides the copy; redo the other way round.
+            let (show, hide) = if undo { (from, to) } else { (to, from) };
+            if let Some(flags) = od.doc.page(hide.0).and_then(|p| p.set_annot_hidden(hide.1, true)) {
+                od.deleted.insert(hide, flags);
+            }
+            if let Some(f) = od.deleted.remove(&show)
+                && !od.doc.page(show.0).is_some_and(|p| p.set_annot_flags(show.1, f))
+            {
+                log::warn!("could not show annotation {show:?}");
+            }
+            if undo { od.redo.push(edit) } else { od.undo.push(edit) }
+            self.after_edit(doc, from.0);
+            self.after_edit(doc, to.0);
+            return;
+        }
         let page_index = match &edit {
+            Edit::Move { .. } => unreachable!("handled above"),
             Edit::Add { page, .. } | Edit::Delete { page, .. } | Edit::Update { page, .. } => *page,
             Edit::Pages(p) => {
                 let p = p.clone();
@@ -1234,7 +1283,7 @@ impl Worker {
                 (Edit::Update { index, undo: u, redo: r, .. }, is_undo) => {
                     page.update_annot(*index, if is_undo { u } else { r }).is_ok()
                 }
-                (Edit::Pages(_), _) => unreachable!("handled above"),
+                (Edit::Pages(_) | Edit::Move { .. }, _) => unreachable!("handled above"),
             }
         };
         let updated = if let Edit::Update { index, undo: u, redo: r, .. } = &edit {

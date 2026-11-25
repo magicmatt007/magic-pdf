@@ -2457,6 +2457,12 @@ impl<'d> Page<'d> {
                 self.set_rect(&a, rect);
                 set_ap(&content)
             }
+            SUBTYPE_TEXT => {
+                // PDFium's own note icon is always yellow; draw it in the note's colour.
+                unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null()) };
+                let color = self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([255, 210, 0]);
+                set_ap(&shapes::note_appearance(self.annot_rect(&a), color))
+            }
             SUBTYPE_STAMP => {
                 let text = self.annot_string(&a, STAMP_KEY);
                 if text.is_empty() {

@@ -658,7 +658,14 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         ui.ctx().set_cursor_icon(CursorIcon::Text);
     }
     if response.drag_started_by(egui::PointerButton::Primary) {
-        if let Some(i) = nearest_char(text, pdf_pt) {
+        // A drag is noticed only after a few pixels of movement: start where the
+        // button was pressed.
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .and_then(|o| screen_to_pdf_on(tab, o, view, page))
+            .unwrap_or(pdf_pt);
+        if let Some(i) = caret_at(text, origin) {
+            // Nothing is selected until the mouse moves away from where it started.
             tab.selection = Some(Selection {
                 page,
                 anchor: i,
@@ -670,7 +677,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     } else if response.dragged_by(egui::PointerButton::Primary) && primary_down {
         if let Some(sel) = &mut tab.selection
             && sel.page == page
-            && let Some(i) = nearest_char(text, pdf_pt)
+            && let Some(i) = caret_at(text, pdf_pt)
         {
             sel.head = i;
         }
@@ -692,7 +699,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
             tab.selection = Some(Selection {
                 page,
                 anchor: a,
-                head: b,
+                head: b + 1,
             });
             if let Some(kind) = tool.markup_kind() {
                 create_markup(tab, cx, kind);
@@ -1103,6 +1110,14 @@ pub fn create_markup(tab: &mut DocTab, cx: &ViewContext<'_>, kind: AnnotKind) {
     tab.selection = None;
 }
 
+/// The cursor position between characters nearest to `p`: before the nearest
+/// character, or after it when `p` is on its right half.
+fn caret_at(text: &crate::engine::PageText, p: Pos2) -> Option<usize> {
+    let i = nearest_char(text, p)?;
+    let r = text.chars[i].rect?;
+    Some(if p.x > (r.left + r.right) / 2.0 { i + 1 } else { i })
+}
+
 fn nearest_char(text: &crate::engine::PageText, p: Pos2) -> Option<usize> {
     text.chars
         .iter()
@@ -1271,6 +1286,7 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
 
         paint_overlays(&painter, tab, page, view);
     }
+    paint_drag_target(&painter, tab, view);
     paint_draft(&painter, tab, view, cx);
 }
 
@@ -1324,6 +1340,15 @@ fn paint_tiles(
             }
         }
     }
+}
+
+/// Where a dragged annotation will land, over all pages (it can be dropped on another).
+fn paint_drag_target(painter: &egui::Painter, tab: &DocTab, view: Rect) {
+    let Some(d) = tab.annot_drag.as_ref() else { return };
+    let Some(page_rect) = tab.layout.page_rect(d.page) else { return };
+    let s = tab.viewport.rect_to_screen(d.current.translate(page_rect.min.to_vec2()), view);
+    let blue = Color32::from_rgb(30, 120, 255);
+    painter.rect(s, CornerRadius::same(2), Color32::from_rgba_unmultiplied(30, 120, 255, 30), Stroke::new(1.5, blue), StrokeKind::Outside);
 }
 
 fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect) {
@@ -1391,18 +1416,8 @@ fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect
     }
 
     let blue = Color32::from_rgb(30, 120, 255);
-    if let Some(d) = tab.annot_drag.as_ref().filter(|d| d.page == page) {
-        // Where the annotation will land.
-        if let Some(page_rect) = tab.layout.page_rect(page) {
-            let s = tab.viewport.rect_to_screen(d.current.translate(page_rect.min.to_vec2()), view);
-            painter.rect(
-                s,
-                CornerRadius::same(2),
-                Color32::from_rgba_unmultiplied(30, 120, 255, 30),
-                Stroke::new(1.5, blue),
-                StrokeKind::Outside,
-            );
-        }
+    if tab.annot_drag.as_ref().is_some_and(|d| d.page == page) {
+        // Drawn by paint_drag_target, over all pages.
     } else if let Some(sel) = tab.selected_annot.as_ref().filter(|s| s.page == page)
         && let Some(a) = tab.annot(page, sel.index)
     {
@@ -1640,7 +1655,25 @@ fn annot_drag_input(
         }
         tab.annot_drag = None;
         let moved = (d.current.min - d.start.min).length() > 0.1 || (d.current.max - d.start.max).length() > 0.1;
-        if moved && let Some(rect) = local_to_pdf_box(tab, d.page, d.current) {
+        // Dropped on another page: the annotation moves there.
+        let target = pointer
+            .or(ui.input(|i| i.pointer.latest_pos()))
+            .and_then(|p| tab.layout.page_at(tab.viewport.to_doc(p, view)))
+            .filter(|&t| t != d.page && d.mode == DragMode::Move);
+        if moved
+            && let Some(to_page) = target
+            && let (Some(from), Some(to)) = (tab.layout.page_rect(d.page), tab.layout.page_rect(to_page))
+            && let Some(rect) = local_to_pdf_box(tab, to_page, d.current.translate(from.min - to.min))
+        {
+            tab.deselect_annot();
+            tab.outbox.push(Request::MoveAnnotToPage {
+                doc: tab.id,
+                page: d.page,
+                index: d.index,
+                to_page,
+                rect,
+            });
+        } else if moved && let Some(rect) = local_to_pdf_box(tab, d.page, d.current) {
             send_rect(tab, d.page, d.index, rect);
         }
         return true;
@@ -2242,7 +2275,7 @@ mod tests {
         tab.selection = Some(Selection {
             page: 0,
             anchor: 0,
-            head: 3,
+            head: 4,
         });
         tab
     }
@@ -2663,6 +2696,70 @@ mod tests {
         }
         tab.outbox.clear();
         (ctx, tab, cache)
+    }
+
+    #[test]
+    fn highlighting_back_to_the_start_marks_nothing() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Highlight);
+        }
+        // "test": one character per 10 pt from x = 100, baseline 700..715.
+        let [start, far, t_left, e_right] = [101.0, 128.0, 101.0, 118.0].map(|x| pdf_to_screen(&tab, 0, pos2(x, 707.0), tab.view_rect).unwrap());
+        tab.outbox.clear();
+        // Out to the third character and back to where it started.
+        frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(start)], Tool::Highlight);
+        frame_with(&ctx, &mut tab, &mut cache, vec![button(start, true)], Tool::Highlight);
+        for p in [start + vec2(6.0, 0.0), far, start + vec2(6.0, 0.0), start] {
+            frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(p)], Tool::Highlight);
+        }
+        frame_with(&ctx, &mut tab, &mut cache, vec![button(start, false)], Tool::Highlight);
+        frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Highlight);
+        assert!(added(&tab).is_empty(), "nothing selected, nothing highlighted");
+        assert_eq!(tab.selected_text(), None);
+
+        // From the left edge of "t" to the right half of "e": exactly "te".
+        drag(&ctx, &mut tab, &mut cache, t_left, e_right, Tool::Highlight);
+        let a = added(&tab);
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0].rect.left, a[0].rect.right), (100.0, 120.0), "two characters");
+    }
+
+    #[test]
+    fn dropping_an_annotation_on_another_page_moves_it_there() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(1, PathBuf::from("t.pdf"), LayoutMode::Horizontal, None);
+        tab.state = LoadState::Ready(DocInfo {
+            page_sizes: vec![(595.0, 842.0); 2],
+            ..Default::default()
+        });
+        for p in 0..2 {
+            tab.geoms.insert(p, PageGeom { size: (595.0, 842.0), origin: (0.0, 0.0), rotation: Rotation::R0 });
+        }
+        tab.viewport.fit = FitMode::None;
+        tab.viewport.zoom = 0.4;
+        tab.annots.insert(0, vec![square(0, AnnotKind::Note)]);
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
+        }
+        tab.outbox.clear();
+        let a = tab.annots[&0][0].rect;
+        let from = pdf_to_screen(&tab, 0, pos2((a.left + a.right) / 2.0, (a.bottom + a.top) / 2.0), tab.view_rect).unwrap();
+        let to = pdf_to_screen(&tab, 1, pos2(300.0, 400.0), tab.view_rect).unwrap();
+        drag(&ctx, &mut tab, &mut cache, from, to, Tool::Hand);
+        let moved = tab.outbox.iter().find_map(|r| match r {
+            Request::MoveAnnotToPage { page, index, to_page, rect, .. } => Some((*page, *index, *to_page, *rect)),
+            _ => None,
+        });
+        let (page, index, to_page, rect) = moved.expect("a move to the other page");
+        assert_eq!((page, index, to_page), (0, 0, 1));
+        let (cx, cy) = ((rect.left + rect.right) / 2.0, (rect.bottom + rect.top) / 2.0);
+        assert!((cx - 300.0).abs() < 4.0 && (cy - 400.0).abs() < 4.0, "dropped under the mouse: {rect:?}");
+        assert!(sent_rect(&tab).is_none(), "not also moved on its own page");
     }
 
     #[test]

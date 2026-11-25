@@ -722,6 +722,8 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                     ui.selectable_value(&mut f.status, Some(s.to_string()), status_name(s));
                 }
             });
+        ui.checkbox(&mut f.with_comment, t("With comment"))
+            .on_hover_text(t("Only annotations someone wrote a comment on or replied to"));
         if f.active() && ui.small_button(t("Clear")).clicked() {
             *f = Default::default();
         }
