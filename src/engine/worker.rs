@@ -77,6 +77,16 @@ impl OpenDoc {
     /// hidden in the live document (so they can be restored); they are stripped for
     /// real from a temporary copy.
     fn export(&self, lib: Lib) -> Result<Vec<u8>, String> {
+        let bytes = self.export_pdfium(lib)?;
+        // Replies as other applications read them. lopdf cannot rewrite encrypted
+        // files; those keep magic-pdf's replies only.
+        Ok(super::lopdf_ops::write_standard_replies(&bytes).unwrap_or_else(|e| {
+            log::warn!("replies not written for other applications: {e}");
+            bytes
+        }))
+    }
+
+    fn export_pdfium(&self, lib: Lib) -> Result<Vec<u8>, String> {
         let bytes = self.doc.save_to_bytes()?;
         if self.deleted.is_empty() {
             return Ok(bytes);

@@ -2275,6 +2275,76 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// The reply annotations (/IRT) of a saved file: (parent object, author, text).
+    fn standard_replies(path: &std::path::Path) -> Vec<(lopdf::ObjectId, String, String)> {
+        let doc = lopdf::Document::load(path).unwrap();
+        let text = |d: &lopdf::Dictionary, k: &[u8]| d.get(k).ok().and_then(|o| o.as_str().ok()).map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+        doc.objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .filter_map(|d| Some((d.get(b"IRT").ok()?.as_reference().ok()?, text(d, b"T"), text(d, b"Contents"))))
+            .collect()
+    }
+
+    #[test]
+    fn replies_are_saved_so_other_applications_show_them() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        let reply = |author: &str, text: &str| Reply { author: author.into(), date: "D:20261125120000Z".into(), text: text.into() };
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange { replies: Some(vec![reply("Bob", "fixed in v2")]), ..Default::default() },
+        });
+        let _ = annots(&engine, 1);
+        let dir = std::env::temp_dir().join(format!("magic-pdf-replies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.pdf");
+        engine.send(Request::Save { doc: 1, path: first.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = standard_replies(&first);
+        assert_eq!(saved.len(), 1, "one reply annotation, pointing at the square");
+        assert_eq!((saved[0].1.as_str(), saved[0].2.as_str()), ("Bob", "fixed in v2"));
+
+        // Reopened: listed once (not also as another application's reply). A second
+        // reply and saving again: the copies are rewritten, not doubled.
+        open(&engine, 2, first.clone());
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let sq = annots(&engine, 2).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        assert_eq!(sq.replies.len(), 1);
+        assert!(sq.other_replies.is_empty(), "no duplicate");
+        engine.send(Request::UpdateAnnot {
+            doc: 2,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange { replies: Some(vec![reply("Bob", "fixed in v2"), reply("Ann", "thanks")]), ..Default::default() },
+        });
+        let _ = annots(&engine, 2);
+        let second = dir.join("second.pdf");
+        engine.send(Request::Save { doc: 2, path: second.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let mut texts: Vec<String> = standard_replies(&second).into_iter().map(|r| r.2).collect();
+        texts.sort();
+        assert_eq!(texts, vec!["fixed in v2", "thanks"]);
+        // They draw nothing: no note icon (yellow) over the blue square.
+        open(&engine, 3, second);
+        let (size, rgba) = render(&engine, 3, 0, Rotation::R0, 0);
+        let yellow = (0..40)
+            .flat_map(|i| (0..40).map(move |j| (300.0 + i as f32 * 2.5, 300.0 + j as f32 * 2.5)))
+            .filter(|&(x, y)| {
+                let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
+                let p = &rgba[(py * size[0] + px) * 4..][..3];
+                p[0] > 200 && p[1] > 180 && p[2] < 100
+            })
+            .count();
+        assert_eq!(yellow, 0, "replies are not drawn on the page");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn optimized_copies_are_smaller_and_still_show_the_picture() {
         let (_serial, engine) = start();

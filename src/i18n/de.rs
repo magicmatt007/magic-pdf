@@ -529,4 +529,5 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("this signature format is not supported", "dieses Signaturformat wird nicht unterstützt"),
     ("With comment", "Mit Kommentar"),
     ("Only annotations someone wrote a comment on or replied to", "Nur Anmerkungen mit einem geschriebenen Kommentar oder einer Antwort"),
+    ("Open containing folder", "Speicherort öffnen"),
 ];
