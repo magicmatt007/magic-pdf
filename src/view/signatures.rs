@@ -37,7 +37,7 @@ pub fn bar(ui: &mut Ui, sigs: &[SignatureInfo]) -> bool {
     let Some(worst) = overall(sigs) else { return false };
     let (icon, color, _) = status(worst);
     let mut open = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(t("Signed")).strong());
         ui.colored_label(color, icon);
         let who: Vec<&str> = sigs.iter().map(|s| s.check.signer.as_str()).filter(|n| !n.is_empty()).collect();

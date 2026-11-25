@@ -98,6 +98,13 @@ fn main() -> eframe::Result {
             width: 64,
             height: 64,
         });
+    // Debug aid: MAGIC_PDF_WINDOW=800x600 starts with that window size.
+    if let Some((w, h)) = std::env::var("MAGIC_PDF_WINDOW").ok().and_then(|v| {
+        let (w, h) = v.split_once('x')?;
+        Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+    }) {
+        viewport = viewport.with_inner_size([w, h]);
+    }
     if let Some([x, y]) = args.at {
         // A tab dropped outside its window: open the new window there.
         viewport = viewport.with_position([x - 120.0, y - 60.0]).with_inner_size([1200.0, 800.0]);

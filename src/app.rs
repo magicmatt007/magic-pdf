@@ -122,6 +122,10 @@ pub struct App {
     hf_dialog: Option<crate::view::page_tools::HeaderFooterDialog>,
     optimize_dialog: Option<crate::view::page_tools::OptimizeDialog>,
     images_dialog: Option<crate::view::page_tools::ImagesDialog>,
+    /// Width of the toolbar's buttons when they last fitted on one row, and of the
+    /// search box with its buttons (they share the row when both fit).
+    toolbar_width: f32,
+    search_width: f32,
     watermark_dialog: Option<crate::view::page_tools::WatermarkDialog>,
     flatten_dialog: Option<crate::view::page_tools::FlattenDialog>,
     /// Presentation mode (full screen, one page at a time) and what to restore after.
@@ -329,6 +333,8 @@ impl App {
             hf_dialog: None,
             optimize_dialog: None,
             images_dialog: None,
+            toolbar_width: 1000.0,
+            search_width: 290.0,
             watermark_dialog: None,
             flatten_dialog: None,
             presenting: None,
@@ -1251,7 +1257,7 @@ impl App {
     fn redaction_bar(&mut self, ui: &mut Ui) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let n = tab.redactions.len();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(t("Redaction")).strong());
             if n == 0 {
                 ui.label(t("Drag over an area or click a word to mark it. Nothing is removed until you apply."));
@@ -1324,7 +1330,7 @@ impl App {
             .invoice
             .as_ref()
             .is_ok_and(|i| crate::einvoice::checks(i).iter().all(|c| c.ok) && crate::einvoice::missing_required(i).is_empty());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(t("E-invoice")).strong());
             ui.label(tf("This PDF contains invoice data ({format}).", &[("format", &inv.label())]));
             if let Ok(i) = &inv.invoice
@@ -1433,7 +1439,7 @@ impl App {
         let (na, nb) = (name(c.a), name(c.b));
         let mut go: Option<usize> = None;
         let mut end = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(tf("Comparing {na} ↔ {nb}", &[("na", &na), ("nb", &nb)])).strong());
             ui.separator();
             match &c.diffs {
@@ -2606,7 +2612,26 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
+        // In a narrow window the buttons wrap onto a second row and the search box gets
+        // a row of its own, so everything stays reachable.
+        let wide = ui.available_width() >= self.toolbar_width + self.search_width + ui.spacing().item_spacing.x;
+        if wide {
+            ui.horizontal(|ui| {
+                self.toolbar_buttons(ui);
+                self.search_bar(ui);
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| self.toolbar_buttons(ui));
+            if !self.tabs.is_empty() {
+                ui.horizontal(|ui| self.search_bar(ui));
+            }
+        }
+    }
+
+    /// The toolbar's buttons (all but search).
+    fn toolbar_buttons(&mut self, ui: &mut Ui) {
+        let start = ui.cursor().min;
+        {
             ui.toggle_value(&mut self.settings.show_sidebar, icons::text(icons::SIDEBAR))
                 .on_hover_text(t("Show or hide the sidebar (F9)"));
             ui.separator();
@@ -2698,7 +2723,12 @@ impl App {
 
             let Some(tab) = self.tabs.get_mut(self.active) else { return };
             let ready = tab.info().is_some();
-            ui.add_enabled_ui(ready, |ui| {
+            // Greyed out while a document loads. Not a nested group: that would wrap
+            // only within the rest of the row in a narrow window.
+            {
+                if !ready {
+                    ui.disable();
+                }
                 let n = tab.page_count();
                 if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text(t("Previous page (PgUp)")).clicked() {
                     tab.step_page(false);
@@ -2776,79 +2806,92 @@ impl App {
                 })
                 .response
                 .on_hover_text(tf("Page layout: {layout}", &[("layout", &tab.mode.label())]));
-            });
+            }
 
-            // Search, right-aligned.
-            let mut submit = false;
-            let mut clear = false;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let Some(tab) = self.tabs.get_mut(self.active) else { return };
-                if ui.button(icons::text(icons::CARET_DOWN)).on_hover_text(t("Next match (F3)")).clicked() {
-                    tab.search_step(true);
-                }
-                if ui.button(icons::text(icons::CARET_UP)).on_hover_text(t("Previous match (Shift+F3)")).clicked() {
-                    tab.search_step(false);
-                }
-                let all_before = self.search_all;
-                let s = &mut tab.search;
-                let before = (s.match_case, s.whole_word);
-                // Search options in one menu (keeps the toolbar narrow); highlighted when
-                // any is on.
-                let any = s.match_case || s.whole_word || self.search_all;
-                let icon = icons::text(icons::TEXT_AA);
-                let icon = if any { icon.color(ui.visuals().selection.stroke.color) } else { icon };
-                ui.menu_button(icon, |ui| {
-                    ui.checkbox(&mut s.match_case, t("Match case"));
-                    ui.checkbox(&mut s.whole_word, t("Whole words"));
-                    ui.checkbox(&mut self.search_all, t("All open tabs"));
-                })
-                .response
-                .on_hover_text(t("Search options: match case, whole words, all open tabs"));
-                if (before != (s.match_case, s.whole_word) || all_before != self.search_all) && s.submitted.is_some() {
+            // The buttons' width when they fit on one row decides where search goes.
+            let end = ui.cursor().min;
+            if (end.y - start.y).abs() < 1.0 {
+                self.toolbar_width = end.x - start.x;
+            }
+        }
+    }
+
+    /// The search box with its options and match count, right-aligned.
+    fn search_bar(&mut self, ui: &mut Ui) {
+        // Search, right-aligned.
+        let mut submit = false;
+        let mut clear = false;
+        let used = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let Some(tab) = self.tabs.get_mut(self.active) else { return 0.0 };
+            if ui.button(icons::text(icons::CARET_DOWN)).on_hover_text(t("Next match (F3)")).clicked() {
+                tab.search_step(true);
+            }
+            if ui.button(icons::text(icons::CARET_UP)).on_hover_text(t("Previous match (Shift+F3)")).clicked() {
+                tab.search_step(false);
+            }
+            let all_before = self.search_all;
+            let s = &mut tab.search;
+            let before = (s.match_case, s.whole_word);
+            // Search options in one menu (keeps the toolbar narrow); highlighted when
+            // any is on.
+            let any = s.match_case || s.whole_word || self.search_all;
+            let icon = icons::text(icons::TEXT_AA);
+            let icon = if any { icon.color(ui.visuals().selection.stroke.color) } else { icon };
+            ui.menu_button(icon, |ui| {
+                ui.checkbox(&mut s.match_case, t("Match case"));
+                ui.checkbox(&mut s.whole_word, t("Whole words"));
+                ui.checkbox(&mut self.search_all, t("All open tabs"));
+            })
+            .response
+            .on_hover_text(t("Search options: match case, whole words, all open tabs"));
+            if (before != (s.match_case, s.whole_word) || all_before != self.search_all) && s.submitted.is_some() {
+                submit = true;
+            }
+            if s.submitted.is_some() {
+                let status = match (s.current, s.hits.len()) {
+                    (_, 0) if s.running => "…".to_string(),
+                    (_, 0) => "No matches".to_string(),
+                    (Some(c), n) => format!("{}/{}{}", c + 1, n, if s.running { "+" } else { "" }),
+                    (None, n) => format!("{n}"),
+                };
+                ui.weak(status);
+            }
+            let id = egui::Id::unique(SEARCH_ID);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut s.query)
+                    .id(id)
+                    .hint_text(kb(t("Search (Ctrl+F)")))
+                    .desired_width(130.0),
+            );
+            ui.label(icons::text(icons::MAGNIFYING_GLASS));
+            if self.focus_search {
+                resp.request_focus();
+                self.focus_search = false;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if s.submitted.as_deref() == Some(s.query.trim()) {
+                    tab.search_step(!shift);
+                } else {
                     submit = true;
                 }
-                if s.submitted.is_some() {
-                    let status = match (s.current, s.hits.len()) {
-                        (_, 0) if s.running => "…".to_string(),
-                        (_, 0) => "No matches".to_string(),
-                        (Some(c), n) => format!("{}/{}{}", c + 1, n, if s.running { "+" } else { "" }),
-                        (None, n) => format!("{n}"),
-                    };
-                    ui.weak(status);
-                }
-                let id = egui::Id::unique(SEARCH_ID);
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut s.query)
-                        .id(id)
-                        .hint_text(kb(t("Search (Ctrl+F)")))
-                        .desired_width(150.0),
-                );
-                ui.label(icons::text(icons::MAGNIFYING_GLASS));
-                if self.focus_search {
-                    resp.request_focus();
-                    self.focus_search = false;
-                }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if s.submitted.as_deref() == Some(s.query.trim()) {
-                        tab.search_step(!shift);
-                    } else {
-                        submit = true;
-                    }
-                    resp.request_focus();
-                }
-                if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-                    clear = true;
-                    resp.surrender_focus();
-                }
-            });
-            if submit {
-                self.start_search();
+                resp.request_focus();
             }
-            if clear {
-                self.clear_search();
+            if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                clear = true;
+                resp.surrender_focus();
             }
+            ui.min_rect().width()
         });
+        if used.inner > 0.0 {
+            self.search_width = used.inner;
+        }
+        if submit {
+            self.start_search();
+        }
+        if clear {
+            self.clear_search();
+        }
     }
 
     /// Settings for new annotations of the active tool, shown in a bar under the
@@ -2858,7 +2901,7 @@ impl App {
         if matches!(tool, Tool::Stamp | Tool::Signature) {
             use crate::view::stamps;
             let mut changed = false;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new(tool.label()).strong());
                 ui.separator();
                 changed |= if tool == Tool::Stamp {
@@ -2887,7 +2930,7 @@ impl App {
         let recent = &mut self.settings.recent_colors;
         let mut changed = false;
         let width = |ui: &mut Ui, w: &mut f32| ui.add(egui::Slider::new(w, 0.5..=12.0).text("pt")).changed();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(tool.label()).strong());
             ui.separator();
             if let Some(slot) = tool.color(style) {

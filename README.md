@@ -185,7 +185,7 @@ test fails when a text has no translation.
 of the app's own window after three seconds and quits (`MAGIC_PDF_TOOL=highlight`, `note`, … picks
 the starting tool). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
 file's page count to `out.txt` and quits; the release workflow uses it to smoke-test the
-macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting.
+macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting. `MAGIC_PDF_WINDOW=800x600` starts with that window size.
 
 ## Tests
 
