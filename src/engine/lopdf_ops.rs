@@ -245,6 +245,110 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
     save(&mut doc, false)
 }
 
+
+/// Private key holding magic-pdf's replies (JSON), as written by PDFium.
+pub const REPLIES_KEY: &str = "MagicPdfReplies";
+/// Marks the standard reply annotations magic-pdf writes from those.
+pub const REPLY_COPY_KEY: &str = "MagicPdfReply";
+
+/// A PDF text string as Rust text (UTF-16 with byte order mark, else PDFDocEncoding,
+/// read as Latin-1).
+fn decode_text(bytes: &[u8]) -> String {
+    match bytes.strip_prefix(&[0xFE, 0xFF]) {
+        Some(utf16) => String::from_utf16_lossy(&utf16.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect::<Vec<_>>()),
+        None => bytes.iter().map(|&b| b as char).collect(),
+    }
+}
+
+/// Writes magic-pdf's replies as standard reply annotations (/IRT), which other
+/// applications show in the annotation's comment thread. Copies written before are
+/// replaced, so they always match magic-pdf's own list. Returns `bytes` unchanged
+/// when there is nothing to do.
+pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    // "MagicPdfRepl" starts both keys.
+    let needle = b"MagicPdfRepl";
+    if !bytes.windows(needle.len()).any(|w| w == needle) {
+        return Ok(bytes.to_vec()); // neither replies nor copies of them
+    }
+    let mut doc = load(bytes)?;
+    let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    for page_id in pages {
+        let annots_obj = match doc.get_dictionary(page_id).ok().and_then(|p| p.get(b"Annots").ok()).cloned() {
+            Some(o) => o,
+            None => continue,
+        };
+        // The /Annots array may be in the page or an object of its own.
+        let (array_id, refs) = match &annots_obj {
+            Object::Reference(id) => (Some(*id), doc.get_object(*id).and_then(Object::as_array).cloned().unwrap_or_default()),
+            Object::Array(a) => (None, a.clone()),
+            _ => continue,
+        };
+        let mut keep = Vec::new();
+        let mut parents = Vec::new();
+        for r in refs {
+            let Ok(id) = r.as_reference() else {
+                keep.push(r);
+                continue;
+            };
+            let Ok(dict) = doc.get_dictionary(id) else {
+                keep.push(r);
+                continue;
+            };
+            if dict.has(REPLY_COPY_KEY.as_bytes()) {
+                doc.objects.remove(&id); // an earlier copy: written anew below
+                continue;
+            }
+            if let Ok(json) = dict.get(REPLIES_KEY.as_bytes()).and_then(Object::as_str) {
+                let replies: Vec<super::commands::Reply> = serde_json::from_str(&decode_text(json)).unwrap_or_default();
+                if !replies.is_empty() {
+                    parents.push((id, dict.get(b"Rect").ok().cloned(), replies));
+                }
+            }
+            keep.push(r);
+        }
+        for (parent, rect, replies) in parents {
+            for (n, reply) in replies.iter().enumerate() {
+                let appearance = doc.add_object(lopdf::Stream::new(
+                    lopdf::dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()] },
+                    Vec::new(),
+                ));
+                let mut d = Dictionary::new();
+                d.set("Type", Object::Name(b"Annot".to_vec()));
+                d.set("Subtype", Object::Name(b"Text".to_vec()));
+                if let Some(rect) = &rect {
+                    d.set("Rect", rect.clone());
+                }
+                d.set("IRT", Object::Reference(parent));
+                d.set("RT", Object::Name(b"R".to_vec()));
+                d.set("P", Object::Reference(page_id));
+                // Print, no zoom, no rotation, as Acrobat writes replies; drawn as nothing.
+                d.set("F", 28);
+                d.set("Name", Object::Name(b"Comment".to_vec()));
+                d.set("Open", false);
+                d.set("T", text_string(&reply.author));
+                d.set("Contents", text_string(&reply.text));
+                d.set("M", text_string(&reply.date));
+                d.set("CreationDate", text_string(&reply.date));
+                d.set("NM", text_string(&format!("magic-pdf-reply-{}-{}-{n}", parent.0, parent.1)));
+                d.set("AP", lopdf::dictionary! { "N" => appearance });
+                d.set(REPLY_COPY_KEY, text_string("1"));
+                keep.push(Object::Reference(doc.add_object(d)));
+            }
+        }
+        match array_id {
+            Some(id) => {
+                doc.objects.insert(id, Object::Array(keep));
+            }
+            None => {
+                if let Ok(page) = doc.get_object_mut(page_id).and_then(Object::as_dict_mut) {
+                    page.set("Annots", Object::Array(keep));
+                }
+            }
+        }
+    }
+    save(&mut doc, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,7 @@ use super::shapes::{self, MEASURE_KEY, POINTS_KEY, SHAPE_KEY, STAMP_KEY, Shape};
 use super::textbox::{self, BoxStyle, FontSet, GlyphSource};
 
 /// Private keys for comment threads and review status.
-const REPLIES_KEY: &str = "MagicPdfReplies";
+use super::lopdf_ops::REPLIES_KEY;
 const STATUS_KEY: &str = "MagicPdfStatus";
 
 pub type Lib = &'static dyn PdfiumLibraryBindings;
@@ -1947,6 +1947,10 @@ impl<'d> Page<'d> {
             .collect();
         for (child, parent) in threads {
             let Some(a) = self.annot(out[child].index) else { continue };
+            // magic-pdf's own copies of its replies: already in the parent's list.
+            if !self.annot_string(&a, super::lopdf_ops::REPLY_COPY_KEY).is_empty() {
+                continue;
+            }
             let state = self.annot_string(&a, "State");
             let c = out[child].clone();
             let p = &mut out[parent];
