@@ -80,8 +80,24 @@ fn main() -> eframe::Result {
 
     let args = parse_args(std::env::args_os().skip(1));
     // Opening a PDF while magic-pdf runs adds a tab to that window instead.
-    if !args.new_window && !args.files.is_empty() && hand_to_running_instance(&args.files) {
-        return Ok(());
+    if !args.new_window && !args.files.is_empty() {
+        if hand_to_running_instance(&args.files) {
+            return Ok(());
+        }
+        // Another magic-pdf is opening its window right now (several files opened at
+        // once start one process each): wait for it and hand the files over.
+        if !ipc::claim_startup() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if hand_to_running_instance(&args.files) {
+                    return Ok(());
+                }
+                if ipc::claim_startup() {
+                    break;
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

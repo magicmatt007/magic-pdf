@@ -375,6 +375,8 @@ impl App {
             Ok(server) => app.ipc = Some(server),
             Err(e) => log::warn!("other windows cannot reach this one: {e}"),
         }
+        // Files opened together can now be handed to this window.
+        crate::ipc::release_startup();
         let restore = app.settings.restore_session
             && args.files.is_empty()
             && args.take.is_none()

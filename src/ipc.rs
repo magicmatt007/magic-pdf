@@ -52,6 +52,58 @@ pub struct Peer {
     pub token: String,
 }
 
+/// Held while a magic-pdf that was started with files opens its window, until that
+/// window can receive files. Several files opened at once from Explorer start one
+/// process each, at the same moment: the first opens the window, the others wait
+/// for it and hand their files over, so they all end up as tabs of one window.
+const STARTUP_LOCK: &str = "starting";
+/// A lock this old is left over from a start that failed.
+const STARTUP_STALE: Duration = Duration::from_secs(10);
+
+/// Tries to become the process that opens the window. False if another one is
+/// opening its window right now.
+pub fn claim_startup() -> bool {
+    claim_startup_in(registry_dir())
+}
+
+fn claim_startup_in(dir: Option<PathBuf>) -> bool {
+    let Some(dir) = dir else { return true };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let path = dir.join(STARTUP_LOCK);
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                let _ = write!(f, "{}", std::process::id());
+                return true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+                if age.is_some_and(|a| a < STARTUP_STALE) {
+                    return false;
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+            // Without a usable lock, carry on as before.
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
+/// Gives the lock up (if this process holds it) once the window receives files.
+pub fn release_startup() {
+    release_startup_in(registry_dir());
+}
+
+fn release_startup_in(dir: Option<PathBuf>) {
+    let Some(path) = dir.map(|d| d.join(STARTUP_LOCK)) else { return };
+    if std::fs::read_to_string(&path).is_ok_and(|pid| pid.trim() == std::process::id().to_string()) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn registry_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "magic-pdf").map(|d| d.data_local_dir().join("instances"))
 }
@@ -374,6 +426,15 @@ mod tests {
         };
         assert!(!intruder.send(&Message::Open(PathBuf::from("/evil.pdf"))));
         assert!(server.messages.recv_timeout(Duration::from_millis(300)).is_err());
+        // The start-up lock: taken once, released only by its holder.
+        assert!(claim_startup_in(Some(dir.clone())), "first start takes the lock");
+        assert!(!claim_startup_in(Some(dir.clone())), "a second start at the same time waits");
+        release_startup_in(Some(dir.clone()));
+        assert!(claim_startup_in(Some(dir.clone())), "free again");
+        std::fs::write(dir.join(STARTUP_LOCK), "12345").unwrap();
+        release_startup_in(Some(dir.clone()));
+        assert!(dir.join(STARTUP_LOCK).exists(), "another process's lock is left alone");
+        std::fs::remove_file(dir.join(STARTUP_LOCK)).unwrap();
         // A stale entry (no process listening) is cleaned up.
         std::fs::write(dir.join("999999999"), "1 nothing\n").unwrap();
         assert!(peers_in(Some(dir.clone())).is_empty());
