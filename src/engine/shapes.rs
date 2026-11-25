@@ -393,6 +393,29 @@ pub fn stamp_size(title: &str, subtitle: &str, size: f32, fonts: &dyn FontSet) -
     (w, h)
 }
 
+/// Appearance of a sticky note filling `rect`: a speech bubble in the note's colour
+/// with a darker outline and three lines of "text".
+pub fn note_appearance(rect: PdfBox, color: Rgb) -> String {
+    let (l, b) = (rect.left + 0.5, rect.bottom + 0.5);
+    let (w, h) = ((rect.right - rect.left - 1.0).max(4.0), (rect.top - rect.bottom - 1.0).max(4.0));
+    let dark = color.map(|c| (c as f32 * 0.55) as u8);
+    let (r, t, body) = (l + w, b + h, b + h * 0.22);
+    let mut s = format!("q {} rg {} RG {:.2} w 1 j\n", rgb(color), rgb(dark), (w * 0.05).max(0.6));
+    // Bubble with a tail at the lower left.
+    s += &format!(
+        "{l:.2} {body:.2} m {:.2} {body:.2} l {:.2} {b:.2} l {:.2} {body:.2} l {r:.2} {body:.2} l {r:.2} {t:.2} l {l:.2} {t:.2} l b\n",
+        l + w * 0.2,
+        l + w * 0.22,
+        l + w * 0.45
+    );
+    s += &format!("{:.2} w\n", (h * 0.06).max(0.6));
+    for i in 1..=3 {
+        let y = body + (t - body) * i as f32 / 4.0;
+        s += &format!("{:.2} {y:.2} m {:.2} {y:.2} l S\n", l + w * 0.18, r - w * 0.18);
+    }
+    s + "Q\n"
+}
+
 /// Appearance of a text stamp filling `rect`: rounded double frame, bold title and an
 /// optional smaller second line (e.g. author and date).
 pub fn stamp_appearance(rect: PdfBox, title: &str, subtitle: &str, color: Rgb, fonts: &dyn FontSet) -> String {

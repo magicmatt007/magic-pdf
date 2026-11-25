@@ -54,13 +54,16 @@ pub struct SearchState {
 #[derive(Clone, Copy, Debug)]
 pub struct Selection {
     pub page: usize,
+    /// Cursor positions between characters (0 = before the first): where the
+    /// selection started and where it ends now. Equal means nothing is selected.
     pub anchor: usize,
     pub head: usize,
 }
 
 impl Selection {
-    pub fn range(&self) -> std::ops::RangeInclusive<usize> {
-        self.anchor.min(self.head)..=self.anchor.max(self.head)
+    /// Indices of the selected characters.
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
     }
 }
 
@@ -73,6 +76,8 @@ pub struct CommentFilter {
     pub author: Option<String>,
     /// "" lists comments without a status.
     pub status: Option<String>,
+    /// Only annotations someone wrote a comment on (or replied to).
+    pub with_comment: bool,
 }
 
 impl CommentFilter {
@@ -90,7 +95,15 @@ impl CommentFilter {
             && self.kind.is_none_or(|k| k == a.kind)
             && self.author.as_ref().is_none_or(|w| *w == a.author)
             && self.status.as_ref().is_none_or(|s| s == status)
+            && (!self.with_comment || has_comment(a))
     }
+}
+
+/// Whether someone wrote a comment on the annotation. A text box's text and a
+/// measurement's value are what the annotation shows, not a comment on it.
+pub fn has_comment(a: &AnnotInfo) -> bool {
+    let generated = matches!(a.kind, AnnotKind::FreeText | AnnotKind::Distance | AnnotKind::Area);
+    (!generated && !a.contents.trim().is_empty()) || !a.replies.is_empty() || !a.other_replies.is_empty()
 }
 
 #[derive(Clone, Debug)]
@@ -730,13 +743,8 @@ impl DocTab {
         let sel = self.selection?;
         let text = self.texts.get(&sel.page)?.as_ref()?;
         let range = sel.range();
-        let s: String = text
-            .chars
-            .get(*range.start()..=(*range.end()).min(text.chars.len().saturating_sub(1)))?
-            .iter()
-            .map(|c| c.ch)
-            .collect();
-        Some(s.replace("\r\n", "\n").replace('\r', "\n"))
+        let s: String = text.chars.get(range.start.min(text.chars.len())..range.end.min(text.chars.len()))?.iter().map(|c| c.ch).collect();
+        (!s.is_empty()).then(|| s.replace("\r\n", "\n").replace('\r', "\n"))
     }
 
     /// Line boxes of the text selection in PDF space, merged per line.
@@ -744,7 +752,8 @@ impl DocTab {
         let sel = self.selection?;
         let text = self.texts.get(&sel.page)?.as_ref()?;
         let mut lines: Vec<PdfBox> = Vec::new();
-        for c in text.chars.get(sel.range())? {
+        let range = sel.range();
+        for c in text.chars.get(range.start.min(text.chars.len())..range.end.min(text.chars.len()))? {
             let Some(r) = c.rect else { continue };
             match lines.last_mut() {
                 Some(last) if same_line(last, &r) => *last = last.union(r),
@@ -762,7 +771,7 @@ impl DocTab {
             self.selection = Some(Selection {
                 page,
                 anchor: 0,
-                head: text.chars.len() - 1,
+                head: text.chars.len(),
             });
         }
     }
@@ -902,6 +911,22 @@ mod tests {
         assert!(f.matches(&a) && !f.matches(&b));
         f.kind = Some(AnnotKind::Highlight);
         assert!(!f.matches(&a));
+
+        // Only annotations with a comment: a highlight without one is left out, as is
+        // a text box (its text is not a comment) unless someone replied to it.
+        let mut f = CommentFilter { with_comment: true, ..Default::default() };
+        let mut bare = note("Ann", "  ", "");
+        bare.kind = AnnotKind::Highlight;
+        bare.replies.clear();
+        assert!(f.active() && f.matches(&a) && !f.matches(&bare));
+        let mut text_box = bare.clone();
+        text_box.kind = AnnotKind::FreeText;
+        text_box.contents = "Box text".into();
+        assert!(!f.matches(&text_box));
+        bare.contents = "check this".into();
+        assert!(f.matches(&bare));
+        f.with_comment = false;
+        assert!(f.matches(&text_box));
     }
 
     #[test]

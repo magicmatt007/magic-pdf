@@ -2203,6 +2203,79 @@ mod tests {
     }
 
     #[test]
+    fn sticky_notes_are_drawn_in_their_colour() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 450.0, bottom: 700.0, right: 470.0, top: 720.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: NewAnnot::new(AnnotKind::Note, rect, [0, 90, 255]) });
+        let _ = annots(&engine, 1);
+        let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
+        let px = |x: f32, y: f32| {
+            let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
+            rgba[(py * size[0] + px) * 4..][..3].to_vec()
+        };
+        let pixels: Vec<Vec<u8>> = (0..20).flat_map(|i| (0..20).map(move |j| (451.0 + i as f32 * 0.9, 701.0 + j as f32 * 0.9))).map(|(x, y)| px(x, y)).collect();
+        let blue = pixels.iter().filter(|p| p[2] > 180 && p[0] < 100).count();
+        let yellow = pixels.iter().filter(|p| p[0] > 200 && p[1] > 180 && p[2] < 100).count();
+        assert!(blue > 100 && yellow == 0, "blue {blue}, yellow {yellow}");
+    }
+
+    /// The annotations of one page of the 40-page sample: scans all pages and reads
+    /// the scan to its end, so no answer of it is left over for the next call.
+    fn page_annots(engine: &Engine, doc: DocId, page: usize) -> Vec<AnnotInfo> {
+        engine.send(Request::ScanAnnots { doc });
+        let mut found = Vec::new();
+        recv_until(engine, |r| match r {
+            Response::PageAnnots { doc: d, page: p, annots, .. } if d == doc => {
+                if p == page {
+                    found = annots;
+                }
+                (p == 39).then_some(())
+            }
+            _ => None,
+        });
+        found
+    }
+
+    #[test]
+    fn annotations_move_to_another_page() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 400.0, bottom: 700.0, right: 420.0, top: 720.0 };
+        let mut note = NewAnnot::new(AnnotKind::Note, rect, [0, 90, 255]);
+        note.contents = "Check this figure".into();
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: note });
+        let notes = |list: Vec<AnnotInfo>| list.into_iter().filter(|a| a.kind == AnnotKind::Note).collect::<Vec<_>>();
+        let on0 = notes(page_annots(&engine, 1, 0));
+        assert_eq!(on0.len(), 1);
+        let target = PdfBox { left: 100.0, bottom: 300.0, right: 120.0, top: 320.0 };
+        engine.send(Request::MoveAnnotToPage { doc: 1, page: 0, index: on0[0].index, to_page: 2, rect: target });
+        assert!(notes(page_annots(&engine, 1, 0)).is_empty(), "gone from page 1");
+        let on2 = notes(page_annots(&engine, 1, 2));
+        assert_eq!(on2.len(), 1, "on page 3");
+        assert_eq!(on2[0].contents, "Check this figure");
+        assert_eq!(on2[0].color, Some([0, 90, 255]));
+        assert!((on2[0].rect.left - 100.0).abs() < 0.5 && (on2[0].rect.bottom - 300.0).abs() < 0.5, "{:?}", on2[0].rect);
+
+        // One undo step brings it back; redo moves it again.
+        engine.send(Request::Undo { doc: 1 });
+        assert_eq!(notes(page_annots(&engine, 1, 0)).len(), 1);
+        assert!(notes(page_annots(&engine, 1, 2)).is_empty());
+        engine.send(Request::Redo { doc: 1 });
+        assert!(notes(page_annots(&engine, 1, 0)).is_empty());
+        assert_eq!(notes(page_annots(&engine, 1, 2)).len(), 1);
+
+        // Saved: only the moved note is in the file.
+        let path = std::env::temp_dir().join(format!("magic-pdf-move-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        open(&engine, 2, path.clone());
+        assert!(notes(page_annots(&engine, 2, 0)).is_empty());
+        assert_eq!(notes(page_annots(&engine, 2, 2)).len(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn optimized_copies_are_smaller_and_still_show_the_picture() {
         let (_serial, engine) = start();
         let dir = std::env::temp_dir().join(format!("magic-pdf-opt-{}", std::process::id()));
