@@ -54,7 +54,7 @@ fn reveal(path: &Path) -> std::io::Result<()> {
 
 /// A file:// URI for an absolute path, with everything but unreserved characters
 /// percent-encoded (commas too, as dbus-send splits arrays at them).
-#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn file_uri(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut out = String::from("file://");
@@ -68,7 +68,7 @@ fn file_uri(path: &Path) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
 mod tests {
     use super::*;
 
