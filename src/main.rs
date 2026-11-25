@@ -15,6 +15,7 @@ mod pinch;
 #[cfg(target_os = "macos")]
 mod macos;
 mod print;
+mod reveal;
 mod settings;
 mod theme;
 mod update;

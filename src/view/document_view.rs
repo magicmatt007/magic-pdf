@@ -240,7 +240,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
         ui.painter_at(view).rect_stroke(s, CornerRadius::same(3), Stroke::new(3.0, Color32::from_rgb(30, 120, 255)), StrokeKind::Outside);
     }
     selection_toolbar(ui, tab, view, &cx);
-    annotation_popup(ui, tab, view, cx.recent_colors);
+    annotation_popup(ui, tab, view, cx.recent_colors, cx.author);
 }
 
 fn centered_text(ui: &Ui, view: Rect, text: &str) {
@@ -585,13 +585,17 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         && !response.dragged()
         && (!a.contents.is_empty() || !a.author.is_empty())
     {
-        let tip = if a.author.is_empty() {
+        let mut tip = if a.author.is_empty() {
             a.contents.clone()
         } else if a.contents.is_empty() {
             a.author.clone()
         } else {
             format!("{}\n— {}", a.contents, a.author)
         };
+        for r in a.other_replies.iter().chain(&a.replies) {
+            let who = if r.author.is_empty() { "?" } else { r.author.as_str() };
+            tip += &format!("\n↳ {who}: {}", r.text);
+        }
         response.clone().on_hover_text_at_pointer(tip);
     }
 
@@ -1811,7 +1815,7 @@ fn selection_toolbar(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &ViewContext<'_>
 }
 
 /// Properties popup for the selected annotation.
-fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>) {
+fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>, author: &str) {
     if tab.annot_drag.is_some() {
         return;
     }
@@ -1845,6 +1849,7 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
     let mut start_editing = false;
     egui::Area::new(Id::unique(("annot_popup", tab.id)))
         .fixed_pos(pos)
+        .constrain(true)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1928,6 +1933,49 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                         change.contents = Some(contents.clone());
                     }
                 }
+                // Replies (also those other applications wrote), and a field to reply.
+                let replies: Vec<&crate::engine::Reply> = annot.other_replies.iter().chain(&annot.replies).collect();
+                if !replies.is_empty() {
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(150.0).id_salt(("popup_replies", tab.id)).show(ui, |ui| {
+                        for r in replies {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.weak("↳");
+                                ui.strong(if r.author.is_empty() { "?" } else { r.author.as_str() });
+                                ui.weak(format_pdf_date(&r.date));
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(12.0);
+                                ui.label(&r.text);
+                            });
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(&mut tab.reply_draft)
+                            .hint_text(t("Reply…"))
+                            .desired_rows(1)
+                            .desired_width(ui.available_width() - 60.0),
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_reply_box"), edit.rect));
+                    let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+                    let text = tab.reply_draft.trim().to_string();
+                    let button = ui.add_enabled(!text.is_empty(), egui::Button::new(t("Reply")));
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_reply_button"), button.rect));
+                    if (button.clicked() || enter) && !text.is_empty() {
+                        let mut all = annot.replies.clone();
+                        all.push(crate::engine::Reply {
+                            author: author.to_string(),
+                            date: crate::engine::pdf_date_now(),
+                            text,
+                        });
+                        change.replies = Some(all);
+                        tab.reply_draft.clear();
+                    }
+                });
             });
         });
     if let Some(s) = &mut tab.selected_annot {
@@ -2518,6 +2566,40 @@ mod tests {
             frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("ok".into())], tool);
             assert!(tab.selected_annot.as_ref().unwrap().contents.ends_with("ok"));
         }
+    }
+
+    #[test]
+    fn replies_show_in_the_popup_and_can_be_added_there() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_selection();
+        tab.selection = None;
+        let mut a = square(5, AnnotKind::Square);
+        a.contents = "Wrong figure".into();
+        a.replies = vec![crate::engine::Reply { author: "Bob".into(), date: String::new(), text: "fixed in v2".into() }];
+        tab.annots.insert(0, vec![a]);
+        tab.select_annot(0, 5);
+        let mut cache = TextureCache::new(usize::MAX);
+        for _ in 0..3 {
+            frame(&ctx, &mut tab, &mut cache, Vec::new());
+        }
+        let reply_box: Rect = ctx.data(|d| d.get_temp(Id::unique("test_reply_box"))).expect("reply field in the popup");
+        tab.outbox.clear();
+        tab.reply_draft = "thanks".into();
+        frame(&ctx, &mut tab, &mut cache, Vec::new());
+        let reply_button: Rect = ctx.data(|d| d.get_temp(Id::unique("test_reply_button"))).unwrap();
+        let at = reply_button.center();
+        assert!((reply_button.center().y - reply_box.center().y).abs() < 20.0, "next to the field");
+        frame(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, &mut tab, &mut cache, vec![button(at, true)]);
+        frame(&ctx, &mut tab, &mut cache, vec![button(at, false)]);
+        let replies = tab.outbox.iter().find_map(|r| match r {
+            Request::UpdateAnnot { change, .. } => change.replies.clone(),
+            _ => None,
+        });
+        let replies = replies.expect("the reply is sent");
+        assert_eq!(replies.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["fixed in v2", "thanks"]);
+        assert_eq!(replies[1].author, "me");
+        assert!(tab.reply_draft.is_empty());
     }
 
     #[test]

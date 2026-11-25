@@ -2386,6 +2386,11 @@ impl App {
                         }
                     });
                 });
+                if ui.add_enabled(has_tab, egui::Button::new(t("Open containing folder"))).clicked()
+                    && let Some(tab) = self.tabs.get(self.active)
+                {
+                    crate::reveal::show_in_folder(&tab.path);
+                }
                 if ui.add_enabled(has_tab, egui::Button::new(kb(t("Document properties…\tCtrl+D")))).clicked() {
                     self.props_dialog = self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
                 }
@@ -2994,7 +2999,13 @@ impl App {
                             .collect();
                     }
                     let (doc, peers) = (tab.id, &self.tab_menu_peers);
+                    let path = tab.path.clone();
                     resp.context_menu(|ui| {
+                        if ui.button(t("Open containing folder")).clicked() {
+                            crate::reveal::show_in_folder(&path);
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button(t("Move to new window")).clicked() {
                             move_to = Some((doc, MoveTarget::NewWindow(None)));
                             ui.close();
