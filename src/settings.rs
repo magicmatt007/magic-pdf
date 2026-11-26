@@ -151,6 +151,10 @@ pub struct Settings {
     /// User interface language: "auto" (the system's), "en" or "de".
     pub language: String,
     files: HashMap<String, StoredFileState>,
+    /// The settings as this window last read or wrote them. Saving writes back only
+    /// what changed since, so windows (processes) do not undo each other's changes.
+    #[serde(skip)]
+    base: Option<toml::Value>,
 }
 
 impl Default for Settings {
@@ -176,7 +180,36 @@ impl Default for Settings {
             signatures: Vec::new(),
             language: "auto".into(),
             files: HashMap::new(),
+            base: None,
         }
+    }
+}
+
+/// Three-way merge of settings: where `mine` differs from `base` (what this window
+/// changed) it wins, elsewhere `disk` (what other windows saved) is kept. Tables are
+/// merged key by key, other values as a whole.
+fn merge3(base: &toml::Value, mine: &toml::Value, disk: &toml::Value) -> toml::Value {
+    use toml::Value;
+    match (base, mine, disk) {
+        (Value::Table(b), Value::Table(m), Value::Table(d)) => {
+            let mut out = toml::Table::new();
+            let keys: std::collections::BTreeSet<&String> = m.keys().chain(d.keys()).collect();
+            for k in keys {
+                let value = match (b.get(k), m.get(k), d.get(k)) {
+                    (Some(bv), Some(mv), Some(dv)) => Some(merge3(bv, mv, dv)),
+                    // Unchanged here (or gone here and there): take the file's.
+                    (bv, mv, dv) if bv == mv => dv.cloned(),
+                    // Changed (added or removed) here.
+                    (_, mv, _) => mv.cloned(),
+                };
+                if let Some(v) = value {
+                    out.insert(k.clone(), v);
+                }
+            }
+            Value::Table(out)
+        }
+        _ if mine == base => disk.clone(),
+        _ => mine.clone(),
     }
 }
 
@@ -199,27 +232,58 @@ pub fn now() -> u64 {
 
 impl Settings {
     pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            return Self::default();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-                log::warn!("ignoring invalid settings {}: {e}", path.display());
-                Self::default()
-            }),
-            Err(_) => Self::default(),
+        match config_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
         }
     }
 
-    pub fn save(&self) {
-        let Some(path) = config_path() else { return };
+    fn load_from(path: &Path) -> Self {
+        let mut s = match std::fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+                // Kept for recovery instead of being overwritten by the defaults.
+                let backup = path.with_extension("toml.bad");
+                let _ = std::fs::copy(path, &backup);
+                log::warn!("ignoring invalid settings {} (copy kept as {}): {e}", path.display(), backup.display());
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        };
+        s.base = toml::Value::try_from(&s).ok();
+        s
+    }
+
+    /// Saves the settings, merged with changes other windows saved meanwhile: what
+    /// this window changed since it last read or wrote the file wins, everything else
+    /// is taken from the file. This window then has the merged settings.
+    pub fn save(&mut self) {
+        if let Some(path) = config_path() {
+            self.save_to(&path);
+        }
+    }
+
+    fn save_to(&mut self, path: &Path) {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let tmp = path.with_extension("toml.tmp");
-            std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
-            std::fs::rename(&tmp, &path)?;
+            let mine = toml::Value::try_from(&*self)?;
+            let disk = std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).map(toml::Value::Table);
+            let merged = match (&self.base, disk) {
+                (Some(base), Some(disk)) => merge3(base, &mine, &disk),
+                _ => mine,
+            };
+            // Per process, so two windows saving at once cannot mix their files.
+            let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+            std::fs::write(&tmp, toml::to_string_pretty(&merged)?)?;
+            if let Err(e) = std::fs::rename(&tmp, path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+            if let Ok(s) = merged.clone().try_into::<Settings>() {
+                *self = s;
+            }
+            self.base = Some(merged);
             Ok(())
         })();
         if let Err(e) = result {
@@ -286,6 +350,38 @@ fn key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_do_not_undo_each_others_settings() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.toml");
+        // Two windows started with the same settings.
+        let mut a = Settings::load_from(&path);
+        let mut b = Settings::load_from(&path);
+        a.author = "Ann".into();
+        a.signatures.push(Signature::Drawn(vec![vec![[0.0, 0.0], [1.0, 0.5]]]));
+        a.save_to(&path);
+        // The other window changes something else and saves later with its old copy.
+        b.dark_ui = !b.dark_ui;
+        b.save_to(&path);
+        let now = Settings::load_from(&path);
+        assert_eq!(now.author, "Ann", "the first window's change is kept");
+        assert_eq!(now.signatures.len(), 1, "the signature drawn in the first window is kept");
+        assert_eq!(now.dark_ui, b.dark_ui, "the second window's change is saved");
+        assert_eq!(b.author, "Ann", "the saving window now has the other's change");
+        // A change made here wins over the file for that setting only.
+        a.author = "Anna".into();
+        a.save_to(&path);
+        let now = Settings::load_from(&path);
+        assert_eq!((now.author.as_str(), now.dark_ui), ("Anna", b.dark_ui));
+        // An unreadable file is kept as a backup, not lost.
+        std::fs::write(&path, "this is = = not toml").unwrap();
+        let _ = Settings::load_from(&path);
+        assert!(path.with_extension("toml.bad").exists());
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn pinned_files_stay_at_the_top_and_out_of_the_recent_list() {

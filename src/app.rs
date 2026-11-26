@@ -599,11 +599,13 @@ impl App {
 
     /// Moves a tab to another window (exporting unsaved changes first).
     fn move_tab(&mut self, doc: DocId, target: MoveTarget) {
+        // A comment still being typed goes along (it makes the document changed).
+        let pending = self.commit_edits(doc);
         let Some(tab) = self.tabs.iter().find(|t| t.id == doc) else { return };
         if tab.info().is_none() {
             return;
         }
-        if tab.dirty {
+        if tab.dirty || pending {
             let name = tab.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let path = std::env::temp_dir().join(format!("magic-pdf-move-{}-{doc}-{name}", std::process::id()));
             self.moves.insert(doc, target);
@@ -3819,16 +3821,26 @@ fn release_notes(ui: &mut Ui, blocks: &[crate::update::NoteBlock], width: f32) {
     }
 }
 
-/// On Windows, `canonicalize` returns `\\?\C:\…` paths; show and store the
-/// familiar `C:\…` form instead (network paths keep their prefix).
+/// On Windows, `canonicalize` returns `\\?\C:\…` and `\\?\UNC\…` paths; show and
+/// store the familiar `C:\…` and `\\server\share\…` forms instead (Explorer and other
+/// programs do not all accept the verbatim ones).
 fn simplify_path(path: PathBuf) -> PathBuf {
-    if cfg!(windows)
-        && let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
-        && !rest.starts_with("UNC\\")
-    {
-        return PathBuf::from(rest);
+    match path.to_str().filter(|_| cfg!(windows)).and_then(plain_windows_path) {
+        Some(plain) => PathBuf::from(plain),
+        None => path,
     }
-    path
+}
+
+/// `\\?\C:\x\a.pdf` as `C:\x\a.pdf`, `\\?\UNC\server\share\a.pdf` as
+/// `\\server\share\a.pdf`. None for other paths, and for paths too long for the plain
+/// form (260 characters), which Windows opens only in the verbatim form.
+fn plain_windows_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(r"\\?\")?;
+    let plain = match rest.strip_prefix(r"UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => rest.to_string(),
+    };
+    (plain.chars().count() < 260).then_some(plain)
 }
 
 /// Removes the keyboard input meant for a focused form field from `events` and turns it
@@ -4077,10 +4089,15 @@ mod tests {
     fn simplify_path_only_touches_windows_verbatim_paths() {
         let p = PathBuf::from("/home/u/a.pdf");
         assert_eq!(simplify_path(p.clone()), p);
+        assert_eq!(plain_windows_path(r"\\?\C:\x\a.pdf").as_deref(), Some(r"C:\x\a.pdf"));
+        assert_eq!(plain_windows_path(r"\\?\UNC\server\share\a.pdf").as_deref(), Some(r"\\server\share\a.pdf"));
+        assert_eq!(plain_windows_path(r"C:\x\a.pdf"), None);
+        let long = format!(r"\\?\C:\{}\a.pdf", "d".repeat(300));
+        assert_eq!(plain_windows_path(&long), None, "too long for the plain form");
         if cfg!(windows) {
             assert_eq!(simplify_path(PathBuf::from(r"\\?\C:\x\a.pdf")), PathBuf::from(r"C:\x\a.pdf"));
             let unc = PathBuf::from(r"\\?\UNC\server\share\a.pdf");
-            assert_eq!(simplify_path(unc.clone()), unc);
+            assert_eq!(simplify_path(unc), PathBuf::from(r"\\server\share\a.pdf"));
         }
     }
 

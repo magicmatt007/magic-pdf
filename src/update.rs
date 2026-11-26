@@ -202,14 +202,14 @@ fn curl() -> Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.args(["--fail", "--silent", "--show-error", "--location", "--max-time", "120"]);
+    cmd.args(["--fail", "--silent", "--show-error", "--location", "--connect-timeout", "30"]);
     cmd
 }
 
 /// Asks GitHub for the latest release.
 pub fn latest_release() -> Result<Release, String> {
     let out = curl()
-        .args(["-H", "Accept: application/vnd.github+json", "-A", "magic-pdf-update-check"])
+        .args(["--max-time", "60", "-H", "Accept: application/vnd.github+json", "-A", "magic-pdf-update-check"])
         .arg(LATEST_RELEASE_API)
         .output()
         .map_err(|e| format!("could not run curl: {e}"))?;
@@ -247,7 +247,10 @@ pub fn download_installer(asset: &Asset) -> Result<PathBuf, String> {
         .as_deref()
         .ok_or("GitHub did not publish a checksum for the installer")?;
     let path = download_path(asset)?;
+    // No overall time limit (a slow connection still gets there); a download that
+    // stalls (under 1 kB/s for a minute) is given up.
     let status = curl()
+        .args(["--speed-limit", "1024", "--speed-time", "60"])
         .arg("--output")
         .arg(&path)
         .arg(&asset.browser_download_url)
