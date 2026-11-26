@@ -746,7 +746,7 @@ impl App {
     fn commit_edits(&mut self, doc: DocId) -> bool {
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == doc) else { return false };
         let pending = tab.commit_annot_edit();
-        let queued: Vec<Request> = tab.outbox.drain(..).collect();
+        let queued: Vec<Request> = std::mem::take(&mut tab.outbox);
         for req in queued {
             self.send(req);
         }
