@@ -765,6 +765,7 @@ impl Doc {
         let mut items = Vec::new();
         let mut bm = first;
         while !bm.is_null() && *count < MAX_ITEMS {
+            let index = *count;
             *count += 1;
             let title = read_utf16(|buf, len| unsafe { self.lib.FPDFBookmark_GetTitle(bm, buf, len) });
             let mut page = self.dest_page(unsafe { self.lib.FPDFBookmark_GetDest(self.handle, bm) });
@@ -784,6 +785,7 @@ impl Doc {
                 title,
                 page,
                 children,
+                origin: Some(OutlineOrigin { index, page }),
             });
             bm = unsafe { self.lib.FPDFBookmark_GetNextSibling(self.handle, bm) };
         }
@@ -1940,10 +1942,23 @@ impl<'d> Page<'d> {
         }
         // Replies and review states written by other applications join their parent's
         // thread.
+        // Replies to replies (how Acrobat stores a conversation) join the thread of the
+        // annotation at the start of the chain.
+        let root = |mut i: usize| {
+            for _ in 0..out.len() {
+                match out.iter().position(|p| Some(p.index) == out[i].in_reply_to) {
+                    Some(parent) => i = parent,
+                    None => break,
+                }
+            }
+            i
+        };
         let threads: Vec<(usize, usize)> = out
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| Some((i, out.iter().position(|p| Some(p.index) == a.in_reply_to)?)))
+            .filter(|(_, a)| a.in_reply_to.is_some())
+            .map(|(i, _)| (i, root(i)))
+            .filter(|&(i, r)| i != r)
             .collect();
         for (child, parent) in threads {
             let Some(a) = self.annot(out[child].index) else { continue };
@@ -2730,8 +2745,22 @@ impl<'d> Page<'d> {
     /// Permanently removes annotations (and their popups) by index.
     pub fn remove_annots(&self, indices: &[usize]) {
         let lib = self.lib();
+        // Replies (/IRT) to removed annotations, and replies to those, go too: left
+        // behind they would point at nothing and show as stray notes elsewhere.
+        let mut targets: Vec<usize> = indices.to_vec();
+        let count = unsafe { lib.FPDFPage_GetAnnotCount(self.handle) }.max(0) as usize;
+        loop {
+            let more: Vec<usize> = (0..count)
+                .filter(|i| !targets.contains(i))
+                .filter(|&i| self.annot(i).and_then(|a| self.reply_parent(&a)).is_some_and(|p| targets.contains(&p)))
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            targets.extend(more);
+        }
         let mut all: Vec<usize> = Vec::new();
-        for &i in indices {
+        for &i in &targets {
             all.push(i);
             if let Some(a) = self.annot(i) {
                 let popup = unsafe { lib.FPDFAnnot_GetLinkedAnnot(a.handle, "Popup") };

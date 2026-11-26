@@ -1729,13 +1729,14 @@ mod tests {
                 children: vec![OutlineItem {
                     title: "Details".into(),
                     page: Some(2),
-                    children: Vec::new(),
+                    ..Default::default()
                 }],
+                ..Default::default()
             },
             OutlineItem {
                 title: "End".into(),
                 page: Some(39),
-                children: Vec::new(),
+                ..Default::default()
             },
         ];
         let info2 = edit(PageOp::SetOutline { outline: outline.clone() });
@@ -2342,6 +2343,282 @@ mod tests {
             })
             .count();
         assert_eq!(yellow, 0, "replies are not drawn on the page");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_keeps_text_still_being_typed_in_a_form_field() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-form-focus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("typed.pdf");
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+        let (_serial, engine) = start();
+        open(&engine, 1, form);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let text = widgets(&engine, 1).into_iter().find(|w| w.name == "name").unwrap();
+        let (x, y) = ((text.rect.left + text.rect.right) / 2.0, (text.rect.bottom + text.rect.top) / 2.0);
+        for event in [FormMouse::Move, FormMouse::Down, FormMouse::Up] {
+            engine.send(Request::FormMouse { doc: 1, page: 0, event, x, y, modifiers: 0 });
+        }
+        for c in "Typed".chars() {
+            engine.send(Request::FormKey { doc: 1, key: FormKey::Char(c as u32), modifiers: 0 });
+        }
+        // Ctrl+S right away, the cursor still in the field.
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| match r {
+            Response::Saved { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let saved = widgets(&engine, 2).into_iter().find(|w| w.name == "name").unwrap();
+        assert_eq!(saved.value, "Typed", "the text in the focused field is saved");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_replies_keep_special_characters() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        // € – “ ” • are in PDFDocEncoding but not Latin-1; ä is in both.
+        let text = "Costs 5 € – “ok” • ä";
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange {
+                replies: Some(vec![Reply { author: "Bob".into(), date: String::new(), text: text.into() }]),
+                ..Default::default()
+            },
+        });
+        let _ = annots(&engine, 1);
+        let path = std::env::temp_dir().join(format!("magic-pdf-reply-chars-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let doc = lopdf::Document::load(&path).unwrap();
+        let copy = doc
+            .objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .find(|d| d.has(b"IRT"))
+            .expect("reply annotation");
+        let raw = copy.get(b"Contents").unwrap().as_str().unwrap();
+        let decoded = match raw.strip_prefix(&[0xFE, 0xFF]) {
+            Some(u) => String::from_utf16(&u.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>()).unwrap(),
+            None => raw.iter().map(|&b| b as char).collect(),
+        };
+        assert_eq!(decoded, text);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn optimized_copies_do_not_draw_saved_replies() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange {
+                replies: Some(vec![Reply { author: "Bob".into(), date: String::new(), text: "ok".into() }]),
+                ..Default::default()
+            },
+        });
+        let _ = annots(&engine, 1);
+        let path = std::env::temp_dir().join(format!("magic-pdf-opt-replies-{}.pdf", std::process::id()));
+        engine.send(Request::SaveOptimized { doc: 1, path: path.clone(), image_dpi: None });
+        recv_until(&engine, |r| match r {
+            Response::Exported { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        open(&engine, 2, path.clone());
+        let (size, rgba) = render(&engine, 2, 0, Rotation::R0, 0);
+        let yellow = (0..40)
+            .flat_map(|i| (0..40).map(move |j| (300.0 + i as f32 * 2.5, 300.0 + j as f32 * 2.5)))
+            .filter(|&(x, y)| {
+                let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
+                let p = &rgba[(py * size[0] + px) * 4..][..3];
+                p[0] > 200 && p[1] > 180 && p[2] < 100
+            })
+            .count();
+        assert_eq!(yellow, 0, "replies are not drawn in the optimized copy");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A two-page PDF with bookmarks as other applications write them: one to a spot
+    /// on page 1 (red, bold), one opening a web page, one collapsed with a child.
+    fn bookmarks_pdf() -> Vec<u8> {
+        use lopdf::{Document, Object, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let page = |doc: &mut Document| doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()] });
+        let (p1, p2) = (page(&mut doc), page(&mut doc));
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![p1.into(), p2.into()], "Count" => 2 }));
+        let root = doc.new_object_id();
+        let (a, b, c, c1) = (doc.new_object_id(), doc.new_object_id(), doc.new_object_id(), doc.new_object_id());
+        let s = |t: &str| Object::string_literal(t);
+        doc.objects.insert(a, Object::Dictionary(dictionary! {
+            "Title" => s("Chapter"), "Parent" => root, "Next" => b,
+            "Dest" => vec![p1.into(), "XYZ".into(), 0.into(), 500.into(), 0.into()],
+            "C" => vec![1.into(), 0.into(), 0.into()], "F" => 2,
+        }));
+        doc.objects.insert(b, Object::Dictionary(dictionary! {
+            "Title" => s("Website"), "Parent" => root, "Prev" => a, "Next" => c,
+            "A" => dictionary! { "S" => "URI", "URI" => s("https://example.com/") },
+        }));
+        doc.objects.insert(c, Object::Dictionary(dictionary! {
+            "Title" => s("Appendix"), "Parent" => root, "Prev" => b, "First" => c1, "Last" => c1, "Count" => -1,
+            "Dest" => vec![p2.into(), "Fit".into()],
+        }));
+        doc.objects.insert(c1, Object::Dictionary(dictionary! {
+            "Title" => s("Tables"), "Parent" => c, "Dest" => vec![p2.into(), "XYZ".into(), 0.into(), 300.into(), 0.into()],
+        }));
+        doc.objects.insert(root, Object::Dictionary(dictionary! { "Type" => "Outlines", "First" => a, "Last" => c, "Count" => 3 }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id, "Outlines" => root });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn editing_one_bookmark_keeps_the_others_as_they_were() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-bookmarks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("in.pdf");
+        std::fs::write(&src, bookmarks_pdf()).unwrap();
+        let info = open(&engine, 1, src);
+        let mut outline = info.outline.clone();
+        assert_eq!(outline.len(), 3);
+        outline[0].title = "Chapter one".into();
+        engine.send(Request::EditPages { doc: 1, op: PageOp::SetOutline { outline } });
+        pages_changed(&engine);
+        let out = dir.join("out.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+
+        let doc = lopdf::Document::load(&out).unwrap();
+        let by_title = |t: &str| {
+            doc.objects
+                .values()
+                .filter_map(|o| o.as_dict().ok())
+                .find(|d| d.get(b"Title").ok().and_then(|o| lopdf::decode_text_string(o).ok()).as_deref() == Some(t))
+                .unwrap_or_else(|| panic!("bookmark {t}"))
+                .clone()
+        };
+        let chapter = by_title("Chapter one");
+        let dest = chapter.get(b"Dest").unwrap().as_array().unwrap();
+        assert_eq!(dest[1].as_name().unwrap(), b"XYZ", "still goes to the spot on the page");
+        assert_eq!(chapter.get(b"F").unwrap().as_i64().unwrap(), 2, "still bold");
+        assert!(chapter.has(b"C"), "still red");
+        let web = by_title("Website");
+        let action = match web.get(b"A").unwrap() {
+            lopdf::Object::Reference(id) => doc.get_dictionary(*id).unwrap().clone(),
+            o => o.as_dict().unwrap().clone(),
+        };
+        assert_eq!(action.get(b"S").unwrap().as_name().unwrap(), b"URI", "still opens the web page");
+        assert!(by_title("Appendix").get(b"Count").unwrap().as_i64().unwrap() < 0, "still collapsed");
+        let tables = by_title("Tables");
+        assert_eq!(tables.get(b"Dest").unwrap().as_array().unwrap()[1].as_name().unwrap(), b"XYZ");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn undoing_a_page_edit_keeps_text_typed_before_it() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-form-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("typed.pdf");
+        let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
+        let (_serial, engine) = start();
+        open(&engine, 1, form);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let text = widgets(&engine, 1).into_iter().find(|w| w.name == "name").unwrap();
+        let (x, y) = ((text.rect.left + text.rect.right) / 2.0, (text.rect.bottom + text.rect.top) / 2.0);
+        for event in [FormMouse::Move, FormMouse::Down, FormMouse::Up] {
+            engine.send(Request::FormMouse { doc: 1, page: 0, event, x, y, modifiers: 0 });
+        }
+        for c in "Typed".chars() {
+            engine.send(Request::FormKey { doc: 1, key: FormKey::Char(c as u32), modifiers: 0 });
+        }
+        // Rotate the page while still typing, then undo the rotation.
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Rotate { pages: vec![0], quarter_turns: 1 } });
+        pages_changed(&engine);
+        engine.send(Request::Undo { doc: 1 });
+        pages_changed(&engine);
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| match r {
+            Response::Saved { .. } => Some(()),
+            Response::Error { message, .. } => panic!("{message}"),
+            _ => None,
+        });
+        open(&engine, 2, out);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let saved = widgets(&engine, 2).into_iter().find(|w| w.name == "name").unwrap();
+        assert_eq!(saved.value, "Typed", "undoing the rotation keeps the typed text");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// One page with a square and a reply to it written by another application, and a
+    /// reply to that reply.
+    fn reply_thread_pdf() -> Vec<u8> {
+        use lopdf::{Document, Object, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        let rect = || vec![300.into(), 300.into(), 400.into(), 400.into()];
+        let square = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Square", "Rect" => rect(), "C" => vec![0.into(), 0.into(), 1.into()],
+            "Contents" => Object::string_literal("Check"), "P" => page_id,
+        });
+        let reply = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => square, "RT" => "R",
+            "Contents" => Object::string_literal("Done"), "T" => Object::string_literal("Bob"), "P" => page_id,
+        });
+        let reply2 = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => reply,
+            "Contents" => Object::string_literal("Thanks"), "T" => Object::string_literal("Ann"), "P" => page_id,
+        });
+        doc.objects.insert(page_id, Object::Dictionary(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Annots" => vec![square.into(), reply.into(), reply2.into()],
+        }));
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn deleting_an_annotation_deletes_its_replies() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-thread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("thread.pdf");
+        std::fs::write(&src, reply_thread_pdf()).unwrap();
+        open(&engine, 1, src);
+        engine.send(Request::ScanAnnots { doc: 1 });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        assert_eq!(sq.other_replies.len(), 2, "both replies shown in its thread");
+        engine.send(Request::DeleteAnnot { doc: 1, page: 0, index: sq.index });
+        let _ = annots(&engine, 1);
+        let out = dir.join("deleted.pdf");
+        engine.send(Request::Save { doc: 1, path: out.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = lopdf::Document::load(&out).unwrap();
+        let page = *saved.get_pages().values().next().unwrap();
+        let annots = saved.get_page_annotations(page).map(|a| a.len()).unwrap_or(0);
+        assert_eq!(annots, 0, "no orphaned replies left on the page");
         std::fs::remove_dir_all(dir).ok();
     }
 

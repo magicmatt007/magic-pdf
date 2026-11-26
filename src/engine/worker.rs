@@ -77,6 +77,9 @@ impl OpenDoc {
     /// hidden in the live document (so they can be restored); they are stripped for
     /// real from a temporary copy.
     fn export(&self, lib: Lib) -> Result<Vec<u8>, String> {
+        // Text still being typed into a form field is committed only when the field
+        // loses focus; without this it would be missing from the file.
+        self.doc.kill_form_focus();
         let bytes = self.export_pdfium(lib)?;
         // Replies as other applications read them. lopdf cannot rewrite encrypted
         // files; those keep magic-pdf's replies only.
@@ -838,6 +841,8 @@ impl Worker {
             self.error(doc, format!("{}: {e}", op.label()));
             return false;
         }
+        // Text still being typed in a form field belongs to the state undo restores.
+        od.doc.kill_form_focus();
         let snapshot = match od.doc.save_to_bytes() {
             Ok(b) => Arc::new(b),
             Err(e) => {
@@ -1325,6 +1330,8 @@ impl Worker {
             Ok(()) => {
                 od.saved_at = Some(od.undo.len());
                 od.form_dirty = false;
+                // Saving ended editing of a form field.
+                self.send(Response::FormFocus { doc, page: None });
                 self.send(Response::Saved {
                     doc,
                     path: path.to_path_buf(),
@@ -1419,16 +1426,51 @@ fn remember_colors(od: &mut OpenDoc, page: usize, index: usize, change: &AnnotCh
     }
 }
 
-/// Writes to a temporary file next to `path`, then renames it into place.
+/// Writes to a temporary file next to `path`, then renames it into place, so a failed
+/// save leaves the old file intact.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // Through a symbolic link: replace the file it points to, not the link.
+    let resolved;
+    let path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        resolved = std::fs::canonicalize(path)?;
+        resolved.as_path()
+    } else {
+        path
+    };
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dir.join(format!(".{name}.magic-pdf-{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        // On disk before it replaces the old file: after a crash or power cut the
+        // file is either the old or the new one, never empty.
+        f.sync_all()?;
+    }
     if let Ok(meta) = std::fs::metadata(path) {
         let _ = std::fs::set_permissions(&tmp, meta.permissions());
     }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+#[cfg(all(test, unix))]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn saving_through_a_symbolic_link_updates_its_target() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (target, link) = (dir.join("real.pdf"), dir.join("link.pdf"));
+        std::fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomically(&link, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new", "the target has the new content");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no temporary file left");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

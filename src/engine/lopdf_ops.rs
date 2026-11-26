@@ -34,15 +34,48 @@ fn text_string(s: &str) -> Object {
     }
 }
 
+/// The file's bookmark dictionaries in reading order (depth first), as PDFium reads
+/// them: `OutlineOrigin::index` points into this list.
+fn old_outline(doc: &Document) -> Vec<Dictionary> {
+    const MAX_ITEMS: usize = 20_000;
+    const MAX_DEPTH: usize = 64;
+    fn walk(doc: &Document, first: Option<ObjectId>, depth: usize, out: &mut Vec<Dictionary>, seen: &mut std::collections::HashSet<ObjectId>) {
+        let mut next = first;
+        while let Some(id) = next {
+            if out.len() >= MAX_ITEMS || !seen.insert(id) {
+                return;
+            }
+            let Ok(d) = doc.get_dictionary(id) else { return };
+            out.push(d.clone());
+            let child = d.get(b"First").and_then(Object::as_reference).ok();
+            if depth < MAX_DEPTH {
+                walk(doc, child, depth + 1, out, seen);
+            }
+            next = d.get(b"Next").and_then(Object::as_reference).ok();
+        }
+    }
+    let first = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|o| o.as_reference().ok())
+        .and_then(|r| doc.get_dictionary(r).ok())
+        .and_then(|o| o.get(b"First").and_then(Object::as_reference).ok());
+    let mut out = Vec::new();
+    walk(doc, first, 0, &mut out, &mut std::collections::HashSet::new());
+    out
+}
+
 /// Replaces the document's bookmarks with `items`.
 pub fn write_outline(bytes: &[u8], items: &[OutlineItem]) -> Result<Vec<u8>, String> {
     let mut doc = load(bytes)?;
     let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    let old = old_outline(&doc);
     let root = if items.is_empty() {
         None
     } else {
         let root_id = doc.new_object_id();
-        let (first, last, count) = add_items(&mut doc, &pages, items, root_id);
+        let (first, last, count) = add_items(&mut doc, &pages, &old, items, root_id);
         let mut root = Dictionary::new();
         root.set("Type", Object::Name(b"Outlines".to_vec()));
         root.set("First", Object::Reference(first));
@@ -65,7 +98,7 @@ pub fn write_outline(bytes: &[u8], items: &[OutlineItem]) -> Result<Vec<u8>, Str
 
 /// Adds `items` as children of `parent`; returns the first and last child and the
 /// number of visible descendants.
-fn add_items(doc: &mut Document, pages: &[ObjectId], items: &[OutlineItem], parent: ObjectId) -> (ObjectId, ObjectId, i64) {
+fn add_items(doc: &mut Document, pages: &[ObjectId], old: &[Dictionary], items: &[OutlineItem], parent: ObjectId) -> (ObjectId, ObjectId, i64) {
     let ids: Vec<ObjectId> = items.iter().map(|_| doc.new_object_id()).collect();
     let mut visible = 0;
     for (i, item) in items.iter().enumerate() {
@@ -78,17 +111,42 @@ fn add_items(doc: &mut Document, pages: &[ObjectId], items: &[OutlineItem], pare
         if i + 1 < ids.len() {
             d.set("Next", Object::Reference(ids[i + 1]));
         }
-        if let Some(&page) = item.page.and_then(|p| pages.get(p)) {
+        // What magic-pdf does not edit comes from the bookmark it was read as.
+        let was = item.origin.and_then(|o| Some((old.get(o.index)?, o.page)));
+        for key in [b"C".as_slice(), b"F"] {
+            if let Some(v) = was.and_then(|(w, _)| w.get(key).ok()) {
+                d.set(key.to_vec(), v.clone());
+            }
+        }
+        let kept_target = match was {
+            // Not re-pointed: the original target (a spot on the page, a named
+            // destination, a web link, …).
+            Some((w, page)) if page == item.page && (w.has(b"Dest") || w.has(b"A")) => {
+                for key in [b"Dest".as_slice(), b"A"] {
+                    if let Ok(v) = w.get(key) {
+                        d.set(key.to_vec(), v.clone());
+                    }
+                }
+                true
+            }
+            _ => false,
+        };
+        if !kept_target && let Some(&page) = item.page.and_then(|p| pages.get(p)) {
             d.set("Dest", Object::Array(vec![Object::Reference(page), Object::Name(b"Fit".to_vec())]));
         }
         visible += 1;
         if !item.children.is_empty() {
-            let (first, last, count) = add_items(doc, pages, &item.children, ids[i]);
+            let (first, last, count) = add_items(doc, pages, old, &item.children, ids[i]);
             d.set("First", Object::Reference(first));
             d.set("Last", Object::Reference(last));
-            // Positive: shown expanded.
-            d.set("Count", Object::Integer(count));
-            visible += count;
+            // Positive: shown expanded; negative: collapsed (as it was).
+            let collapsed = was.and_then(|(w, _)| w.get(b"Count").ok()?.as_i64().ok()).is_some_and(|c| c < 0);
+            if collapsed {
+                d.set("Count", Object::Integer(-count));
+            } else {
+                d.set("Count", Object::Integer(count));
+                visible += count;
+            }
         }
         doc.objects.insert(ids[i], Object::Dictionary(d));
     }
@@ -100,7 +158,8 @@ fn add_items(doc: &mut Document, pages: &[ObjectId], items: &[OutlineItem], pare
 /// (PDF/A, e.g. e-invoices, requires that).
 pub fn compress(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut doc = load(bytes)?;
-    doc.delete_zero_length_streams();
+    // Empty streams stay: an empty appearance is often deliberate (an annotation that
+    // draws nothing, an empty form field), and removing it lets viewers draw a default.
     doc.prune_objects();
     for obj in doc.objects.values_mut() {
         if let Object::Stream(stream) = obj {
@@ -251,15 +310,6 @@ pub const REPLIES_KEY: &str = "MagicPdfReplies";
 /// Marks the standard reply annotations magic-pdf writes from those.
 pub const REPLY_COPY_KEY: &str = "MagicPdfReply";
 
-/// A PDF text string as Rust text (UTF-16 with byte order mark, else PDFDocEncoding,
-/// read as Latin-1).
-fn decode_text(bytes: &[u8]) -> String {
-    match bytes.strip_prefix(&[0xFE, 0xFF]) {
-        Some(utf16) => String::from_utf16_lossy(&utf16.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect::<Vec<_>>()),
-        None => bytes.iter().map(|&b| b as char).collect(),
-    }
-}
-
 /// Writes magic-pdf's replies as standard reply annotations (/IRT), which other
 /// applications show in the annotation's comment thread. Copies written before are
 /// replaced, so they always match magic-pdf's own list. Returns `bytes` unchanged
@@ -298,8 +348,9 @@ pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 doc.objects.remove(&id); // an earlier copy: written anew below
                 continue;
             }
-            if let Ok(json) = dict.get(REPLIES_KEY.as_bytes()).and_then(Object::as_str) {
-                let replies: Vec<super::commands::Reply> = serde_json::from_str(&decode_text(json)).unwrap_or_default();
+            // A text string: UTF-16 or PDFDocEncoding (where € or – are not Latin-1).
+            if let Ok(json) = dict.get(REPLIES_KEY.as_bytes()).and_then(lopdf::decode_text_string) {
+                let replies: Vec<super::commands::Reply> = serde_json::from_str(&json).unwrap_or_default();
                 if !replies.is_empty() {
                     parents.push((id, dict.get(b"Rect").ok().cloned(), replies));
                 }

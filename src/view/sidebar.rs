@@ -535,7 +535,7 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
             let item = OutlineItem {
                 title: title.clone(),
                 page: Some(current),
-                children: Vec::new(),
+                ..Default::default()
             };
             let path = oe::insert_after(&mut outline, after.as_deref(), item);
             // Name it right away.
