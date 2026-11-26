@@ -339,6 +339,31 @@ pub fn appearance(shape: Shape, pts: &[(f32, f32)], color: Rgb, width: f32, fill
 }
 
 /// Ink strokes standing in for a shape (for viewers that redraw ink annotations).
+/// Appearance of a freehand drawing: its strokes with round ends, and the rectangle
+/// they cover (strokes plus half the line width). Drawn by magic-pdf because PDFium
+/// enlarges the stored rectangle each time it draws an ink annotation.
+pub fn freehand_appearance(strokes: &[Vec<(f32, f32)>], color: Rgb, width: f32) -> Option<(PdfBox, String)> {
+    let pts: Vec<(f32, f32)> = strokes.iter().flatten().copied().collect();
+    let first = pts.first()?;
+    let half = width / 2.0;
+    let mut r = PdfBox { left: first.0, bottom: first.1, right: first.0, top: first.1 };
+    for &(x, y) in &pts {
+        r = r.union(PdfBox { left: x, bottom: y, right: x, top: y });
+    }
+    let r = r.expand(half.max(0.5));
+    let mut s = format!("q 1 J 1 j {width:.2} w {} RG\n", rgb(color));
+    for stroke in strokes.iter().filter(|st| !st.is_empty()) {
+        s += &format!("{:.2} {:.2} m ", stroke[0].0, stroke[0].1);
+        // A single point is drawn as a dot.
+        let rest = if stroke.len() == 1 { &stroke[..] } else { &stroke[1..] };
+        for p in rest {
+            s += &format!("{:.2} {:.2} l ", p.0, p.1);
+        }
+        s += "S\n";
+    }
+    Some((r, s + "Q\n"))
+}
+
 pub fn ink_strokes(shape: Shape, pts: &[(f32, f32)], width: f32) -> Vec<Vec<(f32, f32)>> {
     match shape {
         _ if pts.len() < 2 => Vec::new(),

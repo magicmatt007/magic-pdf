@@ -2623,6 +2623,117 @@ mod tests {
     }
 
     #[test]
+    fn undo_restores_annotations_exactly() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let r = |l: f32, b: f32| PdfBox { left: l, bottom: b, right: l + 80.0, top: b + 40.0 };
+        let mut boxed = NewAnnot::new(AnnotKind::FreeText, r(100.0, 500.0), [200, 0, 0]);
+        boxed.interior = Some([255, 255, 200]);
+        boxed.contents = "Box".into();
+        let mut ink = NewAnnot::new(AnnotKind::Ink, r(250.0, 500.0), [0, 0, 200]);
+        ink.ink = vec![vec![(250.0, 500.0), (290.0, 530.0), (330.0, 540.0)]];
+        let mut poly = NewAnnot::new(AnnotKind::Polygon, r(100.0, 300.0), [0, 120, 0]);
+        poly.vertices = vec![(100.0, 300.0), (180.0, 300.0), (140.0, 340.0)];
+        for a in [boxed, ink, poly] {
+            engine.send(Request::AddAnnot { doc: 1, page: 0, annot: a });
+        }
+        let list = |engine: &Engine| {
+            let mut l = page_annots(engine, 1, 0);
+            l.sort_by_key(|a| a.index);
+            l
+        };
+        let before = list(&engine);
+        assert_eq!(before.len(), 3);
+        let changes = [
+            (before[0].index, AnnotChange { color: Some([0, 0, 0]), interior: Some(None), ..Default::default() }),
+            (before[0].index, AnnotChange { rect: Some(r(120.0, 450.0)), ..Default::default() }),
+            (before[1].index, AnnotChange { rect: Some(r(260.0, 400.0)), ..Default::default() }),
+            (before[2].index, AnnotChange { rect: Some(PdfBox { left: 100.0, bottom: 300.0, right: 260.0, top: 380.0 }), ..Default::default() }),
+        ];
+        for (index, change) in changes.clone() {
+            engine.send(Request::UpdateAnnot { doc: 1, page: 0, index, change });
+        }
+        let changed = list(&engine);
+        assert_ne!(changed[0].color, before[0].color);
+        for _ in 0..changes.len() {
+            engine.send(Request::Undo { doc: 1 });
+        }
+        let after = list(&engine);
+        let near = |a: &PdfBox, b: &PdfBox| (a.left - b.left).abs() < 0.6 && (a.bottom - b.bottom).abs() < 0.6 && (a.right - b.right).abs() < 0.6 && (a.top - b.top).abs() < 0.6;
+        for (a, b) in after.iter().zip(&before) {
+            assert_eq!((a.kind, a.color, a.interior), (b.kind, b.color, b.interior), "{:?}", a.kind);
+            assert!(near(&a.rect, &b.rect), "{:?}: {:?} vs {:?}", a.kind, a.rect, b.rect);
+            assert_eq!(a.vertices.len(), b.vertices.len());
+            for (p, q) in a.vertices.iter().zip(&b.vertices) {
+                assert!((p.0 - q.0).abs() < 0.01 && (p.1 - q.1).abs() < 0.01, "{:?}: {p:?} vs {q:?}", a.kind);
+            }
+        }
+        // Moving and undoing again and again: the freehand drawing's frame does not creep.
+        let ink = before[1].index;
+        for _ in 0..4 {
+            engine.send(Request::UpdateAnnot { doc: 1, page: 0, index: ink, change: AnnotChange { rect: Some(r(260.0, 400.0)), ..Default::default() } });
+            engine.send(Request::Undo { doc: 1 });
+        }
+        let again = list(&engine);
+        assert!(near(&again[1].rect, &before[1].rect), "{:?} vs {:?}", again[1].rect, before[1].rect);
+    }
+
+    #[test]
+    fn review_status_is_saved_so_other_applications_show_it() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange { status: Some("Accepted".into()), ..Default::default() },
+        });
+        let _ = annots(&engine, 1);
+        let dir = std::env::temp_dir().join(format!("magic-pdf-status-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = |doc: DocId, name: &str| {
+            let path = dir.join(name);
+            engine.send(Request::Save { doc, path: path.clone() });
+            recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+            path
+        };
+        let states = |path: &std::path::Path| {
+            let doc = lopdf::Document::load(path).unwrap();
+            doc.objects
+                .values()
+                .filter_map(|o| o.as_dict().ok())
+                .filter(|d| d.has(b"IRT") && d.has(b"State"))
+                .map(|d| {
+                    let t = |k: &[u8]| lopdf::decode_text_string(d.get(k).unwrap()).unwrap();
+                    (t(b"StateModel"), t(b"State"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = save(1, "first.pdf");
+        assert_eq!(states(&first), vec![("Review".to_string(), "Accepted".to_string())]);
+
+        // Reopened: the status once, not also as a reply. Back to "None": no state left.
+        open(&engine, 2, first);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let sq = annots(&engine, 2).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        assert_eq!(sq.status, "Accepted");
+        assert!(sq.other_replies.is_empty());
+        engine.send(Request::UpdateAnnot {
+            doc: 2,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange { status: Some(String::new()), ..Default::default() },
+        });
+        let _ = annots(&engine, 2);
+        let second = save(2, "second.pdf");
+        assert!(states(&second).is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn optimized_copies_are_smaller_and_still_show_the_picture() {
         let (_serial, engine) = start();
         let dir = std::env::temp_dir().join(format!("magic-pdf-opt-{}", std::process::id()));
