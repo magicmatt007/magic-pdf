@@ -15,7 +15,7 @@ use super::textbox::{self, BoxStyle, FontSet, GlyphSource};
 
 /// Private keys for comment threads and review status.
 use super::lopdf_ops::REPLIES_KEY;
-const STATUS_KEY: &str = "MagicPdfStatus";
+use super::lopdf_ops::STATUS_KEY;
 
 pub type Lib = &'static dyn PdfiumLibraryBindings;
 
@@ -2374,8 +2374,23 @@ impl<'d> Page<'d> {
                 };
                 lib.FPDFAnnot_GetRect(a.handle, &mut r);
                 let current = to_box(&r);
+                // A freehand drawing's frame is its strokes plus half the line width:
+                // fit the strokes into the new frame minus that margin, so the frame
+                // ends up exactly where it was dragged.
+                let margin = if subtype == SUBTYPE_INK && shape.is_none() {
+                    let (mut hr, mut vr, mut w) = (0.0, 0.0, 1.0);
+                    lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut w);
+                    (w / 2.0).max(0.5)
+                } else {
+                    0.0
+                };
+                let inner = |b: PdfBox| b.expand(-margin);
+                let usable = |b: &PdfBox| b.right - b.left > 0.01 && b.top - b.bottom > 0.01;
                 let t = match (change.transform, change.rect) {
                     (Some(t), _) => t,
+                    (None, Some(new)) if margin > 0.0 && usable(&inner(current)) && usable(&inner(new)) => {
+                        rect_transform(inner(current), inner(new))
+                    }
                     (None, Some(new)) => rect_transform(current, new),
                     (None, None) => unreachable!(),
                 };
@@ -2415,6 +2430,21 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "M", &pdf_date_now());
         }
         Ok(undo)
+    }
+
+    /// An ink annotation's strokes.
+    fn ink_paths(&self, a: &Annot) -> Vec<Vec<(f32, f32)>> {
+        let lib = self.lib();
+        unsafe {
+            (0..lib.FPDFAnnot_GetInkListCount(a.handle))
+                .map(|i| {
+                    let len = lib.FPDFAnnot_GetInkListPath(a.handle, i, ptr::null_mut(), 0);
+                    let mut pts = vec![FS_POINTF { x: 0.0, y: 0.0 }; len as usize];
+                    lib.FPDFAnnot_GetInkListPath(a.handle, i, pts.as_mut_ptr(), len);
+                    pts.into_iter().map(|p| (p.x, p.y)).collect()
+                })
+                .collect()
+        }
     }
 
     /// Applies a transform to an ink annotation's strokes.
@@ -2457,7 +2487,18 @@ impl<'d> Page<'d> {
                 self.refresh_text_box(index, fonts)
             }
             SUBTYPE_INK => {
-                let Some(shape) = Shape::parse(&self.annot_string(&a, SHAPE_KEY)) else { return Ok(()) };
+                let Some(shape) = Shape::parse(&self.annot_string(&a, SHAPE_KEY)) else {
+                    // A freehand drawing.
+                    unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null()) };
+                    let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
+                    unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width) };
+                    let color = self.annot_color(&a, COLORTYPE_COLOR).unwrap_or([0, 0, 0]);
+                    let Some((rect, content)) = shapes::freehand_appearance(&self.ink_paths(&a), color, width) else {
+                        return Ok(());
+                    };
+                    self.set_rect(&a, rect);
+                    return set_ap(&content);
+                };
                 unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null()) };
                 let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
                 unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width) };

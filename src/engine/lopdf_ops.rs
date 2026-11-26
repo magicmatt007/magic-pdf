@@ -309,16 +309,18 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
 pub const REPLIES_KEY: &str = "MagicPdfReplies";
 /// Marks the standard reply annotations magic-pdf writes from those.
 pub const REPLY_COPY_KEY: &str = "MagicPdfReply";
+/// Private key holding magic-pdf's review status of an annotation.
+pub const STATUS_KEY: &str = "MagicPdfStatus";
 
 /// Writes magic-pdf's replies as standard reply annotations (/IRT), which other
 /// applications show in the annotation's comment thread. Copies written before are
 /// replaced, so they always match magic-pdf's own list. Returns `bytes` unchanged
 /// when there is nothing to do.
 pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    // "MagicPdfRepl" starts both keys.
-    let needle = b"MagicPdfRepl";
-    if !bytes.windows(needle.len()).any(|w| w == needle) {
-        return Ok(bytes.to_vec()); // neither replies nor copies of them
+    // "MagicPdfRepl" starts the reply keys.
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    if !has(b"MagicPdfRepl") && !has(STATUS_KEY.as_bytes()) {
+        return Ok(bytes.to_vec()); // no replies, statuses or copies of them
     }
     let mut doc = load(bytes)?;
     let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
@@ -349,15 +351,43 @@ pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 continue;
             }
             // A text string: UTF-16 or PDFDocEncoding (where € or – are not Latin-1).
-            if let Ok(json) = dict.get(REPLIES_KEY.as_bytes()).and_then(lopdf::decode_text_string) {
-                let replies: Vec<super::commands::Reply> = serde_json::from_str(&json).unwrap_or_default();
-                if !replies.is_empty() {
-                    parents.push((id, dict.get(b"Rect").ok().cloned(), replies));
-                }
+            let replies: Vec<super::commands::Reply> = dict
+                .get(REPLIES_KEY.as_bytes())
+                .and_then(lopdf::decode_text_string)
+                .ok()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            let status = dict
+                .get(STATUS_KEY.as_bytes())
+                .and_then(lopdf::decode_text_string)
+                .ok()
+                .filter(|s| super::commands::STATUSES[1..].contains(&s.as_str()));
+            if !replies.is_empty() || status.is_some() {
+                parents.push((id, dict.get(b"Rect").ok().cloned(), replies, status));
             }
             keep.push(r);
         }
-        for (parent, rect, replies) in parents {
+        for (parent, rect, replies, status) in parents {
+            // The review status as other applications store it: a hidden state
+            // annotation in reply to the annotation (state model "Review").
+            if let Some(state) = status {
+                let mut d = Dictionary::new();
+                d.set("Type", Object::Name(b"Annot".to_vec()));
+                d.set("Subtype", Object::Name(b"Text".to_vec()));
+                if let Some(rect) = &rect {
+                    d.set("Rect", rect.clone());
+                }
+                d.set("IRT", Object::Reference(parent));
+                d.set("P", Object::Reference(page_id));
+                // Hidden, print, no zoom, no rotation (as Acrobat writes states).
+                d.set("F", 30);
+                d.set("StateModel", text_string("Review"));
+                d.set("State", text_string(&state));
+                d.set("Contents", text_string(&state));
+                d.set("NM", text_string(&format!("magic-pdf-state-{}-{}", parent.0, parent.1)));
+                d.set(REPLY_COPY_KEY, text_string("1"));
+                keep.push(Object::Reference(doc.add_object(d)));
+            }
             for (n, reply) in replies.iter().enumerate() {
                 let appearance = doc.add_object(lopdf::Stream::new(
                     lopdf::dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()] },

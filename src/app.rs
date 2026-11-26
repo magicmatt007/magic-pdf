@@ -741,7 +741,22 @@ impl App {
             .map(Path::to_path_buf)
     }
 
+    /// Sends a comment or text box text still being typed, and everything queued for the
+    /// engine, so a request sent next (save, print) includes it. True if text was pending.
+    fn commit_edits(&mut self, doc: DocId) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == doc) else { return false };
+        let pending = tab.commit_annot_edit();
+        let queued: Vec<Request> = tab.outbox.drain(..).collect();
+        for req in queued {
+            self.send(req);
+        }
+        pending
+    }
+
     fn save_active(&mut self, save_as: bool) {
+        if let Some(doc) = self.tabs.get(self.active).map(|t| t.id) {
+            self.commit_edits(doc);
+        }
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.info().is_none() {
             return;
@@ -765,7 +780,13 @@ impl App {
 
     /// Closes tabs, asking first if any has unsaved changes.
     fn request_close(&mut self, docs: Vec<DocId>, quit: bool) {
-        let dirty = docs.iter().any(|d| self.tabs.iter().any(|t| t.id == *d && t.dirty));
+        // Text still being typed counts as an unsaved change (the engine has not
+        // confirmed it yet).
+        let mut pending = false;
+        for &d in &docs {
+            pending |= self.commit_edits(d);
+        }
+        let dirty = pending || docs.iter().any(|d| self.tabs.iter().any(|t| t.id == *d && t.dirty));
         if dirty {
             self.close_intent = Some(CloseIntent {
                 docs,
@@ -1623,6 +1644,9 @@ impl App {
 
     /// Opens the print dialog (CUPS) or the native one (Windows).
     fn print(&mut self) {
+        if let Some(doc) = self.tabs.get(self.active).map(|t| t.id) {
+            self.commit_edits(doc);
+        }
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.info().is_none() {
             return;
@@ -3361,7 +3385,12 @@ impl App {
         if !ctx.input(|i| i.viewport().close_requested()) || self.allow_quit {
             return;
         }
-        if self.tabs.iter().any(|t| t.dirty) {
+        let ids: Vec<DocId> = self.tabs.iter().map(|t| t.id).collect();
+        let mut pending = false;
+        for d in ids {
+            pending |= self.commit_edits(d);
+        }
+        if pending || self.tabs.iter().any(|t| t.dirty) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.close_intent.is_none() {
                 let docs = self.tabs.iter().map(|t| t.id).collect();

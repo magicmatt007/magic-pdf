@@ -411,34 +411,36 @@ impl DocTab {
 
     /// Ends editing the selected annotation, saving its comment if it was changed.
     pub fn deselect_annot(&mut self) {
-        let Some(sel) = self.selected_annot.take() else { return };
-        if let Some(edit) = &sel.rich {
-            let rich = edit.to_rich(&sel.contents);
-            if rich != edit.committed && self.annot(sel.page, sel.index).is_some() {
-                self.outbox.push(Request::UpdateAnnot {
-                    doc: self.id,
-                    page: sel.page,
-                    index: sel.index,
-                    change: crate::engine::AnnotChange {
-                        rich: Some(rich),
-                        ..Default::default()
-                    },
-                });
+        self.commit_annot_edit();
+        self.selected_annot = None;
+    }
+
+    /// Sends the comment or text box text still being typed (it is otherwise sent when
+    /// the field loses focus). Called before saving, printing and closing so the typing
+    /// is not missing. Returns true if there was something to send.
+    pub fn commit_annot_edit(&mut self) -> bool {
+        let id = self.id;
+        let exists = self.selected_annot.as_ref().is_some_and(|s| self.annot(s.page, s.index).is_some());
+        let Some(sel) = self.selected_annot.as_mut().filter(|_| exists) else { return false };
+        let change = match &mut sel.rich {
+            Some(edit) => {
+                let rich = edit.to_rich(&sel.contents);
+                if rich == edit.committed {
+                    return false;
+                }
+                edit.committed = rich.clone();
+                crate::engine::AnnotChange { rich: Some(rich), ..Default::default() }
             }
-            return;
-        }
-        let changed = self.annot(sel.page, sel.index).is_some() && sel.contents != sel.committed;
-        if changed {
-            self.outbox.push(Request::UpdateAnnot {
-                doc: self.id,
-                page: sel.page,
-                index: sel.index,
-                change: crate::engine::AnnotChange {
-                    contents: Some(sel.contents),
-                    ..Default::default()
-                },
-            });
-        }
+            None if sel.contents != sel.committed => crate::engine::AnnotChange {
+                contents: Some(sel.contents.clone()),
+                ..Default::default()
+            },
+            None => return false,
+        };
+        sel.committed = sel.contents.clone();
+        let (page, index) = (sel.page, sel.index);
+        self.outbox.push(Request::UpdateAnnot { doc: id, page, index, change });
+        true
     }
 
     pub fn select_annot(&mut self, page: usize, index: usize) {
@@ -927,6 +929,49 @@ mod tests {
         assert!(f.matches(&bare));
         f.with_comment = false;
         assert!(f.matches(&text_box));
+    }
+
+    #[test]
+    fn a_comment_still_being_typed_is_sent_before_saving() {
+        let mut tab = DocTab::new(1, PathBuf::from("c.pdf"), LayoutMode::SinglePage, None);
+        tab.annots.insert(
+            0,
+            vec![AnnotInfo {
+                index: 3,
+                kind: AnnotKind::Square,
+                rect: PdfBox { left: 0.0, bottom: 0.0, right: 10.0, top: 10.0 },
+                color: None,
+                interior: None,
+                width: 1.0,
+                contents: "old".into(),
+                author: String::new(),
+                modified: String::new(),
+                font_size: None,
+                text_color: None,
+                rich: None,
+                vertices: Vec::new(),
+                replies: Vec::new(),
+                other_replies: Vec::new(),
+                status: String::new(),
+                in_reply_to: None,
+            }],
+        );
+        tab.select_annot(0, 3);
+        assert!(!tab.commit_annot_edit(), "nothing typed yet");
+        tab.selected_annot.as_mut().unwrap().contents = "typed".into();
+        assert!(tab.commit_annot_edit());
+        let sent: Vec<_> = tab
+            .outbox
+            .iter()
+            .filter_map(|r| match r {
+                Request::UpdateAnnot { index: 3, change, .. } => change.contents.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec!["typed".to_string()]);
+        assert!(!tab.commit_annot_edit(), "sent once");
+        tab.deselect_annot();
+        assert_eq!(tab.outbox.len(), 1, "not sent again when the comment closes");
     }
 
     #[test]
