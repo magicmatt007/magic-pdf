@@ -146,11 +146,30 @@ impl RenderKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct OutlineItem {
     pub title: String,
     pub page: Option<usize>,
     pub children: Vec<OutlineItem>,
+    /// Where the bookmark came from in the file (None: added in magic-pdf). Lets a
+    /// rewrite keep what magic-pdf does not edit: the exact target, links, colour,
+    /// style and whether it is collapsed.
+    pub origin: Option<OutlineOrigin>,
+}
+
+/// A bookmark's place in the file's bookmark tree as read: its position counted in
+/// reading order (depth first) and the page it pointed to then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutlineOrigin {
+    pub index: usize,
+    pub page: Option<usize>,
+}
+
+/// Bookmarks are equal when they look the same; where they came from does not count.
+impl PartialEq for OutlineItem {
+    fn eq(&self, o: &Self) -> bool {
+        self.title == o.title && self.page == o.page && self.children == o.children
+    }
 }
 
 #[derive(Clone, Debug, Default)]

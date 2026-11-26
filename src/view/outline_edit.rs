@@ -96,6 +96,7 @@ mod tests {
             title: title.into(),
             page: None,
             children,
+            origin: None,
         }
     }
 
