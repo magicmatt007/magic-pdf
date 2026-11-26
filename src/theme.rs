@@ -18,8 +18,11 @@ struct Palette {
     bg: Color32,
     /// Menu bar, toolbar, sidebar, status bar.
     chrome: Color32,
-    /// Windows, popups and text fields.
+    /// Windows and popups.
     surface: Color32,
+    /// Text fields: set off from windows and from the toolbar, so an empty field
+    /// (without a hint text) can still be seen.
+    text_field: Color32,
     /// Buttons at rest, and their hovered and pressed shades.
     field: Color32,
     field_hover: Color32,
@@ -38,6 +41,7 @@ const LIGHT: Palette = Palette {
     bg: Color32::from_rgb(0xFA, 0xF8, 0xF5),
     chrome: Color32::from_rgb(0xF3, 0xEF, 0xEA),
     surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    text_field: Color32::from_rgb(0xF6, 0xF2, 0xEC),
     field: Color32::from_rgb(0xE9, 0xE4, 0xDD),
     field_hover: Color32::from_rgb(0xE1, 0xDA, 0xD0),
     field_active: Color32::from_rgb(0xD6, 0xCC, 0xBF),
@@ -53,9 +57,11 @@ const DARK: Palette = Palette {
     bg: Color32::from_rgb(0x1A, 0x17, 0x14),
     chrome: Color32::from_rgb(0x21, 0x1D, 0x19),
     surface: Color32::from_rgb(0x2B, 0x26, 0x20),
-    field: Color32::from_rgb(0x2E, 0x29, 0x23),
-    field_hover: Color32::from_rgb(0x38, 0x32, 0x2B),
-    field_active: Color32::from_rgb(0x44, 0x3C, 0x33),
+    text_field: Color32::from_rgb(0x17, 0x14, 0x11),
+    // Lighter than `surface`, so buttons and empty checkboxes show inside windows.
+    field: Color32::from_rgb(0x3A, 0x33, 0x2B),
+    field_hover: Color32::from_rgb(0x45, 0x3D, 0x34),
+    field_active: Color32::from_rgb(0x52, 0x48, 0x3D),
     border: Color32::from_rgb(0x3A, 0x34, 0x2D),
     text: Color32::from_rgb(0xF2, 0xEE, 0xE8),
     tint: Color32::from_rgb(0x4A, 0x2A, 0x14),
@@ -84,7 +90,7 @@ fn apply(v: &mut egui::Visuals, p: &Palette) {
     v.menu_corner_radius = CornerRadius::same(10);
     v.faint_bg_color = p.bg;
     v.extreme_bg_color = p.surface;
-    v.text_edit_bg_color = Some(p.surface);
+    v.text_edit_bg_color = Some(p.text_field);
     v.code_bg_color = p.field;
     v.hyperlink_color = p.link;
     v.selection.bg_fill = p.tint;

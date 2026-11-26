@@ -530,4 +530,5 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("With comment", "Mit Kommentar"),
     ("Only annotations someone wrote a comment on or replied to", "Nur Anmerkungen mit einem geschriebenen Kommentar oder einer Antwort"),
     ("Open containing folder", "Speicherort öffnen"),
+    ("Quit", "Beenden"),
 ];
