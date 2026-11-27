@@ -1,6 +1,8 @@
 //! PDFium engine: a dedicated worker thread that owns the PDFium library and all open
 //! documents. PDFium is not thread-safe, so the UI only talks to it through channels.
 
+#[cfg(windows)]
+pub mod cert_store;
 pub mod commands;
 pub mod compare;
 mod lopdf_ops;
@@ -12,6 +14,7 @@ mod print_windows;
 pub mod redact;
 pub mod rich;
 pub mod shapes;
+pub mod sign;
 pub mod signatures;
 pub mod textbox;
 mod worker;
@@ -24,6 +27,7 @@ pub use commands::*;
 pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, Watermark, move_target};
 pub use pdf::{FIELD_TEXT, pdf_date_now};
 pub use rich::{Align, CharStyle, RichText};
+pub use worker::write_atomically;
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -112,7 +116,11 @@ mod tests {
     }
 
     fn sample() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
+        fixtures().join("sample.pdf")
+    }
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
     /// PDFium is not thread-safe, so engine tests run one at a time.
@@ -1226,6 +1234,7 @@ mod tests {
         let (_serial, engine) = start();
         open(&engine, 1, sample());
         let mut tb = NewAnnot::new(AnnotKind::FreeText, pdf_box(100.0, 600.0, 300.0, 640.0), [0, 0, 0]);
+        tb.author = "Anna".into();
         let mut rich = RichText::plain("Hello world", CharStyle::default());
         rich.spans[0].style.bold = true;
         tb.rich = Some(rich.clone());
@@ -1240,6 +1249,7 @@ mod tests {
         let (orig, copy) =
             (list.iter().find(|x| x.index == t).unwrap(), list.iter().find(|x| x.index == pasted).unwrap());
         assert_eq!(copy.rich.as_ref().unwrap().text(), "Hello world");
+        assert_eq!((orig.author.as_str(), copy.author.as_str()), ("Anna", "Anna"), "the copy keeps the author");
         assert!(copy.rich.as_ref().unwrap().spans[0].style.bold);
         assert_eq!((copy.rect.left - orig.rect.left, copy.rect.top - orig.rect.top), (12.0, -12.0));
         // Undo removes the pasted copy.
@@ -2129,6 +2139,39 @@ mod tests {
         let saved = widgets(&engine, 2).into_iter().find(|w| w.name == "name").unwrap();
         assert_eq!(saved.value, "Typed", "the text in the focused field is saved");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_a_signed_file_keeps_its_signature() {
+        let (_serial, engine) = start();
+        let original = std::fs::read(fixtures().join("signed.pdf")).unwrap();
+        let info = open(&engine, 1, fixtures().join("signed.pdf"));
+        assert_eq!(info.signatures.len(), 1);
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange {
+                replies: Some(vec![Reply { author: "Bob".into(), date: String::new(), text: "Agreed".into() }]),
+                ..Default::default()
+            },
+        });
+        let _ = annots(&engine, 1);
+        let path = std::env::temp_dir().join(format!("magic-pdf-signed-save-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = std::fs::read(&path).unwrap();
+        assert!(saved.len() > original.len() && saved.starts_with(&original), "appended, not rewritten");
+        let info = open(&engine, 2, path.clone());
+        assert_eq!(info.signatures.len(), 1);
+        assert_eq!(info.signatures[0].check.status, signatures::SigStatus::ChangedAfter, "{:?}", info.signatures[0]);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let list = annots(&engine, 2);
+        assert!(list.iter().any(|a| a.kind == AnnotKind::Square && a.replies.len() == 1), "the edit was saved");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

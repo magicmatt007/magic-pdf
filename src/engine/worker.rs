@@ -97,14 +97,21 @@ impl OpenDoc {
         let bytes = self.export_pdfium(lib)?;
         // Replies as other applications read them. lopdf cannot rewrite encrypted
         // files; those keep magic-pdf's replies only.
-        Ok(super::lopdf_ops::write_standard_replies(&bytes).unwrap_or_else(|e| {
+        Ok(super::lopdf_ops::write_standard_replies(&bytes, self.signed()).unwrap_or_else(|e| {
             log::warn!("replies not written for other applications: {e}");
             bytes
         }))
     }
 
+    /// A signed file is saved as an incremental update: the signed bytes stay as
+    /// they are, so the signatures stay intact ("changed after signing").
+    fn signed(&self) -> bool {
+        !self.signatures.is_empty()
+    }
+
     fn export_pdfium(&self, lib: Lib) -> Result<Vec<u8>, String> {
-        let bytes = self.doc.save_to_bytes()?;
+        let save = |doc: &Doc| if self.signed() { doc.save_incremental() } else { doc.save_to_bytes() };
+        let bytes = save(&self.doc)?;
         if self.deleted.is_empty() {
             return Ok(bytes);
         }
@@ -118,7 +125,7 @@ impl OpenDoc {
                 page.remove_annots(&indices);
             }
         }
-        copy.save_to_bytes()
+        save(&copy)
     }
 }
 
@@ -1360,7 +1367,7 @@ fn remember_colors(od: &mut OpenDoc, page: usize, index: usize, change: &AnnotCh
 
 /// Writes to a temporary file next to `path`, then renames it into place, so a failed
 /// save leaves the old file intact.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // Through a symbolic link: replace the file it points to, not the link.
     let resolved;
     let path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {

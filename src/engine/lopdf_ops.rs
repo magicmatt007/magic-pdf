@@ -329,13 +329,48 @@ pub const STATUS_KEY: &str = "MagicPdfStatus";
 /// applications show in the annotation's comment thread. Copies written before are
 /// replaced, so they always match magic-pdf's own list. Returns `bytes` unchanged
 /// when there is nothing to do.
-pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
+/// With `incremental`, only the changed objects are appended to `bytes` (for signed
+/// files: the signed bytes stay as they are).
+pub fn write_standard_replies(bytes: &[u8], incremental: bool) -> Result<Vec<u8>, String> {
     // "MagicPdfRepl" starts the reply keys.
     let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
     if !has(b"MagicPdfRepl") && !has(STATUS_KEY.as_bytes()) {
         return Ok(bytes.to_vec()); // no replies, statuses or copies of them
     }
+    if incremental {
+        return rewrite_incrementally(bytes, standard_replies);
+    }
     let mut doc = load(bytes)?;
+    standard_replies(&mut doc);
+    save(&mut doc, false)
+}
+
+/// Applies `change` to the document and appends the objects it changed or added to
+/// `bytes` as an incremental update.
+fn rewrite_incrementally(bytes: &[u8], change: impl FnOnce(&mut Document)) -> Result<Vec<u8>, String> {
+    let before = load(bytes)?;
+    let mut after = before.clone();
+    change(&mut after);
+    let changed: Vec<(ObjectId, Object)> = after
+        .objects
+        .iter()
+        .filter(|(id, obj)| before.objects.get(id) != Some(*obj))
+        .map(|(id, obj)| (*id, obj.clone()))
+        .collect();
+    if changed.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    let mut inc = lopdf::IncrementalDocument::create_from(bytes.to_vec(), before);
+    for (id, obj) in changed {
+        inc.new_document.objects.insert(id, obj);
+    }
+    inc.new_document.max_id = inc.new_document.max_id.max(after.max_id);
+    let mut out = Vec::new();
+    inc.save_to(&mut out).map_err(|e| format!("could not write the PDF: {e}"))?;
+    Ok(out)
+}
+
+fn standard_replies(doc: &mut Document) {
     let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
     for page_id in pages {
         let annots_obj = match doc.get_dictionary(page_id).ok().and_then(|p| p.get(b"Annots").ok()).cloned() {
@@ -442,7 +477,6 @@ pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
             }
         }
     }
-    save(&mut doc, false)
 }
 
 #[cfg(test)]

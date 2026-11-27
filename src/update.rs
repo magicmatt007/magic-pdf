@@ -195,7 +195,7 @@ fn download_path(asset: &Asset) -> Result<PathBuf, String> {
     Ok(dir.join(&asset.name))
 }
 
-fn curl() -> Command {
+pub(crate) fn curl() -> Command {
     let mut cmd = Command::new("curl");
     #[cfg(windows)]
     {

@@ -148,6 +148,20 @@ pub struct Settings {
     /// Recent files kept at the top of the list (never pushed out).
     pub pinned: Vec<PathBuf>,
     pub signatures: Vec<Signature>,
+    /// Digital signatures: the certificate file last used (never its password).
+    pub sign_certificate: Option<PathBuf>,
+    /// Windows: sign with a certificate from the Windows certificate store (its
+    /// thumbprint in `sign_store_certificate`) instead of a certificate file.
+    pub sign_from_store: bool,
+    pub sign_store_certificate: Option<String>,
+    /// Add a trusted timestamp from `timestamp_server` when signing.
+    pub sign_timestamp: bool,
+    pub sign_reason: String,
+    pub sign_location: String,
+    /// Picture for digital signatures: an index into `signatures`, or none (text only).
+    pub sign_picture: Option<usize>,
+    /// RFC 3161 timestamp server.
+    pub timestamp_server: String,
     /// User interface language: "auto" (the system's), "en" or "de".
     pub language: String,
     files: HashMap<String, StoredFileState>,
@@ -178,6 +192,14 @@ impl Default for Settings {
             session_active: 0,
             pinned: Vec::new(),
             signatures: Vec::new(),
+            sign_certificate: None,
+            sign_from_store: cfg!(windows),
+            sign_store_certificate: None,
+            sign_timestamp: true,
+            sign_reason: String::new(),
+            sign_location: String::new(),
+            sign_picture: Some(0),
+            timestamp_server: "http://timestamp.digicert.com".into(),
             language: "auto".into(),
             files: HashMap::new(),
             base: None,

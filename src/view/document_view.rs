@@ -43,6 +43,8 @@ pub enum Tool {
     Distance,
     Area,
     Redact,
+    /// Drag a box for a digital signature (with a certificate).
+    DigitalSign,
 }
 
 impl Tool {
@@ -80,7 +82,8 @@ impl Tool {
 
     /// Tools that draw by dragging on the page.
     fn draws(self) -> bool {
-        matches!(self, Tool::Ink | Tool::Rect | Tool::Ellipse | Tool::TextBox) || self.shape_kind().is_some()
+        matches!(self, Tool::Ink | Tool::Rect | Tool::Ellipse | Tool::TextBox | Tool::DigitalSign)
+            || self.shape_kind().is_some()
     }
 
     pub fn markup_kind(self) -> Option<AnnotKind> {
@@ -113,6 +116,7 @@ impl Tool {
             Tool::Distance => icons::RULER,
             Tool::Area => icons::AREA,
             Tool::Redact => icons::EYE_SLASH,
+            Tool::DigitalSign => icons::CERTIFICATE,
         })
     }
 
@@ -137,6 +141,7 @@ impl Tool {
             Tool::Distance => "Measure distance (M), Shift: 45° steps",
             Tool::Area => "Measure area: click the corners, double-click or Enter to finish",
             Tool::Redact => "Redact (X): drag over an area or click a word to mark it; click a mark to unmark it",
+            Tool::DigitalSign => "Sign with certificate: drag a box where the signature goes",
         })
     }
 
@@ -160,7 +165,7 @@ impl Tool {
             Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
             Tool::Signature => Some(&mut style.signature_color),
             Tool::Stamp => None,
-            Tool::Hand | Tool::SelectText | Tool::Redact => None,
+            Tool::Hand | Tool::SelectText | Tool::Redact | Tool::DigitalSign => None,
         }
     }
 }
@@ -890,6 +895,17 @@ fn draw_tool_input(
                 let rect = PdfBox { left, bottom: top - 20.0, right, top };
                 create(tab, page, cx, AnnotKind::FreeText, rect, style.textbox_border, Vec::new(), Vec::new());
             }
+            Draft::Shape { page, start, end } if cx.tool == Tool::DigitalSign => {
+                let rect = PdfBox {
+                    left: start.x.min(end.x),
+                    bottom: start.y.min(end.y),
+                    right: start.x.max(end.x),
+                    top: start.y.max(end.y),
+                };
+                if rect.right - rect.left >= 20.0 && rect.top - rect.bottom >= 10.0 {
+                    tab.sign_box = Some((page, rect));
+                }
+            }
             Draft::Shape { page, start, end } => {
                 let rect = PdfBox {
                     left: start.x.min(end.x),
@@ -1403,7 +1419,9 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
                 return;
             };
             let r = Rect::from_two_pos(a, b);
-            let (stroke, fill) = if cx.tool == Tool::TextBox {
+            let (stroke, fill) = if cx.tool == Tool::DigitalSign {
+                (Stroke::new(1.5, crate::theme::ACCENT), crate::theme::ACCENT.gamma_multiply(0.12))
+            } else if cx.tool == Tool::TextBox {
                 (
                     Stroke::new(cx.style.textbox_border_width.max(1.0) * zoom, rgb(cx.style.textbox_border)),
                     Color32::TRANSPARENT,
