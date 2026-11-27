@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "magic-pdf"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "block2 0.6.2",
  "crossbeam-channel",
