@@ -1,6 +1,6 @@
 [package]
 name = "magic-pdf"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 description = "Lightweight cross-platform PDF viewer with horizontal page layout"
 license = "AGPL-3.0-or-later"
@@ -21,6 +21,8 @@ p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std",
 p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 # Signing: reading certificate files (.p12/.pfx).
 p12-keystore = "0.4"
+# Local time for annotation and signature dates.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 directories = "6"
 open = "5"
 log = "0.4"

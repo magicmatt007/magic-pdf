@@ -59,6 +59,8 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   dialog says how), as an invisible text layer over the page image
 - Compare two PDFs (File → Compare with): side by side, scrolling and zooming together,
   changed words marked red and green, a bar to step through pages with changes
+- File → Combine files: several PDFs, in an order you choose, into one new PDF, with a
+  bookmark for each file that keeps the file's own bookmarks
 - File → Export pages as pictures: PNG or JPEG at a chosen resolution, one file per page
 - Digital signatures checked on opening: a bar shows whether the signed content is
   unchanged, the signature matches the signer's certificate and the file was changed
@@ -69,8 +71,9 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   the Windows certificate store (smart cards included), and the box shows your signature
   picture, name and date. PAdES signatures (`ETSI.CAdES.detached`), optionally with a
   trusted timestamp (RFC 3161, DigiCert by default; `timestamp_server` in the settings
-  file). Signed files are saved as incremental updates afterwards, so adding comments
-  keeps earlier signatures intact
+  file). Signed files are saved as incremental updates afterwards, so comments, page
+  changes, bookmarks and properties keep earlier signatures intact (only redaction
+  rewrites the file, and says so)
 - E-invoices (ZUGFeRD / Factur-X) shown and checked, document properties (Ctrl+D) and
   File → Save optimized copy (lossless compression, pictures scaled down to a chosen dpi);
   see [E-invoices](#e-invoices)

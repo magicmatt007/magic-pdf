@@ -109,6 +109,18 @@ impl OpenDoc {
         !self.signatures.is_empty()
     }
 
+    /// The document's bytes to rewrite with lopdf: for a signed file the signed
+    /// bytes unchanged with the edits appended.
+    fn base_bytes(&self) -> Result<Vec<u8>, String> {
+        if self.signed() { self.doc.save_incremental() } else { self.doc.save_to_bytes() }
+    }
+
+    /// For a signed file: a lopdf rewrite of `base` turned back into an incremental
+    /// update, so the signatures stay intact.
+    fn keep_signatures(&self, base: &[u8], rewritten: Vec<u8>) -> Result<Vec<u8>, String> {
+        if self.signed() { super::lopdf_ops::as_increment(base, &rewritten) } else { Ok(rewritten) }
+    }
+
     fn export_pdfium(&self, lib: Lib) -> Result<Vec<u8>, String> {
         let save = |doc: &Doc| if self.signed() { doc.save_incremental() } else { doc.save_to_bytes() };
         let bytes = save(&self.doc)?;
@@ -444,19 +456,23 @@ impl Worker {
                 Ok(message) => self.send(Response::Exported { message }),
                 Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
             },
-            Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => match self
-                .export_images(doc, &pages, dpi, jpeg, &dir, &stem)
-            {
-                Ok(n) => self.send(Response::Exported { message: format!("Saved {n} pictures to {}", dir.display()) }),
-                Err(e) => self.error(doc, format!("Exporting pictures failed: {e}")),
-            },
+            Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => {
+                match self.export_images(doc, &pages, dpi, jpeg, &dir, &stem) {
+                    Ok(count) => self.send(Response::Exported { message: Exported::Pictures { count, dir } }),
+                    Err(e) => self.error(doc, format!("Exporting pictures failed: {e}")),
+                }
+            }
             Request::ExtractPages { doc, pages, path } => {
                 let result = self.extract(doc, &[(pages, path.clone())]);
                 match result {
-                    Ok(()) => self.send(Response::Exported { message: format!("Saved pages to {}", path.display()) }),
+                    Ok(()) => self.send(Response::Exported { message: Exported::Pages { path } }),
                     Err(e) => self.error(doc, format!("Extracting pages failed: {e}")),
                 }
             }
+            Request::Combine { files, out, bookmarks } => match self.combine(&files, &out, bookmarks) {
+                Ok(()) => self.send(Response::Combined { path: out }),
+                Err((file, error)) => self.send(Response::CombineFailed { file, error }),
+            },
             Request::SplitDocument { doc, every, dir, stem } => {
                 let count = self.docs.get(&doc).map_or(0, |od| od.doc.page_count());
                 let every = every.max(1);
@@ -469,9 +485,7 @@ impl Worker {
                     .collect();
                 let n = parts.len();
                 match self.extract(doc, &parts) {
-                    Ok(()) => {
-                        self.send(Response::Exported { message: format!("Split into {n} files in {}", dir.display()) })
-                    }
+                    Ok(()) => self.send(Response::Exported { message: Exported::Split { files: n, dir } }),
                     Err(e) => self.error(doc, format!("Splitting failed: {e}")),
                 }
             }
@@ -927,7 +941,7 @@ impl Worker {
         Ok(written)
     }
 
-    fn save_optimized(&self, doc: DocId, path: &Path, image_dpi: Option<u32>) -> Result<String, String> {
+    fn save_optimized(&self, doc: DocId, path: &Path, image_dpi: Option<u32>) -> Result<Exported, String> {
         let od = self.docs.get(&doc).ok_or("document not open")?;
         let original = od.export(self.lib)?;
         let mut bytes = original.clone();
@@ -950,13 +964,39 @@ impl Worker {
             }
         };
         write_atomically(path, &compressed).map_err(|e| e.to_string())?;
-        let mb = |n: usize| format!("{:.1} MB", n as f64 / 1_048_576.0);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut msg = format!("Saved {name}: {} → {}", mb(original.len()), mb(compressed.len()));
-        if images > 0 {
-            msg += &format!(" ({images} image{} scaled down)", if images == 1 { "" } else { "s" });
+        Ok(Exported::Optimized { name, before: original.len(), after: compressed.len(), images })
+    }
+
+    /// Combines `files` into `out`. On failure: the file that could not be read, or
+    /// none if writing failed.
+    fn combine(&self, files: &[PathBuf], out: &Path, bookmarks: bool) -> Result<(), (Option<PathBuf>, String)> {
+        let dest = Doc::create(self.lib).map_err(|e| (None, e))?;
+        let mut outline = Vec::new();
+        for file in files {
+            let unreadable = |e: String| (Some(file.clone()), e);
+            let data = std::fs::read(file).map_err(|e| unreadable(e.to_string()))?;
+            let src = Doc::open_bytes(self.lib, data, None).map_err(|e| match e {
+                super::pdf::OpenError::Password => unreadable(PASSWORD_PROTECTED.into()),
+                super::pdf::OpenError::Other(e) => unreadable(e),
+            })?;
+            let start = dest.page_count();
+            dest.import_pages(&src, None, start).map_err(unreadable)?;
+            if bookmarks {
+                let title = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                outline.push(OutlineItem {
+                    title,
+                    page: Some(start),
+                    children: shifted(src.outline(), start),
+                    origin: None,
+                });
+            }
         }
-        Ok(msg)
+        let mut bytes = dest.save_to_bytes().map_err(|e| (None, e))?;
+        if bookmarks {
+            bytes = super::lopdf_ops::write_outline(&bytes, &outline).map_err(|e| (None, e))?;
+        }
+        write_atomically(out, &bytes).map_err(|e| (None, e.to_string()))
     }
 
     /// Writes each (pages, path) to a new PDF, taken from the document with all edits.
@@ -1290,8 +1330,9 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
     match op {
         PageOp::SetProperties { properties } => {
             od.doc.kill_form_focus();
-            let bytes =
-                super::lopdf_ops::write_properties(&od.doc.save_to_bytes()?, properties, &super::pdf::pdf_date_now())?;
+            let base = od.base_bytes()?;
+            let bytes = super::lopdf_ops::write_properties(&base, properties, &super::pdf::pdf_date_now())?;
+            let bytes = od.keep_signatures(&base, bytes)?;
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
             Ok(0)
         }
@@ -1312,7 +1353,9 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
         }
         PageOp::SetOutline { outline } => {
             od.doc.kill_form_focus();
-            let bytes = super::lopdf_ops::write_outline(&od.doc.save_to_bytes()?, outline)?;
+            let base = od.base_bytes()?;
+            let bytes = super::lopdf_ops::write_outline(&base, outline)?;
+            let bytes = od.keep_signatures(&base, bytes)?;
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
             Ok(0)
         }
@@ -1393,6 +1436,19 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Bookmarks of a file whose pages now start at `start` (as new bookmarks).
+fn shifted(items: Vec<OutlineItem>, start: usize) -> Vec<OutlineItem> {
+    items
+        .into_iter()
+        .map(|i| OutlineItem {
+            title: i.title,
+            page: i.page.map(|p| p + start),
+            children: shifted(i.children, start),
+            origin: None,
+        })
+        .collect()
 }
 
 #[cfg(all(test, unix))]

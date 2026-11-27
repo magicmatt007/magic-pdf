@@ -275,7 +275,7 @@ impl SignDialog {
         let date = pdf_date_now();
         let mut lines = vec![
             tf("Digitally signed by {name}", &[("name", &id.name)]),
-            tf("Date: {date}", &[("date", &format!("{} UTC", format_pdf_date(&date)))]),
+            tf("Date: {date}", &[("date", &format_pdf_date(&date))]),
         ];
         let (reason, location) = (settings.sign_reason.trim(), settings.sign_location.trim());
         if !reason.is_empty() {

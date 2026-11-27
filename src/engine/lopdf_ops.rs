@@ -351,18 +351,41 @@ fn rewrite_incrementally(bytes: &[u8], change: impl FnOnce(&mut Document)) -> Re
     let before = load(bytes)?;
     let mut after = before.clone();
     change(&mut after);
+    increment(bytes, before, &after)
+}
+
+/// `rewritten` (a rewrite of `original` that kept the object numbers, as lopdf's
+/// saves here do) as an incremental update of `original`: the original bytes, then
+/// the objects that changed. Signatures in `original` stay intact.
+pub fn as_increment(original: &[u8], rewritten: &[u8]) -> Result<Vec<u8>, String> {
+    increment(original, load(original)?, &load(rewritten)?)
+}
+
+fn increment(bytes: &[u8], before: Document, after: &Document) -> Result<Vec<u8>, String> {
+    // Streams also record where they were in the file: compare what they hold.
+    let same = |a: &Object, b: &Object| match (a, b) {
+        (Object::Stream(a), Object::Stream(b)) => a.dict == b.dict && a.content == b.content,
+        _ => a == b,
+    };
     let changed: Vec<(ObjectId, Object)> = after
         .objects
         .iter()
-        .filter(|(id, obj)| before.objects.get(id) != Some(*obj))
+        .filter(|(id, obj)| before.objects.get(id).is_none_or(|old| !same(old, obj)))
         .map(|(id, obj)| (*id, obj.clone()))
         .collect();
-    if changed.is_empty() {
+    let trailer_changed =
+        [b"Root".as_slice(), b"Info"].iter().any(|k| before.trailer.get(k).ok() != after.trailer.get(k).ok());
+    if changed.is_empty() && !trailer_changed {
         return Ok(bytes.to_vec());
     }
     let mut inc = lopdf::IncrementalDocument::create_from(bytes.to_vec(), before);
     for (id, obj) in changed {
         inc.new_document.objects.insert(id, obj);
+    }
+    for key in [b"Root".as_slice(), b"Info"] {
+        if let Ok(v) = after.trailer.get(key) {
+            inc.new_document.trailer.set(key, v.clone());
+        }
     }
     inc.new_document.max_id = inc.new_document.max_id.max(after.max_id);
     let mut out = Vec::new();
