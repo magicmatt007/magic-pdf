@@ -901,6 +901,66 @@ mod tests {
         assert!(id.valid_now && id.for_signing);
     }
 
+    /// Writes tests/fixtures/signed-timestamped.pdf (run by make_timestamped.sh): signed
+    /// with the RSA test certificate, timestamped by a throwaway authority (openssl ts).
+    #[test]
+    #[ignore]
+    fn make_timestamped_fixture() {
+        let dir = std::env::temp_dir().join(format!("magic-pdf-tsa-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |cmd: &str| {
+            let ok = std::process::Command::new("sh").arg("-c").arg(cmd).current_dir(&dir).status().unwrap().success();
+            assert!(ok, "{cmd}");
+        };
+        sh("openssl req -x509 -newkey rsa:2048 -nodes -keyout tsa.key -out tsa.crt -days 3650 \
+            -subj '/CN=magic-pdf Test Timestamps' -addext 'extendedKeyUsage=critical,timeStamping' 2>/dev/null");
+        std::fs::write(
+            dir.join("tsa.cnf"),
+            "[ tsa ]\ndefault_tsa = t\n[ t ]\nserial = ./serial\nsigner_cert = ./tsa.crt\nsigner_key = ./tsa.key\n\
+             signer_digest = sha256\ndefault_policy = 1.2.3.4.1\ndigests = sha256\naccuracy = secs:1\n\
+             ess_cert_id_alg = sha256\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("serial"), "01\n").unwrap();
+        let tsa = |_: &str, request: &[u8]| -> Result<Vec<u8>, String> {
+            std::fs::write(dir.join("req.tsq"), request).unwrap();
+            sh("openssl ts -reply -config tsa.cnf -queryfile req.tsq -out resp.tsr 2>/dev/null");
+            Ok(std::fs::read(dir.join("resp.tsr")).unwrap())
+        };
+        let id = SigningIdentity::from_pkcs12(&fixture("signer-rsa.p12"), "magic").unwrap();
+        let mut req = request(0);
+        req.timestamp_url = Some("local".into());
+        let signed = sign(&fixture("sample.pdf"), &req, &id, &tsa).unwrap();
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signed-timestamped.pdf"),
+            signed,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn timestamps_are_read_and_checked() {
+        let file = fixture("signed-timestamped.pdf");
+        let doc = Document::load_mem(&file).unwrap();
+        let sig = doc
+            .objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .find(|d| d.get(b"Type").and_then(Object::as_name).ok() == Some(b"Sig".as_slice()))
+            .unwrap();
+        let r: Vec<usize> =
+            sig.get(b"ByteRange").unwrap().as_array().unwrap().iter().map(|o| o.as_i64().unwrap() as usize).collect();
+        let contents = sig.get(b"Contents").unwrap().as_str().unwrap().to_vec();
+        let c = check(&file, &[(r[0], r[1]), (r[2], r[3])], &contents, "ETSI.CAdES.detached");
+        assert_eq!(c.status, SigStatus::Valid);
+        assert_eq!(c.chain.len(), 1, "the signer's certificate");
+        let ts = c.timestamp.expect("timestamped");
+        assert!(ts.valid, "{ts:?}");
+        assert_eq!(ts.authority, "magic-pdf Test Timestamps");
+        assert!(ts.time.starts_with("D:20") && ts.time.ends_with('Z'), "{}", ts.time);
+    }
+
     #[test]
     fn a_failed_timestamp_stops_signing() {
         let id = SigningIdentity::from_pkcs12(&fixture("signer-rsa.p12"), "magic").unwrap();

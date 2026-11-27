@@ -157,6 +157,57 @@ impl Drop for Annot {
     }
 }
 
+/// The text of a text object.
+unsafe fn text_of(lib: Lib, obj: FPDF_PAGEOBJECT, text_page: FPDF_TEXTPAGE) -> String {
+    unsafe {
+        let len = lib.FPDFTextObj_GetText(obj, text_page, ptr::null_mut(), 0) as usize;
+        let mut buf = vec![0u16; len.div_ceil(2).max(1)];
+        lib.FPDFTextObj_GetText(obj, text_page, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong);
+        utf16_buf_to_string(&buf)
+    }
+}
+
+/// The standard font closest to `font`: Times for serif fonts, Courier for
+/// monospaced ones, else Helvetica; bold and italic as the font is.
+/// A character the standard fonts can show (Windows-1252, the WinAnsi encoding).
+fn in_win_ansi(c: char) -> bool {
+    matches!(c, ' '..='~' | '\u{a0}'..='\u{ff}') || "€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ".contains(c)
+}
+
+unsafe fn standard_font_for(lib: Lib, font: FPDF_FONT) -> &'static str {
+    let (mut serif, mut mono, mut bold, mut italic) = (false, false, false, false);
+    if !font.is_null() {
+        unsafe {
+            let len = lib.FPDFFont_GetBaseFontName(font, ptr::null_mut(), 0);
+            let mut buf = vec![0u8; len];
+            lib.FPDFFont_GetBaseFontName(font, buf.as_mut_ptr().cast(), len);
+            let name = String::from_utf8_lossy(&buf).to_lowercase();
+            // Flags (PDF 1.7, 9.8.2): FixedPitch 1, Serif 2, Italic 64.
+            let flags = lib.FPDFFont_GetFlags(font);
+            mono = flags & 1 != 0 || name.contains("courier") || name.contains("mono");
+            serif = flags & 2 != 0 || name.contains("times") || name.contains("serif") && !name.contains("sans");
+            let mut angle = 0;
+            let has_angle = lib.is_true(lib.FPDFFont_GetItalicAngle(font, &mut angle));
+            italic = flags & 64 != 0 || has_angle && angle != 0 || name.contains("italic") || name.contains("oblique");
+            bold = lib.FPDFFont_GetWeight(font) >= 600 || name.contains("bold");
+        }
+    }
+    match (mono, serif, bold, italic) {
+        (true, _, false, false) => "Courier",
+        (true, _, true, false) => "Courier-Bold",
+        (true, _, false, true) => "Courier-Oblique",
+        (true, _, true, true) => "Courier-BoldOblique",
+        (false, true, false, false) => "Times-Roman",
+        (false, true, true, false) => "Times-Bold",
+        (false, true, false, true) => "Times-Italic",
+        (false, true, true, true) => "Times-BoldItalic",
+        (false, false, false, false) => "Helvetica",
+        (false, false, true, false) => "Helvetica-Bold",
+        (false, false, false, true) => "Helvetica-Oblique",
+        (false, false, true, true) => "Helvetica-BoldOblique",
+    }
+}
+
 fn utf16_buf_to_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
@@ -440,6 +491,8 @@ impl Doc {
                     reason: utf16_buf_to_string(&rbuf),
                     time,
                     permission: lib.FPDFSignatureObj_GetDocMDPPermission(sig),
+                    trust: None,
+                    timestamp_trusted: None,
                 })
             })
             .collect()
@@ -537,6 +590,10 @@ impl Doc {
                     }
                 }
                 self.close_all_pages();
+                Ok(0)
+            }
+            PageOp::EditText { page, index, text } => {
+                self.page(*page).ok_or(t("page not found"))?.edit_text_object(*index, text)?;
                 Ok(0)
             }
             PageOp::Flatten { pages } => {
@@ -778,6 +835,122 @@ impl Doc {
 }
 
 impl<'d> Page<'d> {
+    /// The page's visible text objects (not inside form XObjects).
+    pub fn text_objects(&self) -> Vec<super::commands::TextObject> {
+        const INVISIBLE: FPDF_TEXT_RENDERMODE = 3;
+        const FPDF_PAGEOBJ_TEXT: c_int = 1;
+        let lib = self.lib();
+        let Some(tp) = self.text_page() else { return Vec::new() };
+        let mut out = Vec::new();
+        unsafe {
+            for i in 0..lib.FPDFPage_CountObjects(self.handle).max(0) {
+                let obj = lib.FPDFPage_GetObject(self.handle, i);
+                if obj.is_null()
+                    || lib.FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT
+                    || lib.FPDFTextObj_GetTextRenderMode(obj) == INVISIBLE
+                {
+                    continue;
+                }
+                let text = text_of(lib, obj, tp.handle);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                if !lib.is_true(lib.FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) {
+                    continue;
+                }
+                let mut size = 0.0f32;
+                lib.FPDFTextObj_GetFontSize(obj, &mut size);
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                lib.FPDFPageObj_GetMatrix(obj, &mut m);
+                let scale = (m.c * m.c + m.d * m.d).sqrt();
+                let (mut cr, mut cg, mut cb, mut ca) = (0, 0, 0, 255);
+                lib.FPDFPageObj_GetFillColor(obj, &mut cr, &mut cg, &mut cb, &mut ca);
+                out.push(super::commands::TextObject {
+                    index: i as usize,
+                    text,
+                    rect: PdfBox { left: l, bottom: b, right: r, top: t },
+                    size: size * if scale > 0.0 { scale } else { 1.0 },
+                    color: [cr as u8, cg as u8, cb as u8],
+                });
+            }
+        }
+        out
+    }
+
+    /// Replaces the text of the text object at `index`. Keeps its font when the font
+    /// can show the new text, else uses the closest standard font (the embedded fonts
+    /// of many PDFs hold only the characters they use).
+    pub fn edit_text_object(&self, index: usize, text: &str) -> Result<(), String> {
+        const FPDF_PAGEOBJ_TEXT: c_int = 1;
+        let lib = self.lib();
+        let doc = self.doc.handle;
+        let obj = unsafe { lib.FPDFPage_GetObject(self.handle, index as c_int) };
+        if obj.is_null() || unsafe { lib.FPDFPageObj_GetType(obj) } != FPDF_PAGEOBJ_TEXT {
+            return Err(t("the text was not found on the page").into());
+        }
+        let tp = self.text_page().ok_or(t("could not render the page"))?;
+        let wtext = wide(text);
+        unsafe {
+            let old_text = text_of(lib, obj, tp.handle);
+            // Same font: if it shows the new text, done.
+            if lib.is_true(lib.FPDFText_SetText(obj, wtext.as_ptr())) && self.shows(obj, text) {
+                return self.generate();
+            }
+            let font = lib.FPDFTextObj_GetFont(obj);
+            let name = standard_font_for(lib, font);
+            let standard = lib.FPDFText_LoadStandardFont(doc, name);
+            let mut size = 0.0f32;
+            lib.FPDFTextObj_GetFontSize(obj, &mut size);
+            let new =
+                if standard.is_null() { ptr::null_mut() } else { lib.FPDFPageObj_CreateTextObj(doc, standard, size) };
+            // PDFium's standard fonts are WinAnsi-encoded.
+            let writable = text.chars().all(|c| c.is_whitespace() || in_win_ansi(c));
+            if new.is_null() || !writable || !lib.is_true(lib.FPDFText_SetText(new, wtext.as_ptr())) {
+                if !new.is_null() {
+                    lib.FPDFPageObj_Destroy(new);
+                }
+                // Back to how it was.
+                lib.FPDFText_SetText(obj, wide(&old_text).as_ptr());
+                return Err(t("some of these characters cannot be written in this text's font").into());
+            }
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            lib.FPDFPageObj_GetMatrix(obj, &mut m);
+            lib.FPDFPageObj_SetMatrix(new, &m);
+            lib.FPDFTextObj_SetTextRenderMode(new, lib.FPDFTextObj_GetTextRenderMode(obj));
+            let (mut r, mut g, mut b, mut a) = (0, 0, 0, 255);
+            if lib.is_true(lib.FPDFPageObj_GetFillColor(obj, &mut r, &mut g, &mut b, &mut a)) {
+                lib.FPDFPageObj_SetFillColor(new, r, g, b, a);
+            }
+            if lib.is_true(lib.FPDFPageObj_GetStrokeColor(obj, &mut r, &mut g, &mut b, &mut a)) {
+                lib.FPDFPageObj_SetStrokeColor(new, r, g, b, a);
+            }
+            if !lib.is_true(lib.FPDFPage_InsertObjectAtIndex(self.handle, new, index)) {
+                lib.FPDFPage_InsertObject(self.handle, new);
+            }
+            if lib.is_true(lib.FPDFPage_RemoveObject(self.handle, obj)) {
+                lib.FPDFPageObj_Destroy(obj);
+            }
+        }
+        self.generate()
+    }
+
+    /// The text object `obj` (on this page) reads back as `text` (its font has the characters).
+    fn shows(&self, obj: FPDF_PAGEOBJECT, text: &str) -> bool {
+        let Some(tp) = self.text_page() else { return false };
+        let got = unsafe { text_of(self.lib(), obj, tp.handle) };
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        squash(&got) == squash(text)
+    }
+
+    fn generate(&self) -> Result<(), String> {
+        if self.lib().is_true(unsafe { self.lib().FPDFPage_GenerateContent(self.handle) }) {
+            Ok(())
+        } else {
+            Err(t("PDFium could not write the page content").into())
+        }
+    }
+
     fn lib(&self) -> Lib {
         self.doc.lib
     }

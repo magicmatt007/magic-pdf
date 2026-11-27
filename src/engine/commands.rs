@@ -190,6 +190,25 @@ pub struct SignatureInfo {
     /// What the signature still allows to change (1 nothing, 2 form filling and
     /// signing, 3 also annotations); 0 when not a certifying signature.
     pub permission: u32,
+    /// Whether the signer's certificate is trusted; None until checked (the app checks
+    /// in the background, as asking about revocation can take a moment).
+    pub trust: Option<super::trust::Trust>,
+    /// Whether the timestamp's authority is trusted; None until checked or without a
+    /// timestamp.
+    pub timestamp_trusted: Option<bool>,
+}
+
+/// A piece of text on a page as the PDF stores it (one text object), for editing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextObject {
+    /// Its index among the page's objects.
+    pub index: usize,
+    pub text: String,
+    /// Where it is (PDF page space).
+    pub rect: PdfBox,
+    /// The font size as drawn (points).
+    pub size: f32,
+    pub color: Rgb,
 }
 
 /// Document properties (the PDF's information dictionary).
@@ -662,6 +681,11 @@ pub enum Request {
         doc: DocId,
         page: usize,
     },
+    /// The page's text objects, for editing text (answered with `TextObjects`).
+    TextObjects {
+        doc: DocId,
+        page: usize,
+    },
     /// Start (or restart) a document-wide search. `generation` tags results.
     Search {
         doc: DocId,
@@ -875,6 +899,11 @@ pub enum Response {
         page: usize,
         geom: PageGeom,
         text: PageText,
+    },
+    TextObjects {
+        doc: DocId,
+        page: usize,
+        objects: Vec<TextObject>,
     },
     SearchResults {
         doc: DocId,

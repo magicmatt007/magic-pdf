@@ -57,6 +57,7 @@ pub const LIST_BULLETS: &str = "\u{e2f2}";
 pub const CHAT_TEXT: &str = "\u{e17a}";
 pub const PAPERCLIP: &str = "\u{e39a}";
 pub const CERTIFICATE: &str = "\u{e766}";
+pub const TEXT_T: &str = "\u{e48a}";
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

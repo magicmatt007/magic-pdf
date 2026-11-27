@@ -43,6 +43,8 @@ pub enum Tool {
     Distance,
     Area,
     Redact,
+    /// Click a text on the page to change it.
+    EditText,
     /// Drag a box for a digital signature (with a certificate).
     DigitalSign,
 }
@@ -117,6 +119,7 @@ impl Tool {
             Tool::Area => icons::AREA,
             Tool::Redact => icons::EYE_SLASH,
             Tool::DigitalSign => icons::CERTIFICATE,
+            Tool::EditText => icons::TEXT_T,
         })
     }
 
@@ -142,6 +145,7 @@ impl Tool {
             Tool::Area => "Measure area: click the corners, double-click or Enter to finish",
             Tool::Redact => "Redact (X): drag over an area or click a word to mark it; click a mark to unmark it",
             Tool::DigitalSign => "Sign with certificate: drag a box where the signature goes",
+            Tool::EditText => "Edit text: click a text on the page, change it, press Enter",
         })
     }
 
@@ -165,7 +169,7 @@ impl Tool {
             Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
             Tool::Signature => Some(&mut style.signature_color),
             Tool::Stamp => None,
-            Tool::Hand | Tool::SelectText | Tool::Redact | Tool::DigitalSign => None,
+            Tool::Hand | Tool::SelectText | Tool::Redact | Tool::DigitalSign | Tool::EditText => None,
         }
     }
 }
@@ -369,6 +373,130 @@ fn redact_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     }
 }
 
+/// The edit-text tool: the text object under the pointer is outlined; a click opens
+/// it in an editor over the page; Enter (or a click elsewhere) changes the text in
+/// the PDF, Esc cancels.
+fn edit_text_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, pointer: Option<Pos2>) {
+    for page in tab.visible_pages.clone() {
+        if !tab.text_objects.contains_key(&page) && tab.text_objects_requested.insert(page) {
+            tab.outbox.push(Request::TextObjects { doc: tab.id, page });
+        }
+    }
+    let on_screen = |tab: &DocTab, page: usize, r: PdfBox| {
+        let a = pdf_to_screen(tab, page, pos2(r.left, r.bottom), view)?;
+        let b = pdf_to_screen(tab, page, pos2(r.right, r.top), view)?;
+        Some(Rect::from_two_pos(a, b))
+    };
+    // Debug aid for screenshots: MAGIC_PDF_EDIT_TEXT opens the first text on page 1
+    // with that text typed in.
+    static DEBUG_EDIT: std::sync::Once = std::sync::Once::new();
+    if tab.text_editing.is_none()
+        && let Ok(typed) = std::env::var("MAGIC_PDF_EDIT_TEXT")
+        && let Some(obj) = tab.text_objects.get(&0).and_then(|o| o.first()).cloned()
+    {
+        DEBUG_EDIT.call_once(|| {
+            tab.text_editing = Some(crate::document::TextEditing {
+                page: 0,
+                index: obj.index,
+                original: obj.text,
+                text: typed,
+                rect: obj.rect,
+                size: obj.size,
+                color: obj.color,
+                focus: true,
+            });
+        });
+    }
+    let accent = crate::theme::ACCENT;
+    let mut commit = false;
+    let mut cancel = false;
+    if let Some(e) = &tab.text_editing {
+        let rect = on_screen(tab, e.page, e.rect);
+        let size = (e.size * tab.viewport.zoom).clamp(6.0, 200.0);
+        let (color, width) = (rgb(e.color), rect.map_or(120.0, |r| r.width()));
+        let at = rect.map_or(view.center(), |r| r.min) - vec2(3.0, 3.0);
+        let editing = tab.text_editing.as_mut().expect("checked");
+        egui::Area::new(egui::Id::unique(("edit_text", tab.id))).fixed_pos(at).order(egui::Order::Foreground).show(
+            ui.ctx(),
+            |ui| {
+                egui::Frame::new()
+                    .fill(Color32::WHITE)
+                    .stroke(Stroke::new(1.5, accent))
+                    .inner_margin(egui::Margin::same(2))
+                    .show(ui, |ui| {
+                        let field = egui::TextEdit::singleline(&mut editing.text)
+                            .font(egui::FontId::proportional(size))
+                            .text_color(color)
+                            .background_color(Color32::WHITE)
+                            .frame(egui::Frame::NONE)
+                            .desired_width((width + 24.0).max(60.0));
+                        let r = ui.add(field);
+                        if std::mem::take(&mut editing.focus) {
+                            r.request_focus();
+                        }
+                        let (enter, esc) =
+                            ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                        if r.lost_focus() && enter {
+                            commit = true;
+                        }
+                        if esc {
+                            cancel = true;
+                        }
+                    });
+            },
+        );
+        // A click elsewhere on the page keeps the change.
+        if response.clicked() {
+            commit = true;
+        }
+    } else if let Some((page, p)) =
+        pointer.filter(|p| view.contains(*p)).and_then(|pt| screen_to_pdf(tab, pt, view, None))
+    {
+        // The smallest text object under the pointer.
+        let hit = tab.text_objects.get(&page).and_then(|objs| {
+            objs.iter()
+                .filter(|o| o.rect.expand(1.0).contains(p.x, p.y))
+                .min_by(|a, b| area(a.rect).total_cmp(&area(b.rect)))
+                .cloned()
+        });
+        if let Some(obj) = hit {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+            if let Some(r) = on_screen(tab, page, obj.rect) {
+                ui.painter().rect_stroke(
+                    r.expand(2.0),
+                    CornerRadius::same(2),
+                    Stroke::new(1.5, accent),
+                    StrokeKind::Outside,
+                );
+            }
+            if response.clicked() {
+                tab.text_editing = Some(crate::document::TextEditing {
+                    page,
+                    index: obj.index,
+                    original: obj.text.clone(),
+                    text: obj.text,
+                    rect: obj.rect,
+                    size: obj.size,
+                    color: obj.color,
+                    focus: true,
+                });
+            }
+        }
+    }
+    if commit && let Some(e) = tab.text_editing.take() {
+        if e.text != e.original && !e.text.trim().is_empty() {
+            let op = crate::engine::PageOp::EditText { page: e.page, index: e.index, text: e.text };
+            tab.outbox.push(Request::EditPages { doc: tab.id, op });
+        }
+    } else if cancel {
+        tab.text_editing = None;
+    }
+}
+
+fn area(r: PdfBox) -> f32 {
+    (r.right - r.left) * (r.top - r.bottom)
+}
+
 /// The box of the word under `p`, if any.
 fn word_at(tab: &DocTab, page: usize, p: Pos2) -> Option<PdfBox> {
     let text = tab.texts.get(&page)?.as_ref()?;
@@ -462,6 +590,10 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
 
     if tool == Tool::Redact && !middle_down {
         redact_input(ui, tab, response, view, pointer);
+        return;
+    }
+    if tool == Tool::EditText && !middle_down {
+        edit_text_input(ui, tab, response, view, pointer);
         return;
     }
 

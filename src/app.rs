@@ -87,6 +87,9 @@ pub struct App {
     notice: Option<(String, f64)>,
     print_results: (Sender<PrintResult>, Receiver<PrintResult>),
     sign_dialog: Option<crate::sign_dialog::SignDialog>,
+    /// Trust checks of signatures running in the background, and their results.
+    trust_pending: HashSet<DocId>,
+    trust_results: (Sender<TrustResult>, Receiver<TrustResult>),
     /// Certificates opened this session (the password is asked once).
     identities: HashMap<PathBuf, std::sync::Arc<crate::engine::sign::SigningIdentity>>,
     /// Signing in the background: the document, where the result goes, the outcome.
@@ -175,6 +178,9 @@ struct Presentation {
     /// When it started (for the "Esc ends" hint).
     since: f64,
 }
+
+/// Trust of a document's signatures: for each, the certificate's and the timestamp's.
+type TrustResult = (DocId, Vec<(crate::engine::trust::Trust, Option<bool>)>);
 
 /// A finished signing: the document, where the signed file went, the outcome.
 type SignResult = (DocId, PathBuf, Result<(), String>);
@@ -329,6 +335,8 @@ impl App {
             notice: None,
             print_results: std::sync::mpsc::channel(),
             sign_dialog: None,
+            trust_pending: HashSet::new(),
+            trust_results: std::sync::mpsc::channel(),
             identities: HashMap::new(),
             sign_results: std::sync::mpsc::channel(),
             signing: false,
@@ -377,7 +385,7 @@ impl App {
             let wanted = std::env::var("MAGIC_PDF_TOOL").unwrap_or_default();
             if let Some(t) = Tool::ANNOTATION_TOOLS
                 .iter()
-                .chain([&Tool::Redact])
+                .chain([&Tool::Redact, &Tool::EditText])
                 .find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted))
             {
                 app.tool = *t;
@@ -1078,6 +1086,13 @@ impl App {
             Response::PageChanged { doc, page } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     *tab.page_versions.entry(page).or_insert(0) += 1;
+                    tab.text_objects.remove(&page);
+                    tab.text_objects_requested.remove(&page);
+                }
+            }
+            Response::TextObjects { doc, page, objects } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.text_objects.insert(page, objects);
                 }
             }
             Response::AnnotAdded { doc, page, index } => {
@@ -1733,6 +1748,40 @@ impl App {
     fn start_digital_signature(&mut self) {
         self.tool = Tool::DigitalSign;
         self.notice(t("Drag a box where the signature goes"));
+    }
+
+    /// Checks in the background whether the certificates of open documents'
+    /// signatures are trusted, and fills in the results.
+    fn check_signature_trust(&mut self, ctx: &egui::Context) {
+        while let Ok((doc, results)) = self.trust_results.1.try_recv() {
+            self.trust_pending.remove(&doc);
+            if let Some(info) = self.tab_mut(doc).and_then(|t| t.info_mut())
+                && info.signatures.len() == results.len()
+            {
+                for (s, (trust, ts)) in info.signatures.iter_mut().zip(results) {
+                    s.trust = Some(trust);
+                    s.timestamp_trusted = ts;
+                }
+            }
+        }
+        for tab in &self.tabs {
+            let Some(info) = tab.info() else { continue };
+            if self.trust_pending.contains(&tab.id) || info.signatures.iter().all(|s| s.trust.is_some()) {
+                continue;
+            }
+            self.trust_pending.insert(tab.id);
+            let (doc, checks) = (tab.id, info.signatures.iter().map(|s| s.check.clone()).collect::<Vec<_>>());
+            let (tx, ctx) = (self.trust_results.0.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                use crate::engine::trust;
+                let results = checks
+                    .iter()
+                    .map(|c| (trust::signature_trust(c), c.timestamp.as_ref().map(trust::timestamp_trusted)))
+                    .collect();
+                let _ = tx.send((doc, results));
+                ctx.request_repaint();
+            });
+        }
     }
 
     fn sign_ui(&mut self, ctx: &egui::Context) {
@@ -2810,7 +2859,7 @@ impl App {
             if !has_doc {
                 ui.disable();
             }
-            for tool in [Tool::Hand, Tool::SelectText] {
+            for tool in [Tool::Hand, Tool::SelectText, Tool::EditText] {
                 ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
             }
             ui.separator();
@@ -3993,6 +4042,13 @@ impl eframe::App for App {
             self.settings.save();
         }
         self.sign_ui(&ctx);
+        // An unfinished text edit is dropped when another tool is picked.
+        if self.tool != Tool::EditText
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.text_editing = None;
+        }
+        self.check_signature_trust(&ctx);
         self.combine_ui(&ctx);
 
         if self.settings.recent_colors != recent_before {

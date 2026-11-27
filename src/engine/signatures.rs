@@ -33,6 +33,24 @@ pub struct SignatureCheck {
     pub issuer: String,
     /// The certificate was issued by the signer itself (anyone could have made it).
     pub self_signed: bool,
+    /// The certificates in the signature (DER), the signer's first: for checking
+    /// whether it can be trusted.
+    pub chain: Vec<Vec<u8>>,
+    /// A trusted timestamp (RFC 3161) on the signature, if it has one.
+    pub timestamp: Option<Timestamp>,
+}
+
+/// A timestamp token: when a timestamp authority saw the signature.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Timestamp {
+    /// As a PDF date (UTC), e.g. `D:20261127100000Z`.
+    pub time: String,
+    /// The timestamp authority (its certificate's name).
+    pub authority: String,
+    /// The token is over this signature and its own signature is intact.
+    pub valid: bool,
+    /// The authority's certificates (DER), its own first.
+    pub chain: Vec<Vec<u8>>,
 }
 
 /// Checks a signature. `ranges` are the (offset, length) pairs of the signature's
@@ -43,6 +61,8 @@ pub fn check(file: &[u8], ranges: &[(usize, usize)], contents: &[u8], subfilter:
         signer: String::new(),
         issuer: String::new(),
         self_signed: false,
+        chain: Vec::new(),
+        timestamp: None,
     };
     out.status = match verify(file, ranges, contents, subfilter, &mut out) {
         Ok(status) => status,
@@ -115,6 +135,7 @@ fn verify(
     let mut rest = after_attrs;
     let sig_alg = rest.next().and_then(|a| a.children().next()).ok_or(unknown(t("no signature algorithm")))?;
     let signature = rest.next().filter(|s| s.tag == OCTET_STRING).ok_or(unknown(t("no signature value")))?;
+    let unsigned_attrs = rest.next().filter(|a| a.tag == 0xA1);
 
     // The signer's certificate: matched by issuer and serial number, or by key identifier.
     let cert = certs
@@ -125,6 +146,21 @@ fn verify(
     out.signer = cert.subject_name.clone();
     out.issuer = cert.issuer_name.clone();
     out.self_signed = cert.subject_raw == cert.issuer_raw;
+    let signer_raw =
+        certs.iter().find(|c| Certificate::parse(c).is_some_and(|p| p.matches(sid))).map(|c| c.raw.to_vec());
+    out.chain = signer_raw
+        .iter()
+        .cloned()
+        .chain(certs.iter().map(|c| c.raw.to_vec()).filter(|c| Some(c) != signer_raw.as_ref()))
+        .collect();
+    out.timestamp = unsigned_attrs
+        .and_then(|attrs| {
+            attrs.children().find_map(|attr| {
+                let mut a = attr.children();
+                (a.next()?.value == OID_TIMESTAMP_TOKEN).then(|| a.next()?.children().next())?
+            })
+        })
+        .and_then(|token| timestamp(&token, signature.value));
 
     // What was signed: the signed attributes (which hold the document's digest), or
     // the document itself.
@@ -277,6 +313,11 @@ pub(super) struct Certificate<'a> {
     /// signatures, and its purposes (if stated) include e-mail protection, document
     /// signing or any purpose; not e.g. a login-only device certificate.
     pub(super) for_signing: bool,
+    /// The signed part (tbsCertificate, DER), the issuer's signature algorithm and
+    /// signature over it.
+    pub(super) tbs: &'a [u8],
+    sig_alg: &'a [u8],
+    sig_value: &'a [u8],
     /// Subject key identifier extension, if any.
     key_id: Option<&'a [u8]>,
     pub(super) key: Key<'a>,
@@ -286,7 +327,10 @@ impl<'a> Certificate<'a> {
     /// Certificate { tbsCertificate { [0] version, serial, sigAlg, issuer, validity,
     /// subject, subjectPublicKeyInfo, ... [3] extensions }, sigAlg, signature }
     pub(super) fn parse(cert: &Tlv<'a>) -> Option<Certificate<'a>> {
-        let tbs = cert.children().next()?;
+        let mut outer = cert.children();
+        let tbs = outer.next()?;
+        let sig_alg = outer.next()?.children().next()?.value;
+        let sig_value = outer.next()?.value.get(1..)?; // BIT STRING: skip the unused-bits byte
         let mut f: Vec<Tlv<'a>> = tbs.children().collect();
         if f.first()?.tag == 0xA0 {
             f.remove(0);
@@ -335,6 +379,9 @@ impl<'a> Certificate<'a> {
             subject_name: name(subject),
             not_after,
             not_before,
+            tbs: tbs.raw,
+            sig_alg,
+            sig_value,
             for_signing: signs != Some(false)
                 && purposes.is_none_or(|p| p.iter().any(|o| SIGNING_PURPOSES.contains(o))),
             key_id,
@@ -353,6 +400,54 @@ impl<'a> Certificate<'a> {
             _ => false,
         }
     }
+}
+
+/// Reads a timestamp token (a CMS signature over a TSTInfo) and checks that it is
+/// over `signature_value` and intact.
+fn timestamp(token: &Tlv, signature_value: &[u8]) -> Option<Timestamp> {
+    // ContentInfo { signedData, [0] SignedData { version, digestAlgorithms,
+    // encapContentInfo { id-ct-TSTInfo, [0] OCTET STRING (TSTInfo) }, ... } }
+    let mut ci = token.children();
+    ci.next()?;
+    let signed_data = ci.next()?.children().next()?;
+    let encap = signed_data.children().nth(2)?;
+    let tst_der = encap.children().nth(1)?.children().next()?.value;
+    // TSTInfo { version, policy, messageImprint { algorithm, hash }, serial, genTime, ... }
+    let (tst, _) = Tlv::read(tst_der)?;
+    let f: Vec<Tlv> = tst.children().collect();
+    let mut imprint = f.get(2)?.children();
+    let hash = HashAlg::from_oid(imprint.next()?.children().next()?.value)?;
+    let over_this = imprint.next()?.value == hash.digest(signature_value).as_slice();
+    let gen_time = f.get(4).filter(|t| t.tag == 0x18)?;
+    let digits: String = String::from_utf8_lossy(gen_time.value).chars().take_while(char::is_ascii_digit).collect();
+    // The token's own signature, over the TSTInfo.
+    let own = check(tst_der, &[(0, tst_der.len())], token.raw, "adbe.pkcs7.detached");
+    Some(Timestamp {
+        time: format!("D:{digits}Z"),
+        authority: own.signer,
+        valid: over_this && own.status == SigStatus::Valid,
+        chain: own.chain,
+    })
+}
+
+/// Whether `cert` names `issuer` as its issuer and carries its valid signature.
+pub(super) fn issued_by(cert: &Certificate, issuer: &Certificate) -> bool {
+    if cert.issuer_raw != issuer.subject_raw {
+        return false;
+    }
+    let ok = match (&issuer.key, cert.sig_alg) {
+        (Key::Rsa { n, e }, oid) => {
+            HashAlg::from_rsa_oid(oid).map(|hash| verify_rsa(n, e, hash, &hash.digest(cert.tbs), cert.sig_value))
+        }
+        (Key::Ec { curve, point }, OID_ECDSA_SHA256) => {
+            Some(verify_ecdsa(*curve, point, &HashAlg::Sha256.digest(cert.tbs), cert.sig_value))
+        }
+        (Key::Ec { curve, point }, OID_ECDSA_SHA384) => {
+            Some(verify_ecdsa(*curve, point, &HashAlg::Sha384.digest(cert.tbs), cert.sig_value))
+        }
+        _ => None,
+    };
+    matches!(ok, Some(Ok(true)))
 }
 
 /// The common name of an X.501 name (else the organisation, else empty).
@@ -411,6 +506,9 @@ pub(super) const OID_P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
 pub(super) const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
 pub(super) const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
 pub(super) const OID_SUBJECT_KEY_ID: &[u8] = &[0x55, 0x1D, 0x0E];
+const OID_ECDSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
+const OID_ECDSA_SHA384: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
+const OID_TIMESTAMP_TOKEN: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x0E];
 const OID_KEY_USAGE: &[u8] = &[0x55, 0x1D, 0x0F];
 const OID_EXT_KEY_USAGE: &[u8] = &[0x55, 0x1D, 0x25];
 /// Extended key usages for signing documents: any purpose, e-mail protection,
@@ -548,6 +646,32 @@ mod tests {
                 bad.status
             );
         }
+    }
+
+    /// A timestamp token only counts for the signature it was made for.
+    #[test]
+    fn a_timestamp_belongs_to_its_signature() {
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signed-timestamped.pdf"),
+        )
+        .unwrap();
+        let doc = lopdf::Document::load_mem(&file).unwrap();
+        let contents = doc
+            .objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .find_map(|d| d.get(b"Contents").ok()?.as_str().ok().filter(|c| c.len() > 1000).map(<[u8]>::to_vec))
+            .unwrap();
+        // ContentInfo > [0] SignedData > signerInfos > SignerInfo
+        let (ci, _) = Tlv::read(&contents).unwrap();
+        let signed_data = ci.children().nth(1).unwrap().children().next().unwrap();
+        let signer_info = signed_data.children().filter(|p| p.tag == SET).last().unwrap().children().next().unwrap();
+        let parts: Vec<Tlv> = signer_info.children().collect();
+        let signature = parts.iter().find(|p| p.tag == OCTET_STRING).unwrap();
+        let unsigned = parts.iter().find(|p| p.tag == 0xA1).unwrap();
+        let token = unsigned.children().next().unwrap().children().nth(1).unwrap().children().next().unwrap();
+        assert!(timestamp(&token, signature.value).unwrap().valid);
+        assert!(!timestamp(&token, b"another signature").unwrap().valid);
     }
 
     #[test]
