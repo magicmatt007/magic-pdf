@@ -19,7 +19,7 @@ use crate::view::layout::LayoutMode;
 use crate::view::sidebar::{self, PageAction, SidebarTab};
 use crate::view::viewport::FitMode;
 
-const TEXTURE_BUDGET: usize = 768 * 1024 * 1024;
+const TEXTURE_BUDGET: usize = 384 * 1024 * 1024;
 const SEARCH_ID: &str = "search_field";
 
 /// What to do once unsaved documents have been dealt with.
@@ -90,6 +90,9 @@ pub struct App {
     /// Debug aid: with MAGIC_PDF_SCREENSHOT=<file.ppm> the app captures its own window
     /// once pages have rendered, saves it and quits.
     screenshot_to: Option<PathBuf>,
+    /// Debug aid: with MAGIC_PDF_BENCH=<report.txt> the app pages through the file,
+    /// searches it, writes timings and memory use to the report and quits.
+    bench: Option<Bench>,
     screenshot_requested: bool,
     /// Debug aid for automated launch tests: with MAGIC_PDF_SELFTEST=<file> the app
     /// writes the documents it opened (path and page count) to the file and quits.
@@ -320,6 +323,7 @@ impl App {
             combine_dialog: None,
             combining: false,
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
+            bench: std::env::var_os("MAGIC_PDF_BENCH").map(|p| Bench::new(p.into())),
             screenshot_requested: false,
             selftest_to: std::env::var_os("MAGIC_PDF_SELFTEST").map(PathBuf::from),
             split_every: None,
@@ -3502,6 +3506,70 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
     }
 
+    /// One frame of the benchmark (MAGIC_PDF_BENCH).
+    fn bench_step(&mut self, ctx: &egui::Context) {
+        let Some(b) = &mut self.bench else { return };
+        let now = std::time::Instant::now();
+        let elapsed = b.start.elapsed().as_secs_f64();
+        let frame = now.duration_since(b.last).as_secs_f64() * 1000.0;
+        b.last = now;
+        ctx.request_repaint();
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let count = tab.page_count();
+        match b.phase {
+            BenchPhase::Opening => {
+                if tab.info().is_some() {
+                    b.opened = elapsed;
+                    b.phase = BenchPhase::FirstRender;
+                }
+            }
+            BenchPhase::FirstRender => {
+                if self.cache.usage().0 > 0 {
+                    b.first_render = elapsed;
+                    b.phase = BenchPhase::Paging(0);
+                    b.phase_start = now;
+                }
+            }
+            BenchPhase::Paging(page) => {
+                b.frames.push(frame);
+                if page + 1 < count {
+                    tab.goto_page(page + 1);
+                    b.phase = BenchPhase::Paging(page + 1);
+                } else {
+                    b.paging = b.phase_start.elapsed().as_secs_f64();
+                    b.phase = BenchPhase::Settling;
+                    b.phase_start = now;
+                }
+            }
+            BenchPhase::Settling => {
+                b.settle_frames.push(frame);
+                // Rendering the last page and the thumbnails around it.
+                if b.phase_start.elapsed().as_secs_f64() > 2.0 {
+                    b.memory_after_paging = rss_mb();
+                    b.textures = self.cache.usage();
+                    tab.search.query = std::env::var("MAGIC_PDF_BENCH_QUERY").unwrap_or_else(|_| "the".into());
+                    b.phase = BenchPhase::Searching;
+                    b.phase_start = now;
+                    self.start_search();
+                }
+            }
+            BenchPhase::Searching => {
+                b.search_frames.push(frame);
+                if !tab.search.running && tab.search.submitted.is_some() {
+                    b.search = b.phase_start.elapsed().as_secs_f64();
+                    b.hits = tab.search.hits.len();
+                    let report = b.report(count);
+                    if let Err(e) = std::fs::write(&b.out, report) {
+                        log::error!("bench: {e}");
+                    }
+                    self.bench = None;
+                    self.allow_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
     fn selftest(&mut self, ctx: &egui::Context) {
         let Some(path) = self.selftest_to.clone() else { return };
         let time = ctx.input(|i| i.time);
@@ -3842,6 +3910,7 @@ impl eframe::App for App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         self.self_screenshot(&ctx);
         self.selftest(&ctx);
+        self.bench_step(&ctx);
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -4141,6 +4210,107 @@ fn busy(ctx: &egui::Context, text: &str) {
             });
         },
     );
+}
+
+/// The benchmark run with MAGIC_PDF_BENCH (debug aid, not shown to users).
+struct Bench {
+    out: PathBuf,
+    phase: BenchPhase,
+    start: std::time::Instant,
+    last: std::time::Instant,
+    phase_start: std::time::Instant,
+    opened: f64,
+    first_render: f64,
+    paging: f64,
+    search: f64,
+    hits: usize,
+    /// Frame times (ms) while paging, while the last pages render, while searching.
+    frames: Vec<f64>,
+    settle_frames: Vec<f64>,
+    search_frames: Vec<f64>,
+    memory_after_paging: f64,
+    textures: (usize, usize),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BenchPhase {
+    Opening,
+    FirstRender,
+    /// Showing this page; the next frame goes to the next one.
+    Paging(usize),
+    Settling,
+    Searching,
+}
+
+impl Bench {
+    fn new(out: PathBuf) -> Bench {
+        let now = std::time::Instant::now();
+        Bench {
+            out,
+            phase: BenchPhase::Opening,
+            start: now,
+            last: now,
+            phase_start: now,
+            opened: 0.0,
+            first_render: 0.0,
+            paging: 0.0,
+            search: 0.0,
+            hits: 0,
+            frames: Vec::new(),
+            settle_frames: Vec::new(),
+            search_frames: Vec::new(),
+            memory_after_paging: 0.0,
+            textures: (0, 0),
+        }
+    }
+
+    fn report(&self, pages: usize) -> String {
+        let stats = |v: &[f64]| {
+            let mut s = v.to_vec();
+            s.sort_by(f64::total_cmp);
+            let pct = |p: f64| s.get(((s.len() as f64 - 1.0) * p) as usize).copied().unwrap_or(0.0);
+            format!(
+                "{} frames, median {:.1} ms, 95% {:.1} ms, max {:.1} ms",
+                s.len(),
+                pct(0.5),
+                pct(0.95),
+                s.last().copied().unwrap_or(0.0)
+            )
+        };
+        format!(
+            "pages\t{pages}\nopened\t{:.2} s\nfirst page drawn\t{:.2} s\npaging through all pages\t{:.2} s ({})\n\
+             after paging\t{}\nsearch\t{:.2} s, {} hits ({})\ntextures after paging\t{} ({:.0} MB)\n\
+             memory after paging\t{:.0} MB\npeak memory\t{:.0} MB\n",
+            self.opened,
+            self.first_render,
+            self.paging,
+            stats(&self.frames),
+            stats(&self.settle_frames),
+            self.search,
+            self.hits,
+            stats(&self.search_frames),
+            self.textures.0,
+            self.textures.1 as f64 / 1_048_576.0,
+            self.memory_after_paging,
+            peak_rss_mb(),
+        )
+    }
+}
+
+/// Resident memory of this process in MB (Linux only; 0 elsewhere).
+fn rss_mb() -> f64 {
+    proc_status("VmRSS:")
+}
+
+fn peak_rss_mb() -> f64 {
+    proc_status("VmHWM:")
+}
+
+fn proc_status(key: &str) -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse().ok()))
+        .map_or(0.0, |kb: f64| kb / 1024.0)
 }
 
 #[cfg(test)]

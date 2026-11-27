@@ -878,12 +878,31 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
 }
 
 /// A search hit as "…text before **match** text after…".
+/// Font of the search result snippets.
+fn hit_font() -> egui::FontId {
+    egui::FontId::proportional(12.5)
+}
+
+/// Height of a search result row: two lines of snippet and the row's margins.
+fn hit_row_height(ui: &Ui) -> f32 {
+    2.0 * ui.fonts_mut(|f| f.row_height(&hit_font())) + 6.0
+}
+
 fn hit_text(ui: &Ui, hit: &SearchHit) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
-    let font = egui::FontId::proportional(12.5);
+    let font = hit_font();
     let mut job = LayoutJob::default();
     let weak = TextFormat::simple(font.clone(), ui.visuals().weak_text_color());
-    job.append(&hit.context.before, 0.0, weak.clone());
+    // A short lead-in, so the match is always within the two lines shown.
+    const LEAD: usize = 24;
+    let before = &hit.context.before;
+    let lead = if before.chars().count() > LEAD {
+        let tail: String = before.chars().rev().take(LEAD).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("…{}", tail.split_once(' ').map_or(tail.as_str(), |(_, rest)| rest))
+    } else {
+        before.clone()
+    };
+    job.append(&lead, 0.0, weak.clone());
     let text = if hit.context.text.is_empty() { "…" } else { hit.context.text.as_str() };
     job.append(
         text,
@@ -894,7 +913,12 @@ fn hit_text(ui: &Ui, hit: &SearchHit) -> egui::text::LayoutJob {
         },
     );
     job.append(&hit.context.after, 0.0, weak);
-    job.wrap.max_width = ui.available_width();
+    job.wrap = egui::text::TextWrapping {
+        max_width: ui.available_width(),
+        max_rows: 2,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
     job
 }
 
@@ -907,6 +931,8 @@ fn hit_row(ui: &mut Ui, hit: &SearchHit, selected: bool) -> bool {
     frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Every row has the same height, so long result lists draw only what shows.
+            ui.set_height(hit_row_height(ui) - 6.0);
             ui.horizontal_top(|ui| {
                 ui.add_sized(
                     [34.0, 14.0],
@@ -947,13 +973,19 @@ fn search_results(ui: &mut Ui, tab: &mut DocTab) {
     }
     ui.separator();
     let mut clicked = None;
-    egui::ScrollArea::vertical().id_salt(("search", tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-        for (i, hit) in tab.search.hits.iter().enumerate() {
-            if hit_row(ui, hit, tab.search.current == Some(i)) {
-                clicked = Some(i);
+    let height = hit_row_height(ui);
+    egui::ScrollArea::vertical().id_salt(("search", tab.id)).auto_shrink([false, false]).show_rows(
+        ui,
+        height,
+        tab.search.hits.len(),
+        |ui, rows| {
+            for i in rows {
+                if hit_row(ui, &tab.search.hits[i], tab.search.current == Some(i)) {
+                    clicked = Some(i);
+                }
             }
-        }
-    });
+        },
+    );
     if let Some(i) = clicked {
         tab.show_search_hit(i);
     }
@@ -978,27 +1010,75 @@ pub fn search_all_results(ui: &mut Ui, tabs: &mut [DocTab], active: &mut usize) 
         ));
     });
     ui.separator();
+    // One list of equally tall rows (a header per document, then its results), so
+    // only the rows in view are drawn however many results there are.
+    let collapsed_id = ui.make_persistent_id("search_all_collapsed");
+    let mut collapsed: std::collections::HashSet<crate::engine::DocId> =
+        ui.data(|d| d.get_temp(collapsed_id)).unwrap_or_default();
+    let mut rows: Vec<(usize, Option<usize>)> = Vec::new();
+    for (ti, tab) in tabs.iter().enumerate().filter(|(_, t)| !t.search.hits.is_empty()) {
+        rows.push((ti, None));
+        if !collapsed.contains(&tab.id) {
+            rows.extend((0..tab.search.hits.len()).map(|i| (ti, Some(i))));
+        }
+    }
     let mut clicked = None;
-    egui::ScrollArea::vertical().id_salt("search_all").auto_shrink([false, false]).show(ui, |ui| {
-        for (ti, tab) in tabs.iter().enumerate() {
-            if tab.search.hits.is_empty() {
-                continue;
-            }
-            let id = ui.make_persistent_id(("search_doc", tab.id));
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
-                .show_header(ui, |ui| {
-                    ui.strong(tab.title());
-                    ui.weak(format!("({})", tab.search.hits.len()));
-                })
-                .body(|ui| {
-                    for (i, hit) in tab.search.hits.iter().enumerate() {
-                        if hit_row(ui, hit, ti == *active && tab.search.current == Some(i)) {
+    let mut toggle = None;
+    let height = hit_row_height(ui);
+    egui::ScrollArea::vertical().id_salt("search_all").auto_shrink([false, false]).show_rows(
+        ui,
+        height,
+        rows.len(),
+        |ui, range| {
+            for &(ti, hit) in &rows[range] {
+                let tab = &tabs[ti];
+                match hit {
+                    Some(i) => {
+                        if hit_row(ui, &tab.search.hits[i], ti == *active && tab.search.current == Some(i)) {
                             clicked = Some((ti, i));
                         }
                     }
-                });
+                    None => {
+                        let open = !collapsed.contains(&tab.id);
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+                        let icon = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+                        let mut job = egui::text::LayoutJob::default();
+                        icons::sized(icon, 12.0).append_to(
+                            &mut job,
+                            ui.style(),
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::RichText::new(format!("  {}", tab.title())).strong().append_to(
+                            &mut job,
+                            ui.style(),
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::RichText::new(format!("  ({})", tab.search.hits.len())).weak().append_to(
+                            &mut job,
+                            ui.style(),
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        let galley = ui.fonts_mut(|f| f.layout_job(job));
+                        let pos = egui::pos2(rect.left() + 2.0, rect.center().y - galley.size().y / 2.0);
+                        ui.painter().galley(pos, galley, ui.visuals().text_color());
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            toggle = Some(tab.id);
+                        }
+                    }
+                }
+            }
+        },
+    );
+    if let Some(id) = toggle {
+        if !collapsed.remove(&id) {
+            collapsed.insert(id);
         }
-    });
+        ui.data_mut(|d| d.insert_temp(collapsed_id, collapsed));
+    }
     if let Some((ti, i)) = clicked {
         *active = ti;
         tabs[ti].show_search_hit(i);
