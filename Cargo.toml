@@ -16,9 +16,11 @@ serde_json = "1"
 sha2 = { version = "0.11", features = ["oid"] }
 # Checking digital signatures (RSA and ECDSA over SHA-1/2).
 sha1 = { version = "0.11", features = ["oid"] }
-rsa = { version = "0.10", default-features = false, features = ["std", "pkcs1v15"] }
-p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
-p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "0.10", default-features = false, features = ["std", "pkcs1v15", "encoding"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# Signing: reading certificate files (.p12/.pfx).
+p12-keystore = "0.4"
 directories = "6"
 open = "5"
 log = "0.4"

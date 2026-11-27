@@ -262,12 +262,12 @@ enum Key<'a> {
     Other,
 }
 
-struct Certificate<'a> {
-    serial: &'a [u8],
-    issuer_raw: &'a [u8],
-    subject_raw: &'a [u8],
-    issuer_name: String,
-    subject_name: String,
+pub(super) struct Certificate<'a> {
+    pub(super) serial: &'a [u8],
+    pub(super) issuer_raw: &'a [u8],
+    pub(super) subject_raw: &'a [u8],
+    pub(super) issuer_name: String,
+    pub(super) subject_name: String,
     /// Subject key identifier extension, if any.
     key_id: Option<&'a [u8]>,
     key: Key<'a>,
@@ -276,7 +276,7 @@ struct Certificate<'a> {
 impl<'a> Certificate<'a> {
     /// Certificate { tbsCertificate { [0] version, serial, sigAlg, issuer, validity,
     /// subject, subjectPublicKeyInfo, ... [3] extensions }, sigAlg, signature }
-    fn parse(cert: &Tlv<'a>) -> Option<Certificate<'a>> {
+    pub(super) fn parse(cert: &Tlv<'a>) -> Option<Certificate<'a>> {
         let tbs = cert.children().next()?;
         let mut f: Vec<Tlv<'a>> = tbs.children().collect();
         if f.first()?.tag == 0xA0 {
@@ -356,41 +356,41 @@ fn decode_string(tag: u8, v: &[u8]) -> String {
     }
 }
 
-const SEQUENCE: u8 = 0x30;
-const SET: u8 = 0x31;
+pub(super) const SEQUENCE: u8 = 0x30;
+pub(super) const SET: u8 = 0x31;
 const OID: u8 = 0x06;
-const OCTET_STRING: u8 = 0x04;
+pub(super) const OCTET_STRING: u8 = 0x04;
 
-const OID_SIGNED_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
-const OID_MESSAGE_DIGEST: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04];
-const OID_SHA1: &[u8] = &[0x2B, 0x0E, 0x03, 0x02, 0x1A];
-const OID_SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
-const OID_SHA384: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
-const OID_SHA512: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
-const OID_PKCS1_PREFIX: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01];
-const OID_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
-const OID_RSA_PSS: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
-const OID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
-const OID_ECDSA_PREFIX: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04];
-const OID_P256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
-const OID_P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
-const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
-const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
-const OID_SUBJECT_KEY_ID: &[u8] = &[0x55, 0x1D, 0x0E];
+pub(super) const OID_SIGNED_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
+pub(super) const OID_MESSAGE_DIGEST: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04];
+pub(super) const OID_SHA1: &[u8] = &[0x2B, 0x0E, 0x03, 0x02, 0x1A];
+pub(super) const OID_SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+pub(super) const OID_SHA384: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
+pub(super) const OID_SHA512: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
+pub(super) const OID_PKCS1_PREFIX: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01];
+pub(super) const OID_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
+pub(super) const OID_RSA_PSS: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
+pub(super) const OID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+pub(super) const OID_ECDSA_PREFIX: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04];
+pub(super) const OID_P256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+pub(super) const OID_P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
+pub(super) const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
+pub(super) const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
+pub(super) const OID_SUBJECT_KEY_ID: &[u8] = &[0x55, 0x1D, 0x0E];
 
 /// One DER (or BER, with indefinite lengths) element.
 #[derive(Clone, Copy, Debug)]
-struct Tlv<'a> {
-    tag: u8,
+pub(super) struct Tlv<'a> {
+    pub(super) tag: u8,
     /// The contents.
-    value: &'a [u8],
+    pub(super) value: &'a [u8],
     /// The whole element, header included.
-    raw: &'a [u8],
+    pub(super) raw: &'a [u8],
 }
 
 impl<'a> Tlv<'a> {
     /// Reads one element; returns it and the bytes after it.
-    fn read(buf: &'a [u8]) -> Option<(Tlv<'a>, &'a [u8])> {
+    pub(super) fn read(buf: &'a [u8]) -> Option<(Tlv<'a>, &'a [u8])> {
         let tag = *buf.first()?;
         if tag & 0x1F == 0x1F {
             return None; // multi-byte tags do not occur in these structures
@@ -429,12 +429,12 @@ impl<'a> Tlv<'a> {
         }
     }
 
-    fn children(&self) -> Children<'a> {
+    pub(super) fn children(&self) -> Children<'a> {
         Children { rest: if self.tag & 0x20 != 0 { self.value } else { &[] } }
     }
 }
 
-struct Children<'a> {
+pub(super) struct Children<'a> {
     rest: &'a [u8],
 }
 

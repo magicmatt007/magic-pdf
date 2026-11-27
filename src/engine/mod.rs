@@ -12,6 +12,7 @@ mod print_windows;
 pub mod redact;
 pub mod rich;
 pub mod shapes;
+pub mod sign;
 pub mod signatures;
 pub mod textbox;
 mod worker;
