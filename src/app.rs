@@ -56,6 +56,10 @@ pub struct App {
     engine: Result<Engine, String>,
     /// The app icon, shown at the start of the menu bar.
     app_icon: egui::TextureHandle,
+    /// The search in the recent files on the start screen.
+    recent_search: String,
+    /// The large app icon on the start screen (decoded when first shown).
+    logo: Option<egui::TextureHandle>,
     ctx: egui::Context,
     tabs: Vec<DocTab>,
     active: usize,
@@ -297,6 +301,8 @@ impl App {
         let mut app = Self {
             engine,
             app_icon,
+            logo: None,
+            recent_search: String::new(),
             ctx,
             tabs: Vec::new(),
             active: 0,
@@ -438,6 +444,7 @@ impl App {
         if app.screenshot_to.is_some() {
             // Debug aids for screenshots: a search, a zoom level, a sidebar tab.
             if let Ok(q) = std::env::var("MAGIC_PDF_SEARCH") {
+                app.recent_search = q.clone();
                 app.search_all = std::env::var_os("MAGIC_PDF_SEARCH_ALL").is_some();
                 for t in &mut app.tabs {
                     t.search.query = q.clone();
@@ -2472,7 +2479,27 @@ impl App {
                 let any_recent = !self.settings.recent.is_empty() || !self.settings.pinned.is_empty();
                 ui.add_enabled_ui(any_recent, |ui| {
                     ui.menu_button(t("Open recent"), |ui| {
-                        if let Some(a) = recent_list(ui, &self.settings, true) {
+                        // Search the whole history, as on the start screen.
+                        let search = ui.add(
+                            egui::TextEdit::singleline(&mut self.recent_search)
+                                .hint_text(t("Search the history"))
+                                .desired_width(260.0),
+                        );
+                        if search.gained_focus() || !search.has_focus() && self.recent_search.is_empty() {
+                            search.request_focus();
+                        }
+                        ui.separator();
+                        let (entries, more) = recent_entries(&self.settings, &self.recent_search);
+                        let mut action = None;
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            action = recent_list(ui, &entries, true);
+                        });
+                        if entries.is_empty() {
+                            ui.weak(t("No file in the history matches."));
+                        } else if more > 0 {
+                            ui.weak(tf("{n} older files: search to find them", &[("n", &more)]));
+                        }
+                        if let Some(a) = action {
                             self.recent_action(a);
                             ui.close();
                         }
@@ -2770,6 +2797,11 @@ impl App {
                 self.undo(true);
             }
             ui.separator();
+            // The tools and page controls need a document: greyed out on the start
+            // screen (the rest of the row).
+            if !has_doc {
+                ui.disable();
+            }
             for tool in [Tool::Hand, Tool::SelectText] {
                 ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
             }
@@ -3603,6 +3635,7 @@ impl App {
     fn recent_action(&mut self, action: RecentAction) {
         match action {
             RecentAction::Open(path) => {
+                self.recent_search.clear();
                 if path.exists() {
                     self.open(&path);
                 } else {
@@ -3724,28 +3757,81 @@ impl App {
     fn welcome(&mut self, ui: &mut Ui) {
         // The central panel has no frame (pages draw their own background).
         ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+        let logo = self
+            .logo
+            .get_or_insert_with(|| {
+                let image = image::load_from_memory(include_bytes!("../assets/icons/magic-pdf-256.png"))
+                    .map(|i| i.to_rgba8())
+                    .unwrap_or_default();
+                let size = [image.width() as usize, image.height() as usize];
+                ui.ctx().load_texture(
+                    "logo",
+                    egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                    egui::TextureOptions {
+                        mipmap_mode: Some(egui::TextureFilter::Linear),
+                        ..egui::TextureOptions::LINEAR
+                    },
+                )
+            })
+            .clone();
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.25);
+            ui.add_space(ui.available_height() * 0.18);
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(72.0, 72.0)));
+            ui.add_space(6.0);
             ui.heading(t("magic-pdf"));
-            ui.add_space(8.0);
+            ui.add_space(14.0);
             if let Err(e) = &self.engine {
                 ui.colored_label(ui.visuals().error_fg_color, e);
                 return;
             }
-            if ui.button(t("Open a PDF…")).clicked() {
+            let open = egui::Button::new(
+                egui::RichText::new(t("Open a PDF…")).size(15.0).color(egui::Color32::WHITE).strong(),
+            )
+            .fill(crate::theme::ACCENT)
+            .min_size(egui::vec2(160.0, 34.0));
+            if ui.add(open).clicked() {
                 self.open_dialog();
             }
+            ui.add_space(2.0);
             ui.weak(t("or drop files here"));
             if !self.settings.recent.is_empty() || !self.settings.pinned.is_empty() {
-                ui.add_space(16.0);
-                ui.strong(t("Recent files"));
-                ui.add_space(4.0);
-                let width = 520.0_f32.min(ui.available_width());
-                ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
-                    if let Some(a) = recent_list(ui, &self.settings, false) {
-                        self.recent_action(a);
-                    }
-                });
+                ui.add_space(28.0);
+                let width = 560.0_f32.min(ui.available_width() - 32.0);
+                // Room for the list: down to the window's bottom edge.
+                let list_height = (ui.available_height() - 80.0).max(160.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, list_height + 70.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(width);
+                        ui.horizontal(|ui| {
+                            ui.strong(t("Recent files"));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.recent_search)
+                                        .hint_text(t("Search the history"))
+                                        .desired_width(200.0),
+                                );
+                                ui.label(icons::text(icons::MAGNIFYING_GLASS).size(14.0));
+                            });
+                        });
+                        ui.add_space(4.0);
+                        let (entries, more) = recent_entries(&self.settings, &self.recent_search);
+                        let mut action = None;
+                        egui::ScrollArea::vertical().max_height(list_height).show(ui, |ui| {
+                            action = recent_list(ui, &entries, false);
+                        });
+                        if entries.is_empty() {
+                            ui.weak(t("No file in the history matches."));
+                        } else if more > 0 {
+                            ui.add_space(4.0);
+                            ui.weak(tf("{n} older files: search to find them", &[("n", &more)]));
+                        }
+                        if let Some(a) = action {
+                            self.recent_action(a);
+                        }
+                    },
+                );
             }
         });
     }
@@ -4120,17 +4206,37 @@ enum RecentAction {
 /// Pinned files first, then recent ones: file name with its folder; a pin button
 /// and a context menu to pin or remove an entry. `menu` is the compact form for
 /// the File menu.
-fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) -> Option<RecentAction> {
+/// Recent files listed before searching (pinned ones come on top).
+const RECENT_SHOWN: usize = 15;
+
+/// The recent files to list: pinned ones, then the most recent; or, with a search,
+/// every file in the history whose path contains all the words. Also returns how
+/// many more there are.
+fn recent_entries<'a>(settings: &'a crate::settings::Settings, search: &str) -> (Vec<(&'a PathBuf, bool)>, usize) {
+    let pinned = settings.pinned.iter().map(|p| (p, true));
+    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        let shown: Vec<_> = pinned.chain(settings.recent.iter().take(RECENT_SHOWN).map(|p| (p, false))).collect();
+        return (shown, settings.recent.len().saturating_sub(RECENT_SHOWN));
+    }
+    let matches = |p: &&PathBuf| {
+        let path = p.display().to_string().to_lowercase();
+        words.iter().all(|w| path.contains(w.as_str()))
+    };
+    let found = pinned.chain(settings.recent.iter().map(|p| (p, false))).filter(|(p, _)| matches(p)).collect();
+    (found, 0)
+}
+
+fn recent_list(ui: &mut Ui, entries: &[(&PathBuf, bool)], menu: bool) -> Option<RecentAction> {
     let mut action = None;
-    let entries = settings.pinned.iter().map(|p| (p, true)).chain(settings.recent.iter().map(|p| (p, false)));
-    let mut was_pinned = !settings.pinned.is_empty();
-    for (path, pinned) in entries {
+    let mut was_pinned = entries.first().is_some_and(|e| e.1);
+    for &(path, pinned) in entries {
         if was_pinned && !pinned {
             ui.separator();
         }
         was_pinned = pinned;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let folder = path.parent().map(short_folder).unwrap_or_default();
         ui.horizontal(|ui| {
             let pin = icons::text(icons::PUSH_PIN).size(14.0);
             let pin = if pinned { pin.color(ui.visuals().selection.stroke.color) } else { pin.weak() };
@@ -4152,7 +4258,15 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
                 0.0,
                 egui::TextFormat::simple(egui::FontId::proportional(12.0), ui.visuals().weak_text_color()),
             );
-            let button = egui::Button::new(text).frame(menu);
+            // One line within the list's width: a long folder ends in "…" (the full
+            // path shows on hover).
+            text.wrap = egui::text::TextWrapping {
+                max_width: if menu { 520.0 } else { ui.available_width() - 8.0 },
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let button = egui::Button::new(text).frame(menu).truncate();
             let button = if menu { button } else { button.frame(false) };
             let response = ui.add(button).on_hover_text(path.display().to_string());
             if response.clicked() {
@@ -4171,6 +4285,16 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
         });
     }
     action
+}
+
+/// The last two folders of a path, e.g. `…\datasheets\out` (whole if short).
+fn short_folder(dir: &Path) -> String {
+    let parts: Vec<_> = dir.components().collect();
+    if parts.len() <= 3 {
+        return dir.display().to_string();
+    }
+    let tail: PathBuf = parts[parts.len() - 2..].iter().collect();
+    format!("…{}{}", std::path::MAIN_SEPARATOR, tail.display())
 }
 
 /// The notice after pages were written to other files.
@@ -4316,6 +4440,38 @@ fn proc_status(key: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_history_is_searched_by_all_words() {
+        let mut s = crate::settings::Settings::default();
+        s.pinned = vec![PathBuf::from("/docs/contracts/lease.pdf")];
+        s.recent = (0..40).map(|i| PathBuf::from(format!("/work/datasheets/GDB{i}_datasheet.pdf"))).collect();
+        let (shown, more) = recent_entries(&s, "");
+        assert_eq!(shown.len(), 1 + RECENT_SHOWN, "pinned plus the most recent");
+        assert!(shown[0].1, "pinned first");
+        assert_eq!(more, 40 - RECENT_SHOWN);
+        let (found, _) = recent_entries(&s, "DataSheets gdb3");
+        let names: Vec<String> =
+            found.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            names,
+            [
+                "GDB3_datasheet.pdf",
+                "GDB30_datasheet.pdf",
+                "GDB31_datasheet.pdf",
+                "GDB32_datasheet.pdf",
+                "GDB33_datasheet.pdf",
+                "GDB34_datasheet.pdf",
+                "GDB35_datasheet.pdf",
+                "GDB36_datasheet.pdf",
+                "GDB37_datasheet.pdf",
+                "GDB38_datasheet.pdf",
+                "GDB39_datasheet.pdf"
+            ]
+        );
+        assert_eq!(recent_entries(&s, "lease").0.len(), 1, "pinned files are searched too");
+        assert!(recent_entries(&s, "nothing").0.is_empty());
+    }
 
     fn key(key: Key, modifiers: Modifiers) -> egui::Event {
         egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }

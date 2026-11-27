@@ -1003,4 +1003,7 @@ pub static TEXTS: &[(&str, &str)] = &[
         "This certificate is not meant for signing documents; others may not accept the signature.",
         "Dieses Zertifikat ist nicht zum Signieren von Dokumenten gedacht; andere akzeptieren die Signatur womöglich nicht.",
     ),
+    ("Search the history", "Verlauf durchsuchen"),
+    ("No file in the history matches.", "Keine Datei im Verlauf passt."),
+    ("{n} older files: search to find them", "{n} ältere Dateien: mit der Suche finden"),
 ];

@@ -10,7 +10,8 @@ use crate::engine::{Rgb, Rotation};
 use crate::view::layout::LayoutMode;
 use crate::view::viewport::FitMode;
 
-const MAX_RECENT: usize = 15;
+/// Files kept in the history of recently opened files (pinned ones come on top).
+const MAX_RECENT: usize = 100;
 const MAX_FILE_STATES: usize = 300;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
