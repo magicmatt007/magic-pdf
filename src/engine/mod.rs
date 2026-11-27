@@ -25,6 +25,7 @@ pub use commands::*;
 pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, Watermark, move_target};
 pub use pdf::{FIELD_TEXT, pdf_date_now};
 pub use rich::{Align, CharStyle, RichText};
+pub use worker::write_atomically;
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -113,7 +114,11 @@ mod tests {
     }
 
     fn sample() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
+        fixtures().join("sample.pdf")
+    }
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
     /// PDFium is not thread-safe, so engine tests run one at a time.
@@ -2130,6 +2135,39 @@ mod tests {
         let saved = widgets(&engine, 2).into_iter().find(|w| w.name == "name").unwrap();
         assert_eq!(saved.value, "Typed", "the text in the focused field is saved");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_a_signed_file_keeps_its_signature() {
+        let (_serial, engine) = start();
+        let original = std::fs::read(fixtures().join("signed.pdf")).unwrap();
+        let info = open(&engine, 1, fixtures().join("signed.pdf"));
+        assert_eq!(info.signatures.len(), 1);
+        let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
+        engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
+        let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
+        engine.send(Request::UpdateAnnot {
+            doc: 1,
+            page: 0,
+            index: sq.index,
+            change: AnnotChange {
+                replies: Some(vec![Reply { author: "Bob".into(), date: String::new(), text: "Agreed".into() }]),
+                ..Default::default()
+            },
+        });
+        let _ = annots(&engine, 1);
+        let path = std::env::temp_dir().join(format!("magic-pdf-signed-save-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = std::fs::read(&path).unwrap();
+        assert!(saved.len() > original.len() && saved.starts_with(&original), "appended, not rewritten");
+        let info = open(&engine, 2, path.clone());
+        assert_eq!(info.signatures.len(), 1);
+        assert_eq!(info.signatures[0].check.status, signatures::SigStatus::ChangedAfter, "{:?}", info.signatures[0]);
+        engine.send(Request::ScanAnnots { doc: 2 });
+        let list = annots(&engine, 2);
+        assert!(list.iter().any(|a| a.kind == AnnotKind::Square && a.replies.len() == 1), "the edit was saved");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

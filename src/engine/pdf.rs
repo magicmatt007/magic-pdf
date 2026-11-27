@@ -23,6 +23,7 @@ pub type Lib = &'static dyn PdfiumLibraryBindings;
 const FPDF_ANNOT: c_int = 0x01;
 const FPDF_REVERSE_BYTE_ORDER: c_int = 0x10;
 const FPDF_BITMAP_BGRA: c_int = 4;
+const FPDF_INCREMENTAL: FPDF_DWORD = 1;
 const FPDF_NO_INCREMENTAL: FPDF_DWORD = 2;
 const FPDF_ERR_PASSWORD: c_ulong = 4;
 const FPDF_ANNOT_FLAG_HIDDEN: c_int = 1 << 1;
@@ -761,9 +762,19 @@ impl Doc {
     }
 
     pub fn save_to_bytes(&self) -> Result<Vec<u8>, String> {
+        self.save_with(FPDF_NO_INCREMENTAL)
+    }
+
+    /// The opened bytes unchanged, with the changes appended (an incremental update),
+    /// so the signatures in them stay intact.
+    pub fn save_incremental(&self) -> Result<Vec<u8>, String> {
+        self.save_with(FPDF_INCREMENTAL)
+    }
+
+    fn save_with(&self, flags: FPDF_DWORD) -> Result<Vec<u8>, String> {
         let mut writer =
             VecWriter { base: FPDF_FILEWRITE { version: 1, WriteBlock: Some(write_block) }, out: Vec::new() };
-        let ok = unsafe { self.lib.FPDF_SaveAsCopy(self.handle, &mut writer.base, FPDF_NO_INCREMENTAL) };
+        let ok = unsafe { self.lib.FPDF_SaveAsCopy(self.handle, &mut writer.base, flags) };
         if self.lib.is_true(ok) { Ok(writer.out) } else { Err("PDFium could not write the document".into()) }
     }
 }

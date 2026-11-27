@@ -394,15 +394,15 @@ fn appearance(doc: &mut Document, w: f32, h: f32, rotation: i64, req: &SignReque
             let ox = mark_box[0] + (mark_box[2] - sw * scale) / 2.0;
             let oy = mark_box[1] + (mark_box[3] + sh * scale) / 2.0; // top of the drawing
             let [r, g, b] = color.map(|c| c as f32 / 255.0);
-            let _ = write!(content, "q {r:.3} {g:.3} {b:.3} RG {:.2} w 1 J 1 j\n", (scale * 0.012).clamp(0.6, 3.0));
+            let _ = writeln!(content, "q {r:.3} {g:.3} {b:.3} RG {:.2} w 1 J 1 j", (scale * 0.012).clamp(0.6, 3.0));
             for stroke in strokes {
                 for (i, p) in stroke.iter().enumerate() {
                     let (x, y) = (ox + p[0] * scale, oy - p[1] * scale);
-                    let _ = write!(content, "{x:.2} {y:.2} {}\n", if i == 0 { "m" } else { "l" });
+                    let _ = writeln!(content, "{x:.2} {y:.2} {}", if i == 0 { "m" } else { "l" });
                 }
                 if stroke.len() == 1 {
                     let (x, y) = (ox + stroke[0][0] * scale, oy - stroke[0][1] * scale);
-                    let _ = write!(content, "{:.2} {y:.2} l\n", x + 0.1);
+                    let _ = writeln!(content, "{:.2} {y:.2} l", x + 0.1);
                 }
                 content.push_str("S\n");
             }
@@ -418,7 +418,7 @@ fn appearance(doc: &mut Document, w: f32, h: f32, rotation: i64, req: &SignReque
             let (dw, dh) = (iw * scale, ih * scale);
             let x = mark_box[0] + (mark_box[2] - dw) / 2.0;
             let y = mark_box[1] + (mark_box[3] - dh) / 2.0;
-            let _ = write!(content, "q {dw:.2} 0 0 {dh:.2} {x:.2} {y:.2} cm /Im1 Do Q\n");
+            let _ = writeln!(content, "q {dw:.2} 0 0 {dh:.2} {x:.2} {y:.2} cm /Im1 Do Q");
         }
     }
     if !req.lines.is_empty() {
@@ -432,10 +432,10 @@ fn appearance(doc: &mut Document, w: f32, h: f32, rotation: i64, req: &SignReque
         resources.set("Font", Object::Dictionary(fonts));
         let n = req.lines.len() as f32;
         let widest = req.lines.iter().map(|l| helvetica_width(l)).fold(0.0f32, f32::max).max(1.0);
-        let size = (text_box[3] / (n * 1.25)).min(text_box[2] / widest).min(10.0).max(2.0);
+        let size = (text_box[3] / (n * 1.25)).min(text_box[2] / widest).clamp(2.0, 10.0);
         let leading = size * 1.25;
         let top = text_box[1] + (text_box[3] + n * leading) / 2.0 - size;
-        let _ = write!(content, "BT /F1 {size:.2} Tf 0 0 0 rg {leading:.2} TL {:.2} {top:.2} Td\n", text_box[0]);
+        let _ = writeln!(content, "BT /F1 {size:.2} Tf 0 0 0 rg {leading:.2} TL {:.2} {top:.2} Td", text_box[0]);
         for (i, line) in req.lines.iter().enumerate() {
             if i > 0 {
                 content.push_str("T*\n");

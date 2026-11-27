@@ -258,6 +258,8 @@ pub struct DocTab {
     /// A just-created annotation to open for typing once it is listed.
     pub pending_edit: Option<(usize, usize)>,
     pub draft: Option<Draft>,
+    /// A box dragged with the digital signature tool, waiting for the signing dialog.
+    pub sign_box: Option<(usize, PdfBox)>,
     /// Areas marked for redaction (PDF page space), applied together.
     pub redactions: Vec<(usize, PdfBox)>,
     /// Redaction area being dragged out: page, start and end (PDF page space).
@@ -341,6 +343,7 @@ impl DocTab {
             pending_edit: None,
             mark_dirty_on_open: false,
             draft: None,
+            sign_box: None,
             redactions: Vec::new(),
             pending_show: None,
             grid_focus: None,

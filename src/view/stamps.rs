@@ -31,6 +31,8 @@ pub struct StampState {
     text: Option<StampSpec>,
     new_text: String,
     pub show_signatures: bool,
+    /// The "Sign with certificate…" button was clicked.
+    pub start_digital_signature: bool,
     /// The signature being drawn (strokes in canvas coordinates 0..1 × 0..ASPECT).
     drawing: Vec<Vec<[f32; 2]>>,
 }
@@ -212,6 +214,14 @@ pub fn signature_options(ui: &mut Ui, state: &mut StampState, settings: &mut Set
     }
     if ui.button(t("Signatures…")).clicked() {
         state.show_signatures = true;
+    }
+    ui.separator();
+    if ui
+        .button(t("Sign with certificate…"))
+        .on_hover_text(t("A digital signature: proves who signed and that the document was not changed afterwards"))
+        .clicked()
+    {
+        state.start_digital_signature = true;
     }
     changed
 }

@@ -78,6 +78,12 @@ pub struct App {
     /// Short status message and when it was shown.
     notice: Option<(String, f64)>,
     print_results: (Sender<PrintResult>, Receiver<PrintResult>),
+    sign_dialog: Option<crate::sign_dialog::SignDialog>,
+    /// Certificates opened this session (the password is asked once).
+    identities: HashMap<PathBuf, std::sync::Arc<crate::engine::sign::SigningIdentity>>,
+    /// Signing in the background: the document, where the result goes, the outcome.
+    sign_results: (Sender<SignResult>, Receiver<SignResult>),
+    signing: bool,
     /// Debug aid: with MAGIC_PDF_SCREENSHOT=<file.ppm> the app captures its own window
     /// once pages have rendered, saves it and quits.
     screenshot_to: Option<PathBuf>,
@@ -155,6 +161,9 @@ struct Presentation {
     /// When it started (for the "Esc ends" hint).
     since: f64,
 }
+
+/// A finished signing: the document, where the signed file went, the outcome.
+type SignResult = (DocId, PathBuf, Result<(), String>);
 
 /// Results from background update work.
 enum UpdateEvent {
@@ -301,6 +310,10 @@ impl App {
             print_dialog: None,
             notice: None,
             print_results: std::sync::mpsc::channel(),
+            sign_dialog: None,
+            identities: HashMap::new(),
+            sign_results: std::sync::mpsc::channel(),
+            signing: false,
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             screenshot_requested: false,
             selftest_to: std::env::var_os("MAGIC_PDF_SELFTEST").map(PathBuf::from),
@@ -351,6 +364,24 @@ impl App {
             app.show_settings = wanted == "settings";
             app.signatures_on_load = wanted == "signatures";
             app.present_on_load = wanted == "present";
+            if wanted == "sign" {
+                // The signing dialog for a box on the first page; MAGIC_PDF_P12 and
+                // MAGIC_PDF_P12_PASSWORD open a certificate file in it.
+                app.sign_dialog = Some(crate::sign_dialog::SignDialog::new(
+                    app.next_id,
+                    0,
+                    crate::engine::PdfBox { left: 300.0, bottom: 80.0, right: 540.0, top: 150.0 },
+                ));
+                if let Ok(p12) = std::env::var("MAGIC_PDF_P12") {
+                    let pw = std::env::var("MAGIC_PDF_P12_PASSWORD").unwrap_or_default();
+                    if let Ok(id) =
+                        crate::engine::sign::SigningIdentity::from_pkcs12(&std::fs::read(&p12).unwrap_or_default(), &pw)
+                    {
+                        app.identities.insert(p12.clone().into(), std::sync::Arc::new(id));
+                    }
+                    app.settings.sign_certificate = Some(p12.into());
+                }
+            }
         }
         let day = 24 * 60 * 60;
         if app.settings.check_updates && crate::settings::now().saturating_sub(app.settings.last_update_check) >= day {
@@ -1629,6 +1660,93 @@ impl App {
         }
     }
 
+    /// The digital signature tool: drag a box, then the signing dialog.
+    fn start_digital_signature(&mut self) {
+        self.tool = Tool::DigitalSign;
+        self.notice(t("Drag a box where the signature goes"));
+    }
+
+    fn sign_ui(&mut self, ctx: &egui::Context) {
+        while let Ok((doc, out, result)) = self.sign_results.1.try_recv() {
+            self.signing = false;
+            match result {
+                Ok(()) => {
+                    self.notice(&tf("Signed and saved as {file}", &[("file", &out.display())]));
+                    self.show_signed(doc, &out);
+                }
+                Err(e) => self.error = Some(tf("Signing failed: {e}", &[("e", &e)])),
+            }
+        }
+        if std::mem::take(&mut self.stamps.start_digital_signature) {
+            self.start_digital_signature();
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some((page, rect)) = tab.sign_box.take()
+        {
+            self.tool = Tool::Hand;
+            self.sign_dialog = Some(crate::sign_dialog::SignDialog::new(tab.id, page, rect));
+        }
+        if self.signing {
+            egui::Area::new(egui::Id::unique("signing"))
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(t("Signing…"));
+                        });
+                    });
+                });
+        }
+        let Some(dialog) = &mut self.sign_dialog else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == dialog.doc) else {
+            self.sign_dialog = None;
+            return;
+        };
+        let (file, unsaved) = (tab.path.clone(), tab.dirty);
+        let action = dialog.show(ctx, &mut self.settings, &mut self.identities, &file, unsaved);
+        match action {
+            crate::sign_dialog::SignAction::Keep => {}
+            crate::sign_dialog::SignAction::Close => {
+                self.sign_dialog = None;
+                self.settings.save();
+            }
+            crate::sign_dialog::SignAction::Sign { request, identity, out } => {
+                let doc = dialog.doc;
+                self.sign_dialog = None;
+                self.settings.save();
+                self.signing = true;
+                let tx = self.sign_results.0.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::sign_dialog::sign_file(&file, &out, &request, &identity);
+                    let _ = tx.send((doc, out, result));
+                    ctx.request_repaint();
+                });
+            }
+        }
+    }
+
+    /// After signing: reloads the tab when the signed file replaced it, else opens
+    /// the signed copy.
+    fn show_signed(&mut self, doc: DocId, out: &Path) {
+        let out = simplify_path(std::fs::canonicalize(out).unwrap_or_else(|_| out.to_path_buf()));
+        match self.tabs.iter().position(|t| t.id == doc && t.path == out) {
+            Some(index) => {
+                let page = self.tabs[index].current_page;
+                self.close_tab_now(index);
+                self.open(&out);
+                let last = self.tabs.len() - 1;
+                let tab = self.tabs.remove(last);
+                self.tabs.insert(index.min(self.tabs.len()), tab);
+                self.active = index.min(self.tabs.len() - 1);
+                self.tabs[self.active].pending_goto = Some(page);
+            }
+            None => self.open(&out),
+        }
+        self.signatures_on_load = true;
+    }
+
     fn print_dialog_ui(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.print_results.1.try_recv() {
             match result {
@@ -2357,6 +2475,9 @@ impl App {
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Export pages as pictures…"))).clicked() {
                     self.images_dialog = Some(Default::default());
+                }
+                if ui.add_enabled(has_tab, egui::Button::new(t("Sign with certificate…"))).clicked() {
+                    self.start_digital_signature();
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(kb(t("Print…\tCtrl+P")))).clicked() {
                     self.print();
@@ -3627,6 +3748,7 @@ impl eframe::App for App {
         if crate::view::stamps::signatures_window(&ctx, &mut self.stamps, &mut self.settings) {
             self.settings.save();
         }
+        self.sign_ui(&ctx);
 
         if self.settings.recent_colors != recent_before {
             self.settings.save();

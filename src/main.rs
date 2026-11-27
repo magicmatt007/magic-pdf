@@ -17,6 +17,7 @@ mod pinch;
 mod print;
 mod reveal;
 mod settings;
+mod sign_dialog;
 mod theme;
 mod update;
 mod view;
