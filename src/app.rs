@@ -56,6 +56,10 @@ pub struct App {
     engine: Result<Engine, String>,
     /// The app icon, shown at the start of the menu bar.
     app_icon: egui::TextureHandle,
+    /// The tab last scrolled into view in the tab row, and whether the tabs did not all
+    /// fit in it (last frame).
+    tab_shown: usize,
+    tabs_overflow: bool,
     /// The search in the recent files on the start screen.
     recent_search: String,
     /// The large app icon on the start screen (decoded when first shown).
@@ -303,6 +307,8 @@ impl App {
             app_icon,
             logo: None,
             recent_search: String::new(),
+            tab_shown: usize::MAX,
+            tabs_overflow: false,
             ctx,
             tabs: Vec::new(),
             active: 0,
@@ -3149,14 +3155,20 @@ impl App {
         // when the window is too narrow to leave room for the tabs, it gets a row of its own.
         let gap = ui.spacing().item_spacing.x;
         let beside = ui.available_width() - self.search_width - gap >= 240.0;
-        let tabs_width = if beside { ui.available_width() - self.search_width - gap } else { ui.available_width() };
+        let mut tabs_width = if beside { ui.available_width() - self.search_width - gap } else { ui.available_width() };
+        if self.tabs_overflow {
+            tabs_width -= 34.0; // the "all tabs" button
+        }
+        let mut pick = None;
         ui.horizontal(|ui| {
-            egui::ScrollArea::horizontal().id_salt("tabbar").max_width(tabs_width).show(ui, |ui| {
+            // The mouse wheel scrolls the tab row sideways.
+            ui.style_mut().always_scroll_the_only_direction = true;
+            let out = egui::ScrollArea::horizontal().id_salt("tabbar").max_width(tabs_width).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let resp = ui
                             .add(
-                                egui::Button::selectable(i == self.active, tab.title())
+                                egui::Button::selectable(i == self.active, short_title(&tab.title()))
                                     .sense(egui::Sense::click_and_drag()),
                             )
                             .on_hover_text(format!(
@@ -3165,6 +3177,11 @@ impl App {
                                 t("Drag it down onto the page or out of the window to open it in its own window")
                             ));
                         tab_rects.push(resp.rect);
+                        // A newly active tab (Ctrl+Tab, a file opened) scrolls into view.
+                        if i == self.active && self.tab_shown != i {
+                            resp.scroll_to_me(None);
+                            self.tab_shown = i;
+                        }
                         if resp.clicked() {
                             self.active = i;
                         }
@@ -3221,10 +3238,31 @@ impl App {
                     }
                 });
             });
+            self.tabs_overflow = out.content_size.x > out.inner_rect.width() + 1.0;
+            if self.tabs_overflow {
+                let menu = ui.menu_button(icons::text(icons::CARET_DOWN), |ui| {
+                    egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                        for (i, tab) in self.tabs.iter().enumerate() {
+                            if ui
+                                .selectable_label(i == self.active, tab.title())
+                                .on_hover_text(tab.path.display().to_string())
+                                .clicked()
+                            {
+                                pick = Some(i);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                menu.response.on_hover_text(tf("All open tabs ({n})", &[("n", &self.tabs.len())]));
+            }
             if beside {
                 self.search_bar(ui);
             }
         });
+        if let Some(i) = pick {
+            self.active = i;
+        }
         if !beside {
             ui.horizontal(|ui| self.search_bar(ui));
         }
@@ -4287,6 +4325,15 @@ fn recent_list(ui: &mut Ui, entries: &[(&PathBuf, bool)], menu: bool) -> Option<
         });
     }
     action
+}
+
+/// A tab's label: long file names shortened (the full path shows on hover).
+fn short_title(title: &str) -> String {
+    const MAX: usize = 28;
+    if title.chars().count() <= MAX {
+        return title.to_string();
+    }
+    format!("{}…", title.chars().take(MAX - 1).collect::<String>())
 }
 
 /// The last two folders of a path, e.g. `…\datasheets\out` (whole if short).

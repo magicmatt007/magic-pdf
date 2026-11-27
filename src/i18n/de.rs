@@ -1006,4 +1006,5 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Search the history", "Verlauf durchsuchen"),
     ("No file in the history matches.", "Keine Datei im Verlauf passt."),
     ("{n} older files: search to find them", "{n} ältere Dateien: mit der Suche finden"),
+    ("All open tabs ({n})", "Alle offenen Tabs ({n})"),
 ];
