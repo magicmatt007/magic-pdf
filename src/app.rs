@@ -729,6 +729,8 @@ impl App {
                 crate::ipc::Message::Open(path) => self.open(&path),
                 crate::ipc::Message::Take(t) => self.take(t),
             }
+            // Back from the taskbar if minimized, then to the front.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
         }
