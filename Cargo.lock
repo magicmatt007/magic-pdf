@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "magic-pdf"
-version = "0.14.5"
+version = "0.14.6"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -2506,6 +2506,8 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "windows",
+ "windows-core",
  "windows-sys 0.61.2",
  "winit",
  "winresource",

@@ -1,6 +1,6 @@
 [package]
 name = "magic-pdf"
-version = "0.14.5"
+version = "0.14.6"
 edition = "2024"
 description = "Lightweight cross-platform PDF viewer with horizontal page layout"
 license = "AGPL-3.0-or-later"
@@ -67,6 +67,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 ] }
 
 [target.'cfg(windows)'.dependencies]
+# Explorer's "Open" for any number of files: a COM command handler (explorer_verb.rs).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

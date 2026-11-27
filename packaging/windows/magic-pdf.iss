@@ -11,6 +11,8 @@
 #endif
 #define MyAppExe "magic-pdf.exe"
 #define MyProgId "magic-pdf.Document"
+; COM class of the open verb (src/explorer_verb.rs CLSID); "{{" is a literal "{".
+#define VerbClsid "{{ca89377c-91a6-4986-9efd-149f6bf44f21}"
 #define Root "..\.."
 
 [Setup]
@@ -60,17 +62,29 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: deskto
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}"; ValueType: string; ValueName: ""; ValueData: "PDF Document"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExe},0"
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""
+; "Open" on any number of selected files: Explorer starts magic-pdf once (as a COM
+; server, see src/explorer_verb.rs) and hands it the whole selection, instead of one
+; process per file and nothing at all above 15 files. The command line above stays
+; for programs that run it directly. Layout as in Microsoft's ExecuteCommandVerb sample.
+Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open\command"; ValueType: string; ValueName: "DelegateExecute"; ValueData: "{#VerbClsid}"
+Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
 ; A test build (not released) added a drop target here that sent PDFs to the Windows
-; Photo Viewer; remove it and its multi-select setting where it was installed.
+; Photo Viewer; remove it where it was installed.
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open\DropTarget"; ValueType: none; Flags: deletekey
-Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open"; ValueType: none; ValueName: "MultiSelectModel"; Flags: deletevalue
 ; Listed under "Open with" for PDFs.
 Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "{#MyProgId}"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".pdf"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueName: "DelegateExecute"; ValueData: "{#VerbClsid}"
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
 Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\DropTarget"; ValueType: none; Flags: deletekey
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open"; ValueType: none; ValueName: "MultiSelectModel"; Flags: deletevalue
+; The COM class behind DelegateExecute: magic-pdf.exe as a local server (COM adds
+; -Embedding to the command line).
+Root: HKA; Subkey: "Software\Classes\CLSID\{#VerbClsid}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName} Open"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\CLSID\{#VerbClsid}"; ValueType: string; ValueName: "AppId"; ValueData: "{#VerbClsid}"
+Root: HKA; Subkey: "Software\Classes\CLSID\{#VerbClsid}\LocalServer32"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"""
+Root: HKA; Subkey: "Software\Classes\AppID\{#VerbClsid}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 ; Shown on Windows' Default apps page.
 Root: HKA; Subkey: "Software\{#MyAppName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\{#MyAppName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Lightweight PDF viewer with a horizontal page layout for wide screens"

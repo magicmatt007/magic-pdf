@@ -4,6 +4,8 @@ mod app;
 mod document;
 mod einvoice;
 mod engine;
+#[cfg(windows)]
+mod explorer_verb;
 mod fonts;
 mod i18n;
 mod icons;
@@ -33,6 +35,8 @@ pub struct Args {
     pub new_window: bool,
     pub at: Option<[f32; 2]>,
     pub take: Option<ipc::TabTransfer>,
+    /// Started by COM for Explorer's "Open" (Windows): the files come from Explorer.
+    pub embedding: bool,
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
@@ -41,6 +45,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
     while let Some(a) = it.next() {
         match a.to_str() {
             Some("--new-window") => out.new_window = true,
+            Some(a) if a.eq_ignore_ascii_case("-Embedding") || a.eq_ignore_ascii_case("/Embedding") => {
+                out.embedding = true
+            }
             Some("--at") => {
                 out.at = it.next().and_then(|v| {
                     let (x, y) = v.to_str()?.split_once(',')?;
@@ -74,7 +81,17 @@ fn hand_to_running_instance(files: &[PathBuf]) -> bool {
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let args = parse_args(std::env::args_os().skip(1));
+    #[allow(unused_mut)]
+    let mut args = parse_args(std::env::args_os().skip(1));
+    // Explorer's "Open" on a selection: receive all the files, then carry on as if
+    // they were on the command line.
+    #[cfg(windows)]
+    if args.embedding {
+        match explorer_verb::receive_files() {
+            Some(files) if !files.is_empty() => args.files = files,
+            _ => return Ok(()),
+        }
+    }
     // Opening a PDF while magic-pdf runs adds a tab to that window instead.
     if !args.new_window && !args.files.is_empty() {
         if hand_to_running_instance(&args.files) {
@@ -136,8 +153,13 @@ mod tests {
     #[test]
     fn command_line() {
         let a = parse_args(os(&["a.pdf", "b.pdf"]));
+        assert!(!a.embedding);
         assert_eq!(a.files.len(), 2);
         assert!(!a.new_window);
+        // Started by COM for Explorer's "Open": the files come from Explorer, not
+        // from the command line.
+        let a = parse_args(os(&["-Embedding"]));
+        assert!(a.embedding && a.files.is_empty());
         let a = parse_args(os(&["--at", "100,200.5", "--take", "/tmp/x.pdf", "/home/y.pdf", "3", "1"]));
         assert_eq!(a.at, Some([100.0, 200.5]));
         assert!(a.new_window);
