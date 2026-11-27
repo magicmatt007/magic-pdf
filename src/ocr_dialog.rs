@@ -1,7 +1,7 @@
 //! The "Recognise text (OCR)" dialog: choose pages and languages, show progress.
 
-use std::path::PathBuf;
 use crate::i18n::{t, tf};
+use std::path::PathBuf;
 
 use eframe::egui;
 
@@ -67,9 +67,8 @@ fn language_name(code: &str) -> Option<&'static str> {
 
 /// The Tesseract code for the user's locale language, if it is a common one.
 fn locale_language() -> Option<&'static str> {
-    let lang = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))?;
+    let lang =
+        ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))?;
     Some(match lang.get(..2)? {
         "de" => "deu",
         "fr" => "fra",
@@ -128,11 +127,7 @@ impl OcrDialog {
                 None
             }
             Response::OcrFinished { doc, result } if *doc == state.doc => match result {
-                OcrOutcome::Done {
-                    recognised,
-                    skipped,
-                    words,
-                } => {
+                OcrOutcome::Done { recognised, skipped, words } => {
                     self.state = None;
                     let mut msg = match recognised {
                         0 => t("No text found").to_string(),

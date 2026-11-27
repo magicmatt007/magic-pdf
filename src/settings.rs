@@ -218,16 +218,11 @@ fn config_path() -> Option<PathBuf> {
 }
 
 fn default_author() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_default()
+    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default()
 }
 
 pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl Settings {
@@ -268,7 +263,8 @@ impl Settings {
                 std::fs::create_dir_all(dir)?;
             }
             let mine = toml::Value::try_from(&*self)?;
-            let disk = std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).map(toml::Value::Table);
+            let disk =
+                std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).map(toml::Value::Table);
             let merged = match (&self.base, disk) {
                 (Some(base), Some(disk)) => merge3(base, &mine, &disk),
                 _ => mine,
@@ -322,16 +318,9 @@ impl Settings {
     }
 
     pub fn set_file_state(&mut self, path: &Path, state: FileState) {
-        self.files.insert(
-            key(path),
-            StoredFileState {
-                state,
-                last_used: now(),
-            },
-        );
+        self.files.insert(key(path), StoredFileState { state, last_used: now() });
         if self.files.len() > MAX_FILE_STATES {
-            let mut by_age: Vec<(String, u64)> =
-                self.files.iter().map(|(k, v)| (k.clone(), v.last_used)).collect();
+            let mut by_age: Vec<(String, u64)> = self.files.iter().map(|(k, v)| (k.clone(), v.last_used)).collect();
             by_age.sort_by_key(|e| e.1);
             for (k, _) in by_age.into_iter().take(self.files.len() - MAX_FILE_STATES) {
                 self.files.remove(&k);
@@ -341,10 +330,7 @@ impl Settings {
 }
 
 fn key(path: &Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

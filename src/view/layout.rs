@@ -22,13 +22,8 @@ pub enum LayoutMode {
 }
 
 impl LayoutMode {
-    pub const ALL: [LayoutMode; 5] = [
-        LayoutMode::Horizontal,
-        LayoutMode::Vertical,
-        LayoutMode::SinglePage,
-        LayoutMode::Facing,
-        LayoutMode::Grid,
-    ];
+    pub const ALL: [LayoutMode; 5] =
+        [LayoutMode::Horizontal, LayoutMode::Vertical, LayoutMode::SinglePage, LayoutMode::Facing, LayoutMode::Grid];
 
     pub fn label(self) -> &'static str {
         crate::i18n::t(match self {
@@ -76,42 +71,27 @@ impl Layout {
 
     pub fn row_rect(&self, page: usize) -> Option<Rect> {
         let row = self.rows.iter().find(|r| r.contains(&page))?;
-        row.iter()
-            .filter_map(|&p| self.page_rect(p))
-            .reduce(|a, b| a.union(b))
+        row.iter().filter_map(|&p| self.page_rect(p)).reduce(|a, b| a.union(b))
     }
 
     /// Pages whose rectangle intersects `area` (document space).
     pub fn pages_in(&self, area: Rect) -> Vec<usize> {
-        self.pages
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| r.filter(|r| r.intersects(area)).map(|_| i))
-            .collect()
+        self.pages.iter().enumerate().filter_map(|(i, r)| r.filter(|r| r.intersects(area)).map(|_| i)).collect()
     }
 
     pub fn page_at(&self, point: Pos2) -> Option<usize> {
-        self.pages
-            .iter()
-            .position(|r| r.is_some_and(|r| r.contains(point)))
+        self.pages.iter().position(|r| r.is_some_and(|r| r.contains(point)))
     }
 }
 
 /// Page size after applying the view rotation.
 pub fn rotated_size(size: (f32, f32), rotation: Rotation) -> Vec2 {
-    if rotation.swaps_axes() {
-        vec2(size.1, size.0)
-    } else {
-        vec2(size.0, size.1)
-    }
+    if rotation.swaps_axes() { vec2(size.1, size.0) } else { vec2(size.0, size.1) }
 }
 
 pub fn compute(page_sizes: &[(f32, f32)], p: &LayoutParams) -> Layout {
     let n = page_sizes.len();
-    let sizes: Vec<Vec2> = page_sizes
-        .iter()
-        .map(|&s| rotated_size(s, p.rotation))
-        .collect();
+    let sizes: Vec<Vec2> = page_sizes.iter().map(|&s| rotated_size(s, p.rotation)).collect();
 
     let rows: Vec<Vec<usize>> = match p.mode {
         LayoutMode::Horizontal => {
@@ -165,8 +145,7 @@ pub fn compute(page_sizes: &[(f32, f32)], p: &LayoutParams) -> Layout {
     let row_sizes: Vec<Vec2> = rows
         .iter()
         .map(|row| {
-            let w: f32 = row.iter().map(|&i| sizes[i].x).sum::<f32>()
-                + GAP * (row.len().saturating_sub(1)) as f32;
+            let w: f32 = row.iter().map(|&i| sizes[i].x).sum::<f32>() + GAP * (row.len().saturating_sub(1)) as f32;
             let h = row.iter().map(|&i| sizes[i].y).fold(0.0, f32::max);
             vec2(w, h)
         })
@@ -191,11 +170,7 @@ pub fn compute(page_sizes: &[(f32, f32)], p: &LayoutParams) -> Layout {
         y += rs.y + GAP;
     }
 
-    let max_right = pages
-        .iter()
-        .flatten()
-        .map(|r| r.right())
-        .fold(0.0, f32::max);
+    let max_right = pages.iter().flatten().map(|r| r.right()).fold(0.0, f32::max);
     let size = vec2(max_right.max(content_w + GAP) + GAP, y);
     Layout { pages, rows, size }
 }
@@ -247,12 +222,7 @@ mod tests {
     use super::*;
 
     fn params(mode: LayoutMode) -> LayoutParams {
-        LayoutParams {
-            mode,
-            rotation: Rotation::R0,
-            available_width: 1000.0,
-            single_page: 0,
-        }
+        LayoutParams { mode, rotation: Rotation::R0, available_width: 1000.0, single_page: 0 }
     }
 
     const A4: (f32, f32) = (595.0, 842.0);
@@ -342,11 +312,7 @@ mod tests {
     #[test]
     fn geom_transform_handles_origin_and_page_rotation() {
         // A page with a crop box starting at (10, 20) and /Rotate 90.
-        let geom = PageGeom {
-            size: (595.0, 842.0),
-            origin: (10.0, 20.0),
-            rotation: Rotation::R90,
-        };
+        let geom = PageGeom { size: (595.0, 842.0), origin: (10.0, 20.0), rotation: Rotation::R90 };
         // Top-left of the unrotated crop box ends up at the top-right of the display.
         let p = geom_pdf_to_local(pos2(10.0, 862.0), &geom, Rotation::R0);
         assert_eq!(p, pos2(842.0, 0.0));

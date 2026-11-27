@@ -53,11 +53,7 @@ pub fn bucket(px: f32) -> u32 {
 fn rank(k: &RenderKey, want_width: u32, version: u32) -> (bool, i64, i64) {
     let sharp = k.width_px as f32 >= want_width as f32 * 0.9;
     let age = -(version.saturating_sub(k.version) as i64);
-    if sharp {
-        (true, age, -(k.width_px as i64))
-    } else {
-        (false, k.width_px as i64, age)
-    }
+    if sharp { (true, age, -(k.width_px as i64)) } else { (false, k.width_px as i64, age) }
 }
 
 struct Entry {
@@ -76,13 +72,7 @@ pub struct TextureCache {
 
 impl TextureCache {
     pub fn new(budget_bytes: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            total_bytes: 0,
-            budget_bytes,
-            frame: 0,
-            invert: false,
-        }
+        Self { entries: HashMap::new(), total_bytes: 0, budget_bytes, frame: 0, invert: false }
     }
 
     pub fn begin_frame(&mut self) {
@@ -105,14 +95,7 @@ impl TextureCache {
         let name = format!("page-{}-{}-{}-v{}", key.doc, key.page, key.width_px, key.version);
         let texture = ctx.load_texture(name, image, TextureOptions::LINEAR);
         let bytes = size[0] * size[1] * 4;
-        if let Some(old) = self.entries.insert(
-            key,
-            Entry {
-                texture,
-                bytes,
-                last_used: self.frame,
-            },
-        ) {
+        if let Some(old) = self.entries.insert(key, Entry { texture, bytes, last_used: self.frame }) {
             self.total_bytes -= old.bytes;
         }
         self.total_bytes += bytes;
@@ -193,12 +176,8 @@ impl TextureCache {
         if self.total_bytes <= self.budget_bytes {
             return;
         }
-        let mut candidates: Vec<(RenderKey, u64)> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| e.last_used < self.frame)
-            .map(|(k, e)| (*k, e.last_used))
-            .collect();
+        let mut candidates: Vec<(RenderKey, u64)> =
+            self.entries.iter().filter(|(_, e)| e.last_used < self.frame).map(|(k, e)| (*k, e.last_used)).collect();
         candidates.sort_by_key(|c| c.1);
         for (key, _) in candidates {
             if self.total_bytes <= self.budget_bytes {
@@ -216,14 +195,7 @@ mod tests {
     use super::*;
 
     fn key(width_px: u32, version: u32) -> RenderKey {
-        RenderKey {
-            doc: 1,
-            page: 0,
-            width_px,
-            rotation: Rotation::R0,
-            version,
-            tile: 0,
-        }
+        RenderKey { doc: 1, page: 0, width_px, rotation: Rotation::R0, version, tile: 0 }
     }
 
     fn insert(cache: &mut TextureCache, ctx: &egui::Context, k: RenderKey) {
@@ -270,11 +242,7 @@ mod tests {
             insert(&mut cache, &ctx, RenderKey { page, ..key(500, 0) });
         }
         // Delete page 0, rotate (what becomes) page 1.
-        let m = crate::engine::PageMapping {
-            map: vec![None, Some(0), Some(1)],
-            new_count: 2,
-            changed: vec![1],
-        };
+        let m = crate::engine::PageMapping { map: vec![None, Some(0), Some(1)], new_count: 2, changed: vec![1] };
         cache.remap(1, &m);
         assert!(cache.contains(&RenderKey { page: 0, ..key(500, 0) }));
         assert!(!cache.contains(&RenderKey { page: 1, ..key(500, 0) }));

@@ -69,7 +69,8 @@ mod tests {
     #[test]
     fn german_texts_keep_their_placeholders_and_shortcuts() {
         let placeholders = |s: &str| {
-            let mut v: Vec<String> = s.split('{').skip(1).filter_map(|p| p.split_once('}')).map(|(n, _)| n.to_string()).collect();
+            let mut v: Vec<String> =
+                s.split('{').skip(1).filter_map(|p| p.split_once('}')).map(|(n, _)| n.to_string()).collect();
             v.sort();
             v
         };
@@ -139,18 +140,30 @@ mod tests {
     fn no_untranslated_ui_texts() {
         // Literals that are not shown to users, or are the same in every language.
         const NOT_UI: &[&str] = &["Name", "Content", "Description", "Deutsch", "Accept: application/vnd.github+json"];
-        const NOT_UI_LINES: &[&str] =
-            &["log::", "eprintln!", "println!", "expect(", "assert", "panic!", "anyhow!", "bail!", "context(", "unreachable!"];
+        const NOT_UI_LINES: &[&str] = &[
+            "log::",
+            "eprintln!",
+            "println!",
+            "expect(",
+            "assert",
+            "panic!",
+            "anyhow!",
+            "bail!",
+            "context(",
+            "unreachable!",
+        ];
         fn looks_like_ui_text(s: &str) -> bool {
             let word: String = s.chars().take_while(char::is_ascii_alphabetic).collect();
             let mut chars = word.chars();
-            let capitalised = chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_lowercase());
+            let capitalised =
+                chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_lowercase());
             if !capitalised || word.len() < 3 {
                 return false;
             }
             let rest = &s[word.len()..];
             matches!(rest, "" | "." | "…")
-                || (rest.starts_with([' ', ',', ':']) && rest.trim_start_matches([' ', ',', ':']).starts_with(|c: char| c.is_ascii_alphabetic()))
+                || (rest.starts_with([' ', ',', ':'])
+                    && rest.trim_start_matches([' ', ',', ':']).starts_with(|c: char| c.is_ascii_alphabetic()))
         }
         fn literals(line: &str) -> Vec<(usize, String)> {
             let (b, mut out, mut i) = (line.as_bytes(), Vec::new(), 0);
@@ -191,13 +204,20 @@ mod tests {
                 let code = src.split("#[cfg(test)]").next().unwrap_or_default();
                 for (n, line) in code.lines().enumerate() {
                     let trimmed = line.trim_start();
-                    if trimmed.starts_with("//") || trimmed.starts_with("#[") || NOT_UI_LINES.iter().any(|m| line.contains(m)) {
+                    if trimmed.starts_with("//")
+                        || trimmed.starts_with("#[")
+                        || NOT_UI_LINES.iter().any(|m| line.contains(m))
+                    {
                         continue;
                     }
                     for (at, text) in literals(line) {
                         let before = line[..at].trim_end();
                         let wrapped = before.ends_with("t(") && !before.ends_with("_t(") || before.ends_with("tf(");
-                        if !wrapped && looks_like_ui_text(&text) && !german.contains(text.as_str()) && !NOT_UI.contains(&text.as_str()) {
+                        if !wrapped
+                            && looks_like_ui_text(&text)
+                            && !german.contains(text.as_str())
+                            && !NOT_UI.contains(&text.as_str())
+                        {
                             out.push(format!("{name}:{}: {text:?}", n + 1));
                         }
                     }
@@ -207,7 +227,10 @@ mod tests {
         let german: std::collections::HashSet<&str> = de::TEXTS.iter().map(|(en, _)| *en).collect();
         let mut found = Vec::new();
         scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &german, &mut found);
-        assert!(found.is_empty(), "texts shown without translation (wrap them in t() and add a German entry): {found:#?}");
+        assert!(
+            found.is_empty(),
+            "texts shown without translation (wrap them in t() and add a German entry): {found:#?}"
+        );
     }
 
     #[test]

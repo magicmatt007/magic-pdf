@@ -1,16 +1,16 @@
 //! Application shell: tabs, menus, toolbar, keyboard shortcuts and engine plumbing.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::i18n::{t, tf};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Ui};
 
 use crate::document::{ACTUAL_SIZE, DocTab, LoadState, SearchHit, ZOOM_PRESETS};
+use crate::engine::{DocId, Engine, FormKey, PageOp, PrintJob, Request, Response, SearchQuery, form_mods, move_target};
 use crate::icons;
 use crate::keys::kb;
-use crate::engine::{DocId, Engine, FormKey, PageOp, PrintJob, Request, Response, SearchQuery, form_mods, move_target};
 use crate::settings::Settings;
 use crate::view::cache::TextureCache;
 use crate::view::color_picker;
@@ -158,10 +158,7 @@ struct Presentation {
 
 /// Results from background update work.
 enum UpdateEvent {
-    Checked {
-        result: Result<Option<crate::update::Release>, String>,
-        manual: bool,
-    },
+    Checked { result: Result<Option<crate::update::Release>, String>, manual: bool },
     Downloaded(Result<PathBuf, String>),
 }
 
@@ -273,11 +270,7 @@ impl App {
         crate::theme::install(&ctx);
         let settings = Settings::load();
         crate::i18n::set_language(&settings.language);
-        ctx.set_theme(if settings.dark_ui {
-            egui::Theme::Dark
-        } else {
-            egui::Theme::Light
-        });
+        ctx.set_theme(if settings.dark_ui { egui::Theme::Dark } else { egui::Theme::Light });
         let mut cache = TextureCache::new(TEXTURE_BUDGET);
         cache.invert = settings.night_mode;
         let app_icon = ctx.load_texture(
@@ -443,10 +436,7 @@ impl App {
         let tx = self.update_events.0.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(UpdateEvent::Checked {
-                result: crate::update::check(),
-                manual,
-            });
+            let _ = tx.send(UpdateEvent::Checked { result: crate::update::check(), manual });
             ctx.request_repaint();
         });
     }
@@ -458,7 +448,8 @@ impl App {
                     Ok(Some(r)) if manual || self.settings.skipped_version.as_deref() != Some(r.version()) => {
                         self.update = UpdateUi::Available(r);
                     }
-                    Ok(_) if manual => self.notice(&tf("magic-pdf {version} is up to date", &[("version", &env!("CARGO_PKG_VERSION"))])),
+                    Ok(_) if manual => self
+                        .notice(&tf("magic-pdf {version} is up to date", &[("version", &env!("CARGO_PKG_VERSION"))])),
                     Err(e) if manual => self.error = Some(tf("Could not check for updates: {e}", &[("e", &e)])),
                     Err(e) => log::info!("update check failed: {e}"),
                     _ => {}
@@ -579,14 +570,11 @@ impl App {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let mut tab = DocTab::new(id, original.clone(), self.settings.default_mode, self.settings.file_state(&original));
+        let mut tab =
+            DocTab::new(id, original.clone(), self.settings.default_mode, self.settings.file_state(&original));
         tab.pending_goto = Some(t.page);
         tab.mark_dirty_on_open = t.dirty;
-        self.send(Request::Open {
-            doc: id,
-            path: t.file.clone(),
-            password: None,
-        });
+        self.send(Request::Open { doc: id, path: t.file.clone(), password: None });
         if t.file != t.original {
             self.temp_files.insert(id, t.file);
         }
@@ -631,7 +619,8 @@ impl App {
                 }
             }
             MoveTarget::NewWindow(at) => {
-                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "magic-pdf".into()));
+                let mut cmd =
+                    std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "magic-pdf".into()));
                 if let Some([x, y]) = at {
                     cmd.arg("--at").arg(format!("{x},{y}"));
                 }
@@ -688,9 +677,7 @@ impl App {
                 crate::ipc::Message::Take(t) => self.take(t),
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                egui::UserAttentionType::Informational,
-            ));
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
         }
     }
 
@@ -709,11 +696,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let tab = DocTab::new(id, path.clone(), self.settings.default_mode, self.settings.file_state(&path));
-        self.send(Request::Open {
-            doc: id,
-            path: path.clone(),
-            password: None,
-        });
+        self.send(Request::Open { doc: id, path: path.clone(), password: None });
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.settings.add_recent(&path);
@@ -761,9 +744,7 @@ impl App {
             return;
         }
         let path = if save_as {
-            let mut dialog = rfd::FileDialog::new()
-                .add_filter(t("PDF documents"), &["pdf"])
-                .set_file_name(&tab.name);
+            let mut dialog = rfd::FileDialog::new().add_filter(t("PDF documents"), &["pdf"]).set_file_name(&tab.name);
             if let Some(dir) = tab.path.parent() {
                 dialog = dialog.set_directory(dir);
             }
@@ -787,11 +768,7 @@ impl App {
         }
         let dirty = pending || docs.iter().any(|d| self.tabs.iter().any(|t| t.id == *d && t.dirty));
         if dirty {
-            self.close_intent = Some(CloseIntent {
-                docs,
-                quit,
-                awaiting_save: HashSet::new(),
-            });
+            self.close_intent = Some(CloseIntent { docs, quit, awaiting_save: HashSet::new() });
         } else {
             self.finish_close(&docs, quit);
         }
@@ -899,18 +876,11 @@ impl App {
                     }
                 }
             }
-            Response::OpenFailed {
-                doc,
-                error,
-                password_required,
-            } => {
+            Response::OpenFailed { doc, error, password_required } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     tab.state = if password_required {
                         let wrong = matches!(tab.state, LoadState::NeedsPassword { .. });
-                        LoadState::NeedsPassword {
-                            input: String::new(),
-                            wrong,
-                        }
+                        LoadState::NeedsPassword { input: String::new(), wrong }
                     } else {
                         LoadState::Failed(error)
                     };
@@ -932,21 +902,30 @@ impl App {
                 match self.attachment_actions.remove(&(doc, index)) {
                     Some(AttachmentAction::Save(path)) => match std::fs::write(&path, &data) {
                         Ok(()) => self.notice(&tf("Saved {file}", &[("file", &path.display())])),
-                        Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                        Err(e) => {
+                            self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)]))
+                        }
                     },
                     Some(AttachmentAction::Open) => {
                         // A copy in the temporary folder, opened with the system's program.
-                        let safe: String = name.chars().map(|c| if c.is_alphanumeric() || ".-_ ".contains(c) { c } else { '_' }).collect();
+                        let safe: String = name
+                            .chars()
+                            .map(|c| if c.is_alphanumeric() || ".-_ ".contains(c) { c } else { '_' })
+                            .collect();
                         let dir = std::env::temp_dir().join(format!("magic-pdf-attachments-{}", std::process::id()));
                         let path = dir.join(if safe.is_empty() { "attachment".into() } else { safe });
                         let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &data));
                         match result {
                             Ok(()) => {
                                 if let Err(e) = open::that_detached(&path) {
-                                    self.error = Some(tf("Could not open {file}: {e}", &[("file", &path.display()), ("e", &e)]));
+                                    self.error =
+                                        Some(tf("Could not open {file}: {e}", &[("file", &path.display()), ("e", &e)]));
                                 }
                             }
-                            Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                            Err(e) => {
+                                self.error =
+                                    Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)]))
+                            }
                         }
                     }
                     Some(AttachmentAction::Inspect) | None => {
@@ -983,14 +962,7 @@ impl App {
                     tab.texts.insert(page, Some(text));
                 }
             }
-            Response::SearchResults {
-                doc,
-                generation,
-                page,
-                geom,
-                hits,
-                context,
-            } => {
+            Response::SearchResults { doc, generation, page, geom, hits, context } => {
                 let active_doc = self.tabs.get(self.active).map(|t| t.id);
                 if let Some(tab) = self.tab_mut(doc)
                     && tab.search.generation == generation
@@ -1018,12 +990,7 @@ impl App {
                     tab.search.running = false;
                 }
             }
-            Response::PageAnnots {
-                doc,
-                page,
-                geom,
-                annots,
-            } => {
+            Response::PageAnnots { doc, page, geom, annots } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     tab.geoms.insert(page, geom);
                     if annots.is_empty() {
@@ -1061,12 +1028,7 @@ impl App {
                     tab.pending_edit = Some((page, index));
                 }
             }
-            Response::EditState {
-                doc,
-                can_undo,
-                can_redo,
-                dirty,
-            } => {
+            Response::EditState { doc, can_undo, can_redo, dirty } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     tab.can_undo = can_undo;
                     tab.can_redo = can_redo;
@@ -1079,10 +1041,7 @@ impl App {
                     && tab.path != path
                 {
                     tab.path = path.clone();
-                    tab.name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                    tab.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     renamed = Some(path);
                 }
                 if let Some(path) = renamed {
@@ -1147,11 +1106,7 @@ impl App {
             }
             Response::Error { doc, message } => {
                 log::warn!("doc {doc}: {message}");
-                if self
-                    .close_intent
-                    .as_ref()
-                    .is_some_and(|i| i.awaiting_save.contains(&doc))
-                {
+                if self.close_intent.as_ref().is_some_and(|i| i.awaiting_save.contains(&doc)) {
                     // A save we were waiting for failed: abort closing.
                     self.close_intent = None;
                 }
@@ -1167,18 +1122,11 @@ impl App {
         let (doc, count) = (tab.id, info.page_sizes.len());
         let targets = tab.target_pages();
         let last = *targets.iter().max().unwrap_or(&tab.current_page);
-        let stem = tab
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "document".into());
+        let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
         let dir = tab.path.parent().map(Path::to_path_buf);
         let edit = |op| Request::EditPages { doc, op };
         let req = match action {
-            PageAction::Rotate(q) => Some(edit(PageOp::Rotate {
-                pages: targets,
-                quarter_turns: q,
-            })),
+            PageAction::Rotate(q) => Some(edit(PageOp::Rotate { pages: targets, quarter_turns: q })),
             PageAction::Delete => Some(edit(PageOp::Delete { pages: targets })),
             PageAction::MoveToStart => Some(edit(PageOp::Move { pages: targets, to: 0 })),
             PageAction::MoveToEnd => {
@@ -1188,10 +1136,9 @@ impl App {
             PageAction::MoveTo { pages, gap } => {
                 move_target(&pages, gap, count).map(|to| edit(PageOp::Move { pages, to }))
             }
-            PageAction::InsertBlankAfter => Some(edit(PageOp::InsertBlank {
-                at: last + 1,
-                size: info.page_sizes[last.min(count - 1)],
-            })),
+            PageAction::InsertBlankAfter => {
+                Some(edit(PageOp::InsertBlank { at: last + 1, size: info.page_sizes[last.min(count - 1)] }))
+            }
             PageAction::InsertFileAfter => {
                 let mut dialog = rfd::FileDialog::new().add_filter(t("PDF documents"), &["pdf", "PDF"]);
                 if let Some(d) = &dir {
@@ -1213,11 +1160,7 @@ impl App {
                 if let Some(d) = &dir {
                     dialog = dialog.set_directory(d);
                 }
-                dialog.save_file().map(|path| Request::ExtractPages {
-                    doc,
-                    pages: targets,
-                    path,
-                })
+                dialog.save_file().map(|path| Request::ExtractPages { doc, pages: targets, path })
             }
             PageAction::Split => {
                 self.split_every = Some(1);
@@ -1254,7 +1197,9 @@ impl App {
             tab.request_text(p);
         }
         let text = (0..pages)
-            .map(|p| tab.texts.get(&p).and_then(|t| t.as_ref()).map(|t| t.chars.iter().map(|c| c.ch).collect::<String>()))
+            .map(|p| {
+                tab.texts.get(&p).and_then(|t| t.as_ref()).map(|t| t.chars.iter().map(|c| c.ch).collect::<String>())
+            })
             .collect::<Option<Vec<_>>>()
             .map(|v| v.join("\n"));
         let mut save = false;
@@ -1270,7 +1215,9 @@ impl App {
             if let Some(path) = dialog.save_file() {
                 match std::fs::write(&path, &inv.xml) {
                     Ok(()) => self.notice(&tf("Saved {file}", &[("file", &path.display())])),
-                    Err(e) => self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)])),
+                    Err(e) => {
+                        self.error = Some(tf("Could not save {file}: {e}", &[("file", &path.display()), ("e", &e)]))
+                    }
                 }
             }
         }
@@ -1348,10 +1295,9 @@ impl App {
     fn einvoice_bar(&mut self, ui: &mut Ui) {
         let Some(doc) = self.tabs.get(self.active).map(|t| t.id) else { return };
         let Some(inv) = self.einvoices.get(&doc) else { return };
-        let ok = inv
-            .invoice
-            .as_ref()
-            .is_ok_and(|i| crate::einvoice::checks(i).iter().all(|c| c.ok) && crate::einvoice::missing_required(i).is_empty());
+        let ok = inv.invoice.as_ref().is_ok_and(|i| {
+            crate::einvoice::checks(i).iter().all(|c| c.ok) && crate::einvoice::missing_required(i).is_empty()
+        });
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(t("E-invoice")).strong());
             ui.label(tf("This PDF contains invoice data ({format}).", &[("format", &inv.label())]));
@@ -1391,13 +1337,7 @@ impl App {
         // The engine handles requests in order, so a document opened just now is
         // ready by the time it compares.
         self.send(Request::Compare { a, b });
-        self.compare = Some(Comparison {
-            a,
-            b,
-            diffs: None,
-            current: None,
-            last: None,
-        });
+        self.compare = Some(Comparison { a, b, diffs: None, current: None, last: None });
         if let Some(i) = self.tabs.iter().position(|t| t.id == a) {
             self.active = i;
         }
@@ -1432,7 +1372,13 @@ impl App {
         let state = |t: &DocTab| (t.current_page, t.viewport.zoom);
         let (now_a, now_b) = (state(&self.tabs[ia]), state(&self.tabs[ib]));
         if let Some((last_a, last_b)) = c.last {
-            let (from, to) = if now_a != last_a { (ia, ib) } else if now_b != last_b { (ib, ia) } else { (ia, ia) };
+            let (from, to) = if now_a != last_a {
+                (ia, ib)
+            } else if now_b != last_b {
+                (ib, ia)
+            } else {
+                (ia, ia)
+            };
             if from != to {
                 let (page, zoom, fit, mode) = {
                     let t = &self.tabs[from];
@@ -1475,9 +1421,17 @@ impl App {
                 Some(d) => {
                     let changes: usize = d.iter().map(|p| p.summary.len()).sum();
                     let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-                    ui.label(format!("{} on {}", plural(changes, "change", "changes"), plural(d.len(), "page", "pages")));
+                    ui.label(format!(
+                        "{} on {}",
+                        plural(changes, "change", "changes"),
+                        plural(d.len(), "page", "pages")
+                    ));
                     let cur = c.current;
-                    if ui.button(icons::text(icons::CARET_LEFT)).on_hover_text(t("Previous page with changes")).clicked() {
+                    if ui
+                        .button(icons::text(icons::CARET_LEFT))
+                        .on_hover_text(t("Previous page with changes"))
+                        .clicked()
+                    {
                         go = Some(cur.map_or(d.len() - 1, |i| (i + d.len() - 1) % d.len()));
                     }
                     if ui.button(icons::text(icons::CARET_RIGHT)).on_hover_text(t("Next page with changes")).clicked() {
@@ -1485,8 +1439,10 @@ impl App {
                     }
                     if let Some(p) = cur.and_then(|i| d.get(i)) {
                         let text = p.summary.iter().take(3).cloned().collect::<Vec<_>>().join("   ·   ");
-                        let more = if p.summary.len() > 3 { format!("  (+{})", p.summary.len() - 3) } else { String::new() };
-                        ui.label(format!("{}: {text}{more}", tf("Page {page}", &[("page", &(p.page + 1))]))).on_hover_text(p.summary.join("\n"));
+                        let more =
+                            if p.summary.len() > 3 { format!("  (+{})", p.summary.len() - 3) } else { String::new() };
+                        ui.label(format!("{}: {text}{more}", tf("Page {page}", &[("page", &(p.page + 1))])))
+                            .on_hover_text(p.summary.join("\n"));
                     }
                 }
             }
@@ -1573,11 +1529,7 @@ impl App {
             return;
         };
         let (doc, count) = (tab.id, tab.page_count());
-        let stem = tab
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "document".into());
+        let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
         let dir = tab.path.parent().map(Path::to_path_buf);
         let mut go = false;
         let mut cancel = false;
@@ -1591,7 +1543,10 @@ impl App {
                     ui.add(egui::DragValue::new(&mut every).range(1..=count.max(1)));
                 });
                 let files = count.div_ceil(every.max(1));
-                ui.weak(tf("Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …", &[("files", &files), ("stem", &stem)]));
+                ui.weak(tf(
+                    "Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …",
+                    &[("files", &files), ("stem", &stem)],
+                ));
                 ui.horizontal(|ui| {
                     go = ui.button(t("Choose folder…")).clicked();
                     cancel = ui.button(t("Cancel")).clicked();
@@ -1621,14 +1576,15 @@ impl App {
             }
             return;
         }
-        let result = std::process::Command::new("xdg-mime")
-            .args(["default", "magic-pdf.desktop", "application/pdf"])
-            .status();
+        let result =
+            std::process::Command::new("xdg-mime").args(["default", "magic-pdf.desktop", "application/pdf"]).status();
         match result {
             Ok(s) if s.success() => self.notice(t("magic-pdf is now the default PDF viewer")),
             Ok(_) | Err(_) => {
-                self.error =
-                    Some(t("Could not set the default PDF viewer. Install magic-pdf with packaging/linux/install.sh first.").into())
+                self.error = Some(
+                    t("Could not set the default PDF viewer. Install magic-pdf with packaging/linux/install.sh first.")
+                        .into(),
+                )
             }
         }
     }
@@ -1648,11 +1604,7 @@ impl App {
             return;
         }
         if cfg!(windows) {
-            let req = Request::PrintNative {
-                doc: tab.id,
-                title: tab.name.clone(),
-                current_page: tab.current_page,
-            };
+            let req = Request::PrintNative { doc: tab.id, title: tab.name.clone(), current_page: tab.current_page };
             self.send(req);
             return;
         }
@@ -1715,7 +1667,11 @@ impl App {
                     ui.label(t("Pages"));
                     ui.vertical(|ui| {
                         ui.radio_value(&mut dlg.pages, PageChoice::All, tf("All ({count})", &[("count", &count)]));
-                        ui.radio_value(&mut dlg.pages, PageChoice::Current, tf("Current page ({page})", &[("page", &(current + 1))]));
+                        ui.radio_value(
+                            &mut dlg.pages,
+                            PageChoice::Current,
+                            tf("Current page ({page})", &[("page", &(current + 1))]),
+                        );
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut dlg.pages, PageChoice::Range, t("Pages:"));
                             let r = ui.add(
@@ -1835,11 +1791,7 @@ impl App {
         let req = Request::Search {
             doc: tab.id,
             generation: tab.search.generation,
-            query: SearchQuery {
-                text: query,
-                match_case: tab.search.match_case,
-                whole_word: tab.search.whole_word,
-            },
+            query: SearchQuery { text: query, match_case: tab.search.match_case, whole_word: tab.search.whole_word },
         };
         self.sidebar_tab = SidebarTab::Search;
         self.send(req);
@@ -1880,10 +1832,7 @@ impl App {
                 }
             }
             if wanted != tab.last_wanted {
-                engine.send(Request::Retain {
-                    doc: tab.id,
-                    keep: wanted.clone(),
-                });
+                engine.send(Request::Retain { doc: tab.id, keep: wanted.clone() });
                 tab.requested.retain(|k| wanted.contains(k));
                 tab.last_wanted = wanted;
             }
@@ -1914,11 +1863,7 @@ impl App {
         if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(sel) = tab.selected_annot.take()
         {
-            let req = Request::DeleteAnnot {
-                doc: tab.id,
-                page: sel.page,
-                index: sel.index,
-            };
+            let req = Request::DeleteAnnot { doc: tab.id, page: sel.page, index: sel.index };
             self.send(req);
         }
     }
@@ -1958,7 +1903,10 @@ impl App {
             let status = match &tab.state {
                 LoadState::Ready(info) => format!(
                     "{}   ·   {}   ·   {:.0}%{}{}",
-                    tf("Page {page} of {pages}", &[("page", &(tab.current_page + 1)), ("pages", &info.page_sizes.len())]),
+                    tf(
+                        "Page {page} of {pages}",
+                        &[("page", &(tab.current_page + 1)), ("pages", &info.page_sizes.len())]
+                    ),
                     tab.mode.label(),
                     tab.zoom_percent(),
                     info.title.as_ref().map(|t| format!("   ·   {t}")).unwrap_or_default(),
@@ -1969,11 +1917,7 @@ impl App {
                 LoadState::Failed(_) => t("Failed to open").into(),
             };
             let now = ctx.input(|i| i.time);
-            let notice = self
-                .notice
-                .as_ref()
-                .filter(|(_, t)| now - t < 6.0)
-                .map(|(n, _)| n.clone());
+            let notice = self.notice.as_ref().filter(|(_, t)| now - t < 6.0).map(|(n, _)| n.clone());
             if notice.is_some() {
                 ctx.request_repaint_after(std::time::Duration::from_secs(1));
             }
@@ -1991,7 +1935,6 @@ impl App {
                 });
             });
         }
-
     }
 
     /// "Esc ends the presentation", shown for a few seconds after it starts.
@@ -2219,25 +2162,20 @@ impl App {
         {
             // Copy the annotation. The clipboard gets a text too (its comment), and
             // pasting that same text pastes the annotation.
-            tab.outbox.push(Request::CopyAnnot {
-                doc: tab.id,
-                page: sel.page,
-                index: sel.index,
-            });
+            tab.outbox.push(Request::CopyAnnot { doc: tab.id, page: sel.page, index: sel.index });
             let kind = tab
                 .annots
                 .get(&sel.page)
                 .and_then(|v| v.iter().find(|a| a.index == sel.index))
                 .map(|a| a.kind.label())
                 .unwrap_or("Annotation");
-            let text = if sel.committed.trim().is_empty() {
-                format!("[{kind}]")
-            } else {
-                sel.committed.clone()
-            };
+            let text = if sel.committed.trim().is_empty() { format!("[{kind}]") } else { sel.committed.clone() };
             ctx.copy_text(text.clone());
             self.annot_clip_text = Some(text);
-            self.notice = Some((tf("{kind} copied (Ctrl+V pastes it under the mouse)", &[("kind", &kind)]), ctx.input(|i| i.time)));
+            self.notice = Some((
+                tf("{kind} copied (Ctrl+V pastes it under the mouse)", &[("kind", &kind)]),
+                ctx.input(|i| i.time),
+            ));
         }
         if !typing
             && tab.form_focus.is_none()
@@ -2267,10 +2205,7 @@ impl App {
         } else if shortcut(cmd, Key::R) {
             tab.rotate(true);
         }
-        for (key, mode) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5]
-            .into_iter()
-            .zip(LayoutMode::ALL)
-        {
+        for (key, mode) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5].into_iter().zip(LayoutMode::ALL) {
             if shortcut(cmd, key) {
                 tab.set_mode(mode);
             }
@@ -2302,12 +2237,9 @@ impl App {
         // Grid overview: arrow keys move between pages, Enter opens the one marked.
         if tab.mode == LayoutMode::Grid && !can_nudge && matches!(self.tool, Tool::Hand | Tool::SelectText) {
             ctx.input_mut(|i| {
-                for (key, dx, dy) in [
-                    (Key::ArrowLeft, -1, 0),
-                    (Key::ArrowRight, 1, 0),
-                    (Key::ArrowUp, 0, -1),
-                    (Key::ArrowDown, 0, 1),
-                ] {
+                for (key, dx, dy) in
+                    [(Key::ArrowLeft, -1, 0), (Key::ArrowRight, 1, 0), (Key::ArrowUp, 0, -1), (Key::ArrowDown, 0, 1)]
+                {
                     while i.consume_key(Modifiers::NONE, key) {
                         tab.grid_move(dx, dy);
                     }
@@ -2387,10 +2319,7 @@ impl App {
                 if ui.add_enabled(has_tab, egui::Button::new(kb(t("Save\tCtrl+S")))).clicked() {
                     self.save_active(false);
                 }
-                if ui
-                    .add_enabled(has_tab, egui::Button::new(kb(t("Save as…\tCtrl+Shift+S"))))
-                    .clicked()
-                {
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Save as…\tCtrl+Shift+S")))).clicked() {
                     self.save_active(true);
                 }
                 ui.add_enabled_ui(has_tab, |ui| {
@@ -2420,7 +2349,8 @@ impl App {
                     crate::reveal::show_in_folder(&tab.path);
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(kb(t("Document properties…\tCtrl+D")))).clicked() {
-                    self.props_dialog = self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
+                    self.props_dialog =
+                        self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Save optimized copy…"))).clicked() {
                     self.optimize_dialog = Some(Default::default());
@@ -2432,9 +2362,7 @@ impl App {
                     self.print();
                 }
                 ui.separator();
-                if ui
-                    .add_enabled(!self.tabs.is_empty(), egui::Button::new(kb(t("Close tab\tCtrl+W"))))
-                    .clicked()
+                if ui.add_enabled(!self.tabs.is_empty(), egui::Button::new(kb(t("Close tab\tCtrl+W")))).clicked()
                     && let Some(t) = self.tabs.get(self.active)
                 {
                     self.request_close(vec![t.id], false);
@@ -2456,20 +2384,17 @@ impl App {
                     self.undo(true);
                 }
                 ui.separator();
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(t("Delete annotation\tDel")))
-                    .clicked()
-                {
+                if ui.add_enabled(has_sel, egui::Button::new(t("Delete annotation\tDel"))).clicked() {
                     self.delete_selected_annot();
                 }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(kb(t("Copy annotation\tCtrl+C"))))
-                    .clicked()
-                {
+                if ui.add_enabled(has_sel, egui::Button::new(kb(t("Copy annotation\tCtrl+C")))).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestCopy);
                 }
                 if ui
-                    .add_enabled(self.annot_clip_text.is_some() && has_tab, egui::Button::new(kb(t("Paste annotation\tCtrl+V"))))
+                    .add_enabled(
+                        self.annot_clip_text.is_some() && has_tab,
+                        egui::Button::new(kb(t("Paste annotation\tCtrl+V"))),
+                    )
                     .clicked()
                     && let Some(tab) = self.tabs.get_mut(self.active)
                 {
@@ -2539,13 +2464,9 @@ impl App {
                     if ui.button(t("Redact (mark areas)")).clicked() {
                         self.tool = Tool::Redact;
                     }
-                    let (hits, marks) = self
-                        .tabs
-                        .get(self.active)
-                        .map_or((0, 0), |t| (t.search.hits.len(), t.redactions.len()));
-                    if ui
-                        .add_enabled(hits > 0, egui::Button::new(t("Mark search matches for redaction")))
-                        .clicked()
+                    let (hits, marks) =
+                        self.tabs.get(self.active).map_or((0, 0), |t| (t.search.hits.len(), t.redactions.len()));
+                    if ui.add_enabled(hits > 0, egui::Button::new(t("Mark search matches for redaction"))).clicked()
                         && let Some(tab) = self.tabs.get_mut(self.active)
                     {
                         tab.mark_search_hits();
@@ -2587,16 +2508,12 @@ impl App {
                     t.set_zoom(ACTUAL_SIZE);
                 }
                 ui.separator();
-                if ui
-                    .add_enabled(has_tab, egui::Button::new(kb(t("Rotate clockwise\tCtrl+R"))))
-                    .clicked()
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Rotate clockwise\tCtrl+R")))).clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(true);
                 }
-                if ui
-                    .add_enabled(has_tab, egui::Button::new(kb(t("Rotate counter-clockwise\tCtrl+Shift+R"))))
-                    .clicked()
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Rotate counter-clockwise\tCtrl+Shift+R")))).clicked()
                     && let Some(t) = self.active_tab()
                 {
                     t.rotate(false);
@@ -2615,7 +2532,9 @@ impl App {
                 }
             });
             ui.menu_button(t("Help"), |ui| {
-                if cfg!(any(windows, target_os = "linux")) && ui.button(t("Make magic-pdf the default PDF viewer…")).clicked() {
+                if cfg!(any(windows, target_os = "linux"))
+                    && ui.button(t("Make magic-pdf the default PDF viewer…")).clicked()
+                {
                     self.make_default_viewer();
                 }
                 if ui.button(t("Check for updates…")).clicked() {
@@ -2682,8 +2601,7 @@ impl App {
             }
             ui.separator();
             for tool in [Tool::Hand, Tool::SelectText] {
-                ui.selectable_value(&mut self.tool, tool, tool.icon())
-                    .on_hover_text(tool.label());
+                ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
             }
             ui.separator();
             const SHAPES: [Tool; 8] = [
@@ -2703,8 +2621,7 @@ impl App {
                 if SHAPES.contains(&tool) && tool != self.last_shape {
                     continue;
                 }
-                ui.selectable_value(&mut self.tool, tool, tool.icon())
-                    .on_hover_text(tool.label());
+                ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
                 if tool == self.last_shape {
                     // The other shapes in a drop-down next to the current one.
                     let menu = ui.menu_button(icons::text(icons::CARET_DOWN).size(11.0), |ui| {
@@ -2726,8 +2643,7 @@ impl App {
                 }
             }
             ui.separator();
-            ui.selectable_value(&mut self.tool, Tool::Redact, Tool::Redact.icon())
-                .on_hover_text(Tool::Redact.label());
+            ui.selectable_value(&mut self.tool, Tool::Redact, Tool::Redact.icon()).on_hover_text(Tool::Redact.label());
             ui.separator();
 
             let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -2768,22 +2684,19 @@ impl App {
                     FitMode::None => format!("{:.0}%", tab.zoom_percent()),
                     fit => format!("{} ({:.0}%)", fit.label(), tab.zoom_percent()),
                 };
-                egui::ComboBox::from_id_salt("zoom")
-                    .selected_text(label)
-                    .width(130.0)
-                    .show_ui(ui, |ui| {
-                        for fit in [FitMode::Width, FitMode::Height, FitMode::Page] {
-                            if ui.selectable_label(tab.viewport.fit == fit, fit.label()).clicked() {
-                                tab.viewport.fit = fit;
-                            }
+                egui::ComboBox::from_id_salt("zoom").selected_text(label).width(130.0).show_ui(ui, |ui| {
+                    for fit in [FitMode::Width, FitMode::Height, FitMode::Page] {
+                        if ui.selectable_label(tab.viewport.fit == fit, fit.label()).clicked() {
+                            tab.viewport.fit = fit;
                         }
-                        ui.separator();
-                        for pct in ZOOM_PRESETS {
-                            if ui.selectable_label(false, format!("{pct:.0}%")).clicked() {
-                                tab.set_zoom(pct / 100.0 * ACTUAL_SIZE);
-                            }
+                    }
+                    ui.separator();
+                    for pct in ZOOM_PRESETS {
+                        if ui.selectable_label(false, format!("{pct:.0}%")).clicked() {
+                            tab.set_zoom(pct / 100.0 * ACTUAL_SIZE);
                         }
-                    });
+                    }
+                });
                 if ui.button(icons::text(icons::ZOOM_IN)).on_hover_text(kb(t("Zoom in (Ctrl++)"))).clicked() {
                     tab.zoom_step(true);
                 }
@@ -2803,7 +2716,10 @@ impl App {
                         let picked = ui
                             .horizontal(|ui| {
                                 let a = ui.selectable_label(tab.mode == mode, icons::text(icon));
-                                let b = ui.selectable_label(tab.mode == mode, kb(&format!("{}  Ctrl+{}", mode.label(), i + 1)));
+                                let b = ui.selectable_label(
+                                    tab.mode == mode,
+                                    kb(&format!("{}  Ctrl+{}", mode.label(), i + 1)),
+                                );
                                 a.clicked() || b.clicked()
                             })
                             .inner;
@@ -2816,7 +2732,6 @@ impl App {
                 .response
                 .on_hover_text(tf("Page layout: {layout}", &[("layout", &tab.mode.label())]));
             }
-
         }
     }
 
@@ -2916,7 +2831,9 @@ impl App {
                 let recent = &mut self.settings.recent_colors;
                 if let Some(slot) = tool.color(&mut self.settings.annot_style) {
                     ui.label(t("Colour"));
-                    if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
+                    if let Some(Some(c)) =
+                        color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent)
+                    {
                         *slot = c;
                         changed = true;
                     }
@@ -2939,7 +2856,9 @@ impl App {
             ui.separator();
             if let Some(slot) = tool.color(style) {
                 ui.label(if tool == Tool::TextBox { t("Border") } else { t("Colour") });
-                if let Some(Some(c)) = color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent) {
+                if let Some(Some(c)) =
+                    color_picker::color_button(ui, ("tool", tool.label()), Some(*slot), false, recent)
+                {
                     *slot = c;
                     changed = true;
                 }
@@ -2958,7 +2877,9 @@ impl App {
                     changed |= width(ui, &mut style.shape_width);
                     if tool == Tool::Area {
                         ui.label(t("Fill"));
-                        if let Some(f) = color_picker::color_button(ui, "tool_area_fill", style.shape_fill, true, recent) {
+                        if let Some(f) =
+                            color_picker::color_button(ui, "tool_area_fill", style.shape_fill, true, recent)
+                        {
                             style.shape_fill = f;
                             changed = true;
                         }
@@ -2989,9 +2910,8 @@ impl App {
                 }
                 Tool::TextBox => {
                     ui.label(t("Width"));
-                    changed |= ui
-                        .add(egui::Slider::new(&mut style.textbox_border_width, 0.0..=6.0).text("pt"))
-                        .changed();
+                    changed |=
+                        ui.add(egui::Slider::new(&mut style.textbox_border_width, 0.0..=6.0).text("pt")).changed();
                     ui.label(t("Fill"));
                     if let Some(f) = color_picker::color_button(ui, "tool_box_fill", style.textbox_fill, true, recent) {
                         style.textbox_fill = f;
@@ -3031,8 +2951,15 @@ impl App {
                 ui.horizontal(|ui| {
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let resp = ui
-                            .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
-                            .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag it down onto the page or out of the window to open it in its own window")));
+                            .add(
+                                egui::Button::selectable(i == self.active, tab.title())
+                                    .sense(egui::Sense::click_and_drag()),
+                            )
+                            .on_hover_text(format!(
+                                "{}\n{}",
+                                tab.path.display(),
+                                t("Drag it down onto the page or out of the window to open it in its own window")
+                            ));
                         tab_rects.push(resp.rect);
                         if resp.clicked() {
                             self.active = i;
@@ -3079,7 +3006,11 @@ impl App {
                                 ui.close();
                             }
                         });
-                        if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb(t("Close (Ctrl+W)"))).clicked() {
+                        if ui
+                            .small_button(icons::sized(icons::X, 12.0))
+                            .on_hover_text(kb(t("Close (Ctrl+W)")))
+                            .clicked()
+                        {
                             close = Some(tab.id);
                         }
                         ui.add_space(6.0);
@@ -3103,7 +3034,12 @@ impl App {
     }
 
     /// Shows the dragged tab under the pointer and handles the drop.
-    fn tab_drag_feedback(&mut self, ctx: &egui::Context, tab_rects: &[egui::Rect], move_to: &mut Option<(DocId, MoveTarget)>) {
+    fn tab_drag_feedback(
+        &mut self,
+        ctx: &egui::Context,
+        tab_rects: &[egui::Rect],
+        move_to: &mut Option<(DocId, MoveTarget)>,
+    ) {
         let Some(i) = self.tab_drag else { return };
         let Some(tab) = self.tabs.get(i) else {
             self.tab_drag = None;
@@ -3147,11 +3083,7 @@ impl App {
         }
         self.tab_drag = None;
         let pointer_outside = pointer.is_none_or(|p| !window.contains(p));
-        let peers = if pointer_outside && origin.is_some() {
-            crate::ipc::peers()
-        } else {
-            Vec::new()
-        };
+        let peers = if pointer_outside && origin.is_some() { crate::ipc::peers() } else { Vec::new() };
         let peer_rects: Vec<Option<[f32; 4]>> = peers.iter().map(|p| p.window().and_then(|w| w.rect)).collect();
         match decide_tab_drop(pointer, window, origin, tab_rects, &peer_rects) {
             TabDrop::Stay => {}
@@ -3191,11 +3123,7 @@ impl App {
                 });
             });
         if submit {
-            let req = Request::Open {
-                doc: tab.id,
-                path: tab.path.clone(),
-                password: Some(std::mem::take(input)),
-            };
+            let req = Request::Open { doc: tab.id, path: tab.path.clone(), password: Some(std::mem::take(input)) };
             self.send(req);
         } else if cancel {
             self.close_tab_now(self.active);
@@ -3252,10 +3180,7 @@ impl App {
                 for (doc, _) in &dirty {
                     if let Some(t) = self.tabs.iter().find(|t| t.id == *doc) {
                         awaiting.insert(*doc);
-                        self.send(Request::Save {
-                            doc: *doc,
-                            path: t.path.clone(),
-                        });
+                        self.send(Request::Save { doc: *doc, path: t.path.clone() });
                     }
                 }
                 if let Some(i) = &mut self.close_intent {
@@ -3292,70 +3217,59 @@ impl App {
 
     fn info_windows(&mut self, ctx: &egui::Context) {
         self.settings_window(ctx);
-        egui::Window::new(t("Keyboard shortcuts"))
-            .open(&mut self.show_shortcuts)
-            .resizable(false)
-            .show(ctx, |ui| {
-                egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
-                    for (k, v) in [
-                        ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open, save, save as"),
-                        ("Ctrl+P", "Print"),
-                        ("Tab / Esc in a form field", "Next field / stop editing"),
-                        ("Ctrl+W / Ctrl+Tab", "Close / switch tab"),
-                        ("Ctrl+Q", "Quit"),
-                        ("Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z", "Undo / redo"),
-                        ("Wheel", "Scroll (horizontally in horizontal layout)"),
-                        ("Shift+Wheel", "Scroll along the other axis"),
-                        ("Ctrl+Wheel, Ctrl+± , Ctrl+0", "Zoom, actual size"),
-                        ("PgUp / PgDn, Home / End", "Previous / next, first / last page"),
-                        ("Space / Shift+Space", "Scroll one screen"),
-                        ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
-                        ("Double-click a page in the grid", "Open it in the previous layout"),
-                        ("Arrows, Enter in the grid", "Move between pages, open the marked one"),
-                        ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
-                        ("H / S", "Hand tool / text selection tool"),
-                        ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
-                        ("L / A / P / C", "Line, arrow, polygon, cloud (Enter or double-click finishes)"),
-                        ("K / G", "Stamp, signature"),
-                        ("M", "Measure distance (area: in the shapes menu)"),
-                        ("X", "Redact: mark areas or words, then apply"),
-                        ("Ctrl+C / Ctrl+V on an annotation", "Copy it, paste it under the mouse"),
-                        ("Del", "Delete the selected annotation or thumbnail pages"),
-                        ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
-                        ("Ctrl / Shift + click thumbnail", "Select several pages"),
-                        ("Drag thumbnails", "Reorder pages"),
-                        ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
-                        ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
-                        ("F9", "Toggle sidebar"),
-                        ("F5, Esc", "Start / end the presentation (arrows, space, click: next page)"),
-                        ("Ctrl+,", "Settings"),
-                        ("Ctrl+D", "Document properties"),
-                        ("Middle-drag", "Pan with any tool"),
-                    ] {
-                        ui.strong(kb(t(k)));
-                        ui.label(t(v));
-                        ui.end_row();
-                    }
-                });
+        egui::Window::new(t("Keyboard shortcuts")).open(&mut self.show_shortcuts).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
+                for (k, v) in [
+                    ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open, save, save as"),
+                    ("Ctrl+P", "Print"),
+                    ("Tab / Esc in a form field", "Next field / stop editing"),
+                    ("Ctrl+W / Ctrl+Tab", "Close / switch tab"),
+                    ("Ctrl+Q", "Quit"),
+                    ("Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z", "Undo / redo"),
+                    ("Wheel", "Scroll (horizontally in horizontal layout)"),
+                    ("Shift+Wheel", "Scroll along the other axis"),
+                    ("Ctrl+Wheel, Ctrl+± , Ctrl+0", "Zoom, actual size"),
+                    ("PgUp / PgDn, Home / End", "Previous / next, first / last page"),
+                    ("Space / Shift+Space", "Scroll one screen"),
+                    ("Ctrl+1 … Ctrl+5", "Horizontal, vertical, single, facing, grid"),
+                    ("Double-click a page in the grid", "Open it in the previous layout"),
+                    ("Arrows, Enter in the grid", "Move between pages, open the marked one"),
+                    ("Ctrl+R / Ctrl+Shift+R", "Rotate view"),
+                    ("H / S", "Hand tool / text selection tool"),
+                    ("U / N / T / D / R / E", "Highlight, note, text box, draw, rectangle, ellipse"),
+                    ("L / A / P / C", "Line, arrow, polygon, cloud (Enter or double-click finishes)"),
+                    ("K / G", "Stamp, signature"),
+                    ("M", "Measure distance (area: in the shapes menu)"),
+                    ("X", "Redact: mark areas or words, then apply"),
+                    ("Ctrl+C / Ctrl+V on an annotation", "Copy it, paste it under the mouse"),
+                    ("Del", "Delete the selected annotation or thumbnail pages"),
+                    ("Drag / handles / arrows", "Move, resize, nudge (Shift: 10 pt) annotations"),
+                    ("Ctrl / Shift + click thumbnail", "Select several pages"),
+                    ("Drag thumbnails", "Reorder pages"),
+                    ("Ctrl+C / Ctrl+A", "Copy selection / select page text"),
+                    ("Ctrl+F, Enter, F3 / Shift+F3", "Search, next / previous match"),
+                    ("F9", "Toggle sidebar"),
+                    ("F5, Esc", "Start / end the presentation (arrows, space, click: next page)"),
+                    ("Ctrl+,", "Settings"),
+                    ("Ctrl+D", "Document properties"),
+                    ("Middle-drag", "Pan with any tool"),
+                ] {
+                    ui.strong(kb(t(k)));
+                    ui.label(t(v));
+                    ui.end_row();
+                }
             });
-        egui::Window::new(t("About magic-pdf"))
-            .open(&mut self.show_about)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.heading(format!("magic-pdf {}", env!("CARGO_PKG_VERSION")));
-                ui.label(t("A lightweight PDF viewer built for wide screens."));
-                ui.label(t("Rendering by PDFium; UI by egui. Licensed under the AGPL-3.0."));
-            });
+        });
+        egui::Window::new(t("About magic-pdf")).open(&mut self.show_about).resizable(false).show(ctx, |ui| {
+            ui.heading(format!("magic-pdf {}", env!("CARGO_PKG_VERSION")));
+            ui.label(t("A lightweight PDF viewer built for wide screens."));
+            ui.label(t("Rendering by PDFium; UI by egui. Licensed under the AGPL-3.0."));
+        });
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect()
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
         if dropped.is_empty() {
             return;
@@ -3469,85 +3383,88 @@ impl App {
         let (mut dark, mut night) = (s.dark_ui, s.night_mode);
         let mut changed = false;
         let mut check_now = false;
-        egui::Window::new(t("Settings"))
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::Grid::new("settings").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                    ui.label(t("Language"));
-                    let current = crate::i18n::CHOICES.iter().find(|c| c.0 == s.language).map_or("System", |c| c.1);
-                    egui::ComboBox::from_id_salt("language")
-                        .selected_text(if current == "System" { t("System") } else { current })
-                        .show_ui(ui, |ui| {
-                            for (code, name) in crate::i18n::CHOICES {
-                                let name = if code == "auto" { t(name) } else { name };
-                                if ui.selectable_label(s.language == code, name).clicked() && s.language != code {
-                                    s.language = code.to_string();
-                                    crate::i18n::set_language(code);
-                                    changed = true;
-                                }
+        egui::Window::new(t("Settings")).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            egui::Grid::new("settings").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                ui.label(t("Language"));
+                let current = crate::i18n::CHOICES.iter().find(|c| c.0 == s.language).map_or("System", |c| c.1);
+                egui::ComboBox::from_id_salt("language")
+                    .selected_text(if current == "System" { t("System") } else { current })
+                    .show_ui(ui, |ui| {
+                        for (code, name) in crate::i18n::CHOICES {
+                            let name = if code == "auto" { t(name) } else { name };
+                            if ui.selectable_label(s.language == code, name).clicked() && s.language != code {
+                                s.language = code.to_string();
+                                crate::i18n::set_language(code);
+                                changed = true;
                             }
-                        });
-                    ui.end_row();
-
-                    ui.label(t("Author name"));
-                    changed |= ui
-                        .add(egui::TextEdit::singleline(&mut s.author).desired_width(200.0))
-                        .on_hover_text(t("Stored with new annotations and comments"))
-                        .changed();
-                    ui.end_row();
-
-                    ui.label(t("Layout for new files"));
-                    egui::ComboBox::from_id_salt("default_layout")
-                        .selected_text(s.default_mode.label())
-                        .show_ui(ui, |ui| {
-                            for mode in LayoutMode::ALL {
-                                changed |= ui.selectable_value(&mut s.default_mode, mode, mode.label()).changed();
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label(t("Appearance"));
-                    ui.vertical(|ui| {
-                        ui.checkbox(&mut dark, t("Dark interface"));
-                        ui.checkbox(&mut night, t("Night mode (invert pages)"));
-                        changed |= ui.checkbox(&mut s.show_sidebar, kb(t("Show the sidebar (F9)"))).changed();
-                    });
-                    ui.end_row();
-
-                    ui.label(t("Thumbnail size"));
-                    changed |= ui
-                        .add(egui::Slider::new(&mut s.thumb_width, 60.0..=600.0).logarithmic(true).suffix(" pt"))
-                        .changed();
-                    ui.end_row();
-
-                    ui.label(t("Starting"));
-                    changed |= ui
-                        .checkbox(&mut s.restore_session, t("Reopen the files from last time"))
-                        .on_hover_text(t("When magic-pdf starts without a file, it opens the tabs of the last window you closed"))
-                        .changed();
-                    ui.end_row();
-
-                    ui.label(t("Updates"));
-                    ui.horizontal(|ui| {
-                        changed |= ui.checkbox(&mut s.check_updates, t("Check daily")).changed();
-                        check_now = ui.button(t("Check now")).clicked();
-                    });
-                    ui.end_row();
-
-                    ui.label(t("Recent files"));
-                    ui.horizontal(|ui| {
-                        let n = s.recent.len() + s.pinned.len();
-                        ui.weak(tf("{n} in the list ({pinned} pinned)", &[("n", &n), ("pinned", &s.pinned.len())]));
-                        if ui.add_enabled(!s.recent.is_empty(), egui::Button::new(t("Clear"))).on_hover_text(t("Pinned files stay")).clicked() {
-                            s.recent.clear();
-                            changed = true;
                         }
                     });
-                    ui.end_row();
+                ui.end_row();
+
+                ui.label(t("Author name"));
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut s.author).desired_width(200.0))
+                    .on_hover_text(t("Stored with new annotations and comments"))
+                    .changed();
+                ui.end_row();
+
+                ui.label(t("Layout for new files"));
+                egui::ComboBox::from_id_salt("default_layout").selected_text(s.default_mode.label()).show_ui(
+                    ui,
+                    |ui| {
+                        for mode in LayoutMode::ALL {
+                            changed |= ui.selectable_value(&mut s.default_mode, mode, mode.label()).changed();
+                        }
+                    },
+                );
+                ui.end_row();
+
+                ui.label(t("Appearance"));
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut dark, t("Dark interface"));
+                    ui.checkbox(&mut night, t("Night mode (invert pages)"));
+                    changed |= ui.checkbox(&mut s.show_sidebar, kb(t("Show the sidebar (F9)"))).changed();
                 });
+                ui.end_row();
+
+                ui.label(t("Thumbnail size"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut s.thumb_width, 60.0..=600.0).logarithmic(true).suffix(" pt"))
+                    .changed();
+                ui.end_row();
+
+                ui.label(t("Starting"));
+                changed |= ui
+                    .checkbox(&mut s.restore_session, t("Reopen the files from last time"))
+                    .on_hover_text(t(
+                        "When magic-pdf starts without a file, it opens the tabs of the last window you closed",
+                    ))
+                    .changed();
+                ui.end_row();
+
+                ui.label(t("Updates"));
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut s.check_updates, t("Check daily")).changed();
+                    check_now = ui.button(t("Check now")).clicked();
+                });
+                ui.end_row();
+
+                ui.label(t("Recent files"));
+                ui.horizontal(|ui| {
+                    let n = s.recent.len() + s.pinned.len();
+                    ui.weak(tf("{n} in the list ({pinned} pinned)", &[("n", &n), ("pinned", &s.pinned.len())]));
+                    if ui
+                        .add_enabled(!s.recent.is_empty(), egui::Button::new(t("Clear")))
+                        .on_hover_text(t("Pinned files stay"))
+                        .clicked()
+                    {
+                        s.recent.clear();
+                        changed = true;
+                    }
+                });
+                ui.end_row();
             });
+        });
         self.show_settings = open;
         if dark != self.settings.dark_ui {
             self.settings.dark_ui = dark;
@@ -3640,7 +3557,15 @@ impl eframe::App for App {
                         }
                     } else {
                         let tab = &mut self.tabs[self.active];
-                        sidebar::show(ui, tab, &mut self.sidebar_tab, &mut self.cache, &mut page_actions, thumb_width, author)
+                        sidebar::show(
+                            ui,
+                            tab,
+                            &mut self.sidebar_tab,
+                            &mut self.cache,
+                            &mut page_actions,
+                            thumb_width,
+                            author,
+                        )
                     }
                 });
             // Remembered for the next start (dragging the edge resizes it).
@@ -3662,7 +3587,11 @@ impl eframe::App for App {
                     let mid = full.center().x;
                     let l = egui::Rect::from_min_max(full.min, egui::pos2(mid - 2.0, full.max.y));
                     let r = egui::Rect::from_min_max(egui::pos2(mid + 2.0, full.min.y), full.max);
-                    ui.painter().rect_filled(egui::Rect::from_x_y_ranges(mid - 2.0..=mid + 2.0, full.y_range()), 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+                    ui.painter().rect_filled(
+                        egui::Rect::from_x_y_ranges(mid - 2.0..=mid + 2.0, full.y_range()),
+                        0.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    );
                     vec![(left, l), (right, r)]
                 }
                 None => vec![(self.active, full)],
@@ -3683,7 +3612,9 @@ impl eframe::App for App {
                         author: &self.settings.author,
                         stamp: self.stamps.stamp(&self.settings.annot_style),
                         signature,
-                        signature_image: self.stamps.signature_image(&self.settings.annot_style, &self.settings.signatures),
+                        signature_image: self
+                            .stamps
+                            .signature_image(&self.settings.annot_style, &self.settings.signatures),
                         presenting,
                     },
                 );
@@ -3845,11 +3776,7 @@ fn take_form_input(events: &mut Vec<egui::Event>, doc: DocId) -> (Vec<Request>, 
     events.retain(|e| match e {
         egui::Event::Text(t) => {
             for c in t.chars() {
-                reqs.push(Request::FormKey {
-                    doc,
-                    key: FormKey::Char(c as u32),
-                    modifiers: 0,
-                });
+                reqs.push(Request::FormKey { doc, key: FormKey::Char(c as u32), modifiers: 0 });
             }
             false
         }
@@ -3865,12 +3792,7 @@ fn take_form_input(events: &mut Vec<egui::Event>, doc: DocId) -> (Vec<Request>, 
             reqs.push(Request::FormCopy { doc, cut: true });
             false
         }
-        egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } => {
+        egui::Event::Key { key, pressed: true, modifiers, .. } => {
             if modifiers.command || modifiers.ctrl {
                 match key {
                     Key::A => reqs.push(Request::FormSelectAll { doc }),
@@ -3890,13 +3812,9 @@ fn take_form_input(events: &mut Vec<egui::Event>, doc: DocId) -> (Vec<Request>, 
                 // Letters and other keys arrive as Text; keep only function keys (F3, F9…).
                 return is_function_key(*key);
             };
-            let mods = (if modifiers.shift { form_mods::SHIFT } else { 0 })
-                | (if modifiers.alt { form_mods::ALT } else { 0 });
-            reqs.push(Request::FormKey {
-                doc,
-                key: FormKey::Down(vk),
-                modifiers: mods,
-            });
+            let mods =
+                (if modifiers.shift { form_mods::SHIFT } else { 0 }) | (if modifiers.alt { form_mods::ALT } else { 0 });
+            reqs.push(Request::FormKey { doc, key: FormKey::Down(vk), modifiers: mods });
             // Keys that produce characters PDFium expects as WM_CHAR-style input.
             let ch = match key {
                 Key::Backspace => Some(8),
@@ -3904,11 +3822,7 @@ fn take_form_input(events: &mut Vec<egui::Event>, doc: DocId) -> (Vec<Request>, 
                 _ => None,
             };
             if let Some(c) = ch {
-                reqs.push(Request::FormKey {
-                    doc,
-                    key: FormKey::Char(c),
-                    modifiers: mods,
-                });
+                reqs.push(Request::FormKey { doc, key: FormKey::Char(c), modifiers: mods });
             }
             false
         }
@@ -3966,11 +3880,7 @@ enum RecentAction {
 /// the File menu.
 fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) -> Option<RecentAction> {
     let mut action = None;
-    let entries = settings
-        .pinned
-        .iter()
-        .map(|p| (p, true))
-        .chain(settings.recent.iter().map(|p| (p, false)));
+    let entries = settings.pinned.iter().map(|p| (p, true)).chain(settings.recent.iter().map(|p| (p, false)));
     let mut was_pinned = !settings.pinned.is_empty();
     for (path, pinned) in entries {
         if was_pinned && !pinned {
@@ -3990,7 +3900,11 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
                 action = Some(RecentAction::TogglePin(path.clone()));
             }
             let mut text = egui::text::LayoutJob::default();
-            text.append(&name, 0.0, egui::TextFormat::simple(egui::FontId::proportional(14.0), ui.visuals().strong_text_color()));
+            text.append(
+                &name,
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(14.0), ui.visuals().strong_text_color()),
+            );
             text.append(
                 &format!("   {folder}"),
                 0.0,
@@ -4022,21 +3936,13 @@ mod tests {
     use super::*;
 
     fn key(key: Key, modifiers: Modifiers) -> egui::Event {
-        egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers,
-        }
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
     }
 
     fn chars(reqs: &[Request]) -> String {
         reqs.iter()
             .filter_map(|r| match r {
-                Request::FormKey {
-                    key: FormKey::Char(c), ..
-                } => char::from_u32(*c),
+                Request::FormKey { key: FormKey::Char(c), .. } => char::from_u32(*c),
                 _ => None,
             })
             .collect()
@@ -4123,10 +4029,7 @@ mod tests {
     /// gave keyboard focus to a widget.
     fn egui_takes_focus(events: Vec<egui::Event>) -> bool {
         let ctx = egui::Context::default();
-        let input = |events| egui::RawInput {
-            events,
-            ..Default::default()
-        };
+        let input = |events| egui::RawInput { events, ..Default::default() };
         let frame = |ctx: &egui::Context, events| {
             let mut output = ctx.run_ui(input(events), |ui| {
                 let _ = ui.button(t("File"));

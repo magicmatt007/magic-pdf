@@ -60,18 +60,28 @@ fn unknown(m: &'static str) -> Problem {
     Problem::Unknown(m)
 }
 
-fn verify(file: &[u8], ranges: &[(usize, usize)], contents: &[u8], subfilter: &str, out: &mut SignatureCheck) -> Result<SigStatus, Problem> {
+fn verify(
+    file: &[u8],
+    ranges: &[(usize, usize)],
+    contents: &[u8],
+    subfilter: &str,
+    out: &mut SignatureCheck,
+) -> Result<SigStatus, Problem> {
     if !matches!(subfilter, "adbe.pkcs7.detached" | "ETSI.CAdES.detached") {
         return Err(unknown("this signature format is not supported"));
     }
     // The signed bytes.
     let mut data = Vec::new();
     for &(start, len) in ranges {
-        let part = start.checked_add(len).and_then(|end| file.get(start..end)).ok_or(Problem::Invalid("the signed range lies outside the file"))?;
+        let part = start
+            .checked_add(len)
+            .and_then(|end| file.get(start..end))
+            .ok_or(Problem::Invalid("the signed range lies outside the file"))?;
         data.extend_from_slice(part);
     }
     let end = ranges.iter().map(|&(s, l)| s + l).max().unwrap_or(0);
-    let covers_whole = ranges.first().is_some_and(|r| r.0 == 0) && file[end.min(file.len())..].iter().all(u8::is_ascii_whitespace);
+    let covers_whole =
+        ranges.first().is_some_and(|r| r.0 == 0) && file[end.min(file.len())..].iter().all(u8::is_ascii_whitespace);
 
     // ContentInfo { contentType signedData, [0] SignedData }
     let (content_info, _) = Tlv::read(contents).ok_or(unknown("the signature data cannot be read"))?;
@@ -138,8 +148,12 @@ fn verify(file: &[u8], ranges: &[(usize, usize)], contents: &[u8], subfilter: &s
     };
 
     let ok = match (&cert.key, sig_alg.value) {
-        (Key::Rsa { n, e }, oid) if oid == OID_RSA || HashAlg::from_rsa_oid(oid).is_some() => verify_rsa(n, e, hash, &message_hash, signature.value)?,
-        (Key::Ec { curve, point }, oid) if oid.starts_with(OID_ECDSA_PREFIX) || oid == OID_EC_PUBLIC_KEY => verify_ecdsa(*curve, point, &message_hash, signature.value)?,
+        (Key::Rsa { n, e }, oid) if oid == OID_RSA || HashAlg::from_rsa_oid(oid).is_some() => {
+            verify_rsa(n, e, hash, &message_hash, signature.value)?
+        }
+        (Key::Ec { curve, point }, oid) if oid.starts_with(OID_ECDSA_PREFIX) || oid == OID_EC_PUBLIC_KEY => {
+            verify_ecdsa(*curve, point, &message_hash, signature.value)?
+        }
         (_, oid) if oid == OID_RSA_PSS => return Err(unknown("RSA-PSS signatures are not supported")),
         _ => return Err(unknown("the signature algorithm is not supported")),
     };
@@ -151,7 +165,8 @@ fn verify(file: &[u8], ranges: &[(usize, usize)], contents: &[u8], subfilter: &s
 
 fn verify_rsa(n: &[u8], e: &[u8], hash: HashAlg, hashed: &[u8], sig: &[u8]) -> Result<bool, Problem> {
     use rsa::{BoxedUint, Pkcs1v15Sign, PublicKey};
-    let key = PublicKey::new(BoxedUint::from_be_slice_vartime(n), BoxedUint::from_be_slice_vartime(e)).map_err(|_| unknown("the RSA key is not usable"))?;
+    let key = PublicKey::new(BoxedUint::from_be_slice_vartime(n), BoxedUint::from_be_slice_vartime(e))
+        .map_err(|_| unknown("the RSA key is not usable"))?;
     let scheme = match hash {
         HashAlg::Sha1 => Pkcs1v15Sign::new::<Sha1>(),
         HashAlg::Sha256 => Pkcs1v15Sign::new::<Sha256>(),
@@ -334,7 +349,9 @@ fn name(n: &Tlv) -> String {
 fn decode_string(tag: u8, v: &[u8]) -> String {
     match tag {
         // BMPString: UTF-16BE
-        0x1E => String::from_utf16_lossy(&v.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect::<Vec<_>>()),
+        0x1E => String::from_utf16_lossy(
+            &v.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect::<Vec<_>>(),
+        ),
         _ => String::from_utf8_lossy(v).into_owned(),
     }
 }
@@ -458,7 +475,8 @@ mod tests {
 
     /// The fixture's byte ranges and decoded /Contents.
     fn fixture(name: &str) -> (Vec<u8>, Vec<(usize, usize)>, Vec<u8>) {
-        let file = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
+        let file =
+            std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
         let start = file.windows(11).position(|w| w == b"/Contents <").unwrap() + 10;
         let end = start + file[start..].iter().position(|&b| b == b'>').unwrap() + 1;
         let hex = std::str::from_utf8(&file[start + 1..end - 1]).unwrap();
@@ -479,7 +497,11 @@ mod tests {
             let time = contents.windows(2).rposition(|w| w == [0x17, 0x0D]).expect("UTCTime") + 2;
             contents[time] = if contents[time] == b'9' { b'8' } else { contents[time] + 1 };
             let bad = check(&file, &ranges, &contents, "adbe.pkcs7.detached");
-            assert!(matches!(&bad.status, SigStatus::Invalid(m) if m.contains("does not match")), "{name}: {:?}", bad.status);
+            assert!(
+                matches!(&bad.status, SigStatus::Invalid(m) if m.contains("does not match")),
+                "{name}: {:?}",
+                bad.status
+            );
         }
     }
 

@@ -3,17 +3,17 @@
 
 pub mod commands;
 pub mod compare;
-pub mod pages;
-pub mod redact;
-pub mod signatures;
-pub mod ocr;
 mod lopdf_ops;
-pub mod rich;
-pub mod shapes;
-pub mod textbox;
+pub mod ocr;
+pub mod pages;
 mod pdf;
 #[cfg(windows)]
 mod print_windows;
+pub mod redact;
+pub mod rich;
+pub mod shapes;
+pub mod signatures;
+pub mod textbox;
 mod worker;
 
 use std::path::PathBuf;
@@ -22,8 +22,8 @@ use crossbeam_channel::{Receiver, Sender};
 
 pub use commands::*;
 pub use pages::{HeaderFooter, Margins, PageMapping, PageOp, Watermark, move_target};
-pub use rich::{Align, CharStyle, RichText};
 pub use pdf::{FIELD_TEXT, pdf_date_now};
+pub use rich::{Align, CharStyle, RichText};
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -41,13 +41,8 @@ impl Engine {
             .name("pdfium".into())
             .spawn(move || worker::run(req_rx, resp_tx, ready_tx, Box::new(wake)))
             .map_err(|e| e.to_string())?;
-        ready_rx
-            .recv()
-            .map_err(|_| "PDFium worker exited during start-up".to_string())??;
-        Ok(Self {
-            tx: req_tx,
-            rx: resp_rx,
-        })
+        ready_rx.recv().map_err(|_| "PDFium worker exited during start-up".to_string())??;
+        Ok(Self { tx: req_tx, rx: resp_rx })
     }
 
     pub fn send(&self, req: Request) {
@@ -83,9 +78,9 @@ pub fn library_search_dirs() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::shapes;
     use super::*;
     use rich::Span;
-    use super::shapes;
     use std::time::Duration;
 
     fn recv(engine: &Engine) -> Response {
@@ -130,11 +125,7 @@ mod tests {
     }
 
     fn open(engine: &Engine, doc: DocId, path: PathBuf) -> DocInfo {
-        engine.send(Request::Open {
-            doc,
-            path,
-            password: None,
-        });
+        engine.send(Request::Open { doc, path, password: None });
         recv_until(engine, |r| match r {
             Response::Opened { doc: d, info } if d == doc => Some(info),
             Response::OpenFailed { error, .. } => panic!("open failed: {error}"),
@@ -143,14 +134,7 @@ mod tests {
     }
 
     fn render(engine: &Engine, doc: DocId, page: usize, rotation: Rotation, version: u32) -> ([usize; 2], Vec<u8>) {
-        let key = RenderKey {
-            doc,
-            page,
-            width_px: 300,
-            rotation,
-            version,
-            tile: 0,
-        };
+        let key = RenderKey { doc, page, width_px: 300, rotation, version, tile: 0 };
         engine.send(Request::Render { key, priority: 0.0 });
         recv_until(engine, |r| match r {
             Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
@@ -168,12 +152,7 @@ mod tests {
 
     fn edit_state(engine: &Engine) -> (bool, bool, bool) {
         recv_until(engine, |r| match r {
-            Response::EditState {
-                can_undo,
-                can_redo,
-                dirty,
-                ..
-            } => Some((can_undo, can_redo, dirty)),
+            Response::EditState { can_undo, can_redo, dirty, .. } => Some((can_undo, can_redo, dirty)),
             _ => None,
         })
     }
@@ -199,42 +178,30 @@ mod tests {
         assert!(rgba.chunks(4).any(|p| p[0] < 128), "page should not be blank");
 
         engine.send(Request::PageText { doc: 1, page: 3 });
-        let Response::PageText { text, geom, .. } = recv(&engine) else {
-            panic!("no text")
-        };
+        let Response::PageText { text, geom, .. } = recv(&engine) else { panic!("no text") };
         assert_eq!(geom.rotation, Rotation::R0);
         let s: String = text.chars.iter().map(|c| c.ch).collect();
         assert!(s.contains("Page 4"), "{s}");
         assert_eq!(text.links.len(), 2);
         assert!(text.links.iter().any(|l| matches!(l.target, LinkTarget::Page(0))));
         assert!(
-            text.links
-                .iter()
-                .any(|l| matches!(&l.target, LinkTarget::Uri(u) if u.starts_with("https://example.com")))
+            text.links.iter().any(|l| matches!(&l.target, LinkTarget::Uri(u) if u.starts_with("https://example.com")))
         );
 
         engine.send(Request::PageText { doc: 1, page: 5 });
-        let Response::PageText { geom, .. } = recv(&engine) else {
-            panic!("no text")
-        };
+        let Response::PageText { geom, .. } = recv(&engine) else { panic!("no text") };
         assert_eq!(geom.rotation, Rotation::R90);
         assert_eq!(geom.size, (595.0, 842.0));
 
         engine.send(Request::Search {
             doc: 1,
             generation: 7,
-            query: SearchQuery {
-                text: "page 12.".into(),
-                match_case: false,
-                whole_word: false,
-            },
+            query: SearchQuery { text: "page 12.".into(), match_case: false, whole_word: false },
         });
         let mut pages = Vec::new();
         loop {
             match recv(&engine) {
-                Response::SearchResults {
-                    generation, page, hits, ..
-                } => {
+                Response::SearchResults { generation, page, hits, .. } => {
                     assert_eq!(generation, 7);
                     assert!(!hits.is_empty());
                     pages.push(page);
@@ -248,11 +215,7 @@ mod tests {
         }
         assert_eq!(pages, vec![11]);
 
-        engine.send(Request::Open {
-            doc: 2,
-            path: PathBuf::from("/nonexistent.pdf"),
-            password: None,
-        });
+        engine.send(Request::Open { doc: 2, path: PathBuf::from("/nonexistent.pdf"), password: None });
         assert!(matches!(recv(&engine), Response::OpenFailed { password_required: false, .. }));
     }
 
@@ -271,13 +234,7 @@ mod tests {
         // Highlight the "Page 1" heading, using its character boxes.
         engine.send(Request::PageText { doc: 1, page: 0 });
         let Response::PageText { text, .. } = recv(&engine) else { panic!() };
-        let heading = text
-            .chars
-            .iter()
-            .take(6)
-            .filter_map(|c| c.rect)
-            .reduce(PdfBox::union)
-            .unwrap();
+        let heading = text.chars.iter().take(6).filter_map(|c| c.rect).reduce(PdfBox::union).unwrap();
         let new = |kind, rect: PdfBox| NewAnnot {
             kind,
             rect,
@@ -316,26 +273,10 @@ mod tests {
         let count = |buf: &[u8]| buf.chunks(4).filter(|p| yellowish(p)).count();
         assert!(count(&after) > count(&before) + 50, "highlight not rendered");
 
-        let mut ink = new(
-            AnnotKind::Ink,
-            PdfBox {
-                left: 100.0,
-                bottom: 300.0,
-                right: 300.0,
-                top: 400.0,
-            },
-        );
+        let mut ink = new(AnnotKind::Ink, PdfBox { left: 100.0, bottom: 300.0, right: 300.0, top: 400.0 });
         ink.ink = vec![vec![(100.0, 300.0), (200.0, 400.0), (300.0, 300.0)]];
         engine.send(Request::AddAnnot { doc: 1, page: 0, annot: ink });
-        let square = new(
-            AnnotKind::Square,
-            PdfBox {
-                left: 50.0,
-                bottom: 50.0,
-                right: 150.0,
-                top: 120.0,
-            },
-        );
+        let square = new(AnnotKind::Square, PdfBox { left: 50.0, bottom: 50.0, right: 150.0, top: 120.0 });
         engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square });
         let _ = annots(&engine, 1);
         let list = annots(&engine, 1);
@@ -347,11 +288,7 @@ mod tests {
             doc: 1,
             page: 0,
             index: square_index,
-            change: AnnotChange {
-                color: Some([0, 0, 255]),
-                contents: Some("check this".into()),
-                ..Default::default()
-            },
+            change: AnnotChange { color: Some([0, 0, 255]), contents: Some("check this".into()), ..Default::default() },
         });
         let list = annots(&engine, 1);
         let sq = list.iter().find(|a| a.index == square_index).unwrap();
@@ -368,11 +305,7 @@ mod tests {
         let _ = annots(&engine, 1);
 
         // Delete, undo, redo.
-        engine.send(Request::DeleteAnnot {
-            doc: 1,
-            page: 0,
-            index: square_index,
-        });
+        engine.send(Request::DeleteAnnot { doc: 1, page: 0, index: square_index });
         assert_eq!(annots(&engine, 1).len(), 2);
         engine.send(Request::Undo { doc: 1 });
         assert_eq!(annots(&engine, 1).len(), 3);
@@ -380,10 +313,7 @@ mod tests {
         assert_eq!(annots(&engine, 1).len(), 2);
 
         // Save: the deleted square must be physically gone from the file.
-        engine.send(Request::Save {
-            doc: 1,
-            path: out.clone(),
-        });
+        engine.send(Request::Save { doc: 1, path: out.clone() });
         let saved = recv_until(&engine, |r| match r {
             Response::Saved { path, .. } => Some(path),
             Response::Error { message, .. } => panic!("{message}"),
@@ -443,14 +373,7 @@ mod tests {
         let click = |w: &WidgetInfo| {
             let (x, y) = ((w.rect.left + w.rect.right) / 2.0, (w.rect.bottom + w.rect.top) / 2.0);
             for event in [FormMouse::Move, FormMouse::Down, FormMouse::Up] {
-                engine.send(Request::FormMouse {
-                    doc: 1,
-                    page: 0,
-                    event,
-                    x,
-                    y,
-                    modifiers: 0,
-                });
+                engine.send(Request::FormMouse { doc: 1, page: 0, event, x, y, modifiers: 0 });
             }
         };
         let focus = |engine: &Engine| {
@@ -465,18 +388,10 @@ mod tests {
         let _ = focus(&engine);
         assert_eq!(focus(&engine), Some(0));
         for c in "Hello".chars() {
-            engine.send(Request::FormKey {
-                doc: 1,
-                key: FormKey::Char(c as u32),
-                modifiers: 0,
-            });
+            engine.send(Request::FormKey { doc: 1, key: FormKey::Char(c as u32), modifiers: 0 });
         }
         // Backspace removes the last character.
-        engine.send(Request::FormKey {
-            doc: 1,
-            key: FormKey::Char(8),
-            modifiers: 0,
-        });
+        engine.send(Request::FormKey { doc: 1, key: FormKey::Char(8), modifiers: 0 });
         // Typing marks the document as having unsaved changes and repaints the page.
         recv_until(&engine, |r| match r {
             Response::EditState { dirty: true, .. } => Some(()),
@@ -512,10 +427,7 @@ mod tests {
         });
         assert!(bytes.starts_with(b"%PDF"));
 
-        engine.send(Request::Save {
-            doc: 1,
-            path: out.clone(),
-        });
+        engine.send(Request::Save { doc: 1, path: out.clone() });
         recv_until(&engine, |r| match r {
             Response::Saved { .. } => Some(()),
             Response::Error { message, .. } => panic!("{message}"),
@@ -557,12 +469,7 @@ mod tests {
             page: 3,
             annot: NewAnnot {
                 kind: AnnotKind::Square,
-                rect: PdfBox {
-                    left: 50.0,
-                    bottom: 50.0,
-                    right: 150.0,
-                    top: 150.0,
-                },
+                rect: PdfBox { left: 50.0, bottom: 50.0, right: 150.0, top: 150.0 },
                 color: [255, 0, 0],
                 interior: None,
                 width: 2.0,
@@ -594,65 +501,38 @@ mod tests {
         };
 
         // Delete page 2: the annotated page becomes page 3 (index 2).
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Delete { pages: vec![1] },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Delete { pages: vec![1] } });
         let (info, m) = pages_changed(&engine);
         assert_eq!(info.page_sizes.len(), 39);
         assert_eq!(m.map[3], Some(2));
         assert_eq!(pages_with_note(&engine), vec![2]);
 
         // Move the first page to the end.
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Move { pages: vec![0], to: 38 },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Move { pages: vec![0], to: 38 } });
         let (info, _) = pages_changed(&engine);
         assert_eq!(info.page_sizes[38], original[0]);
         assert_eq!(info.page_sizes[0], original[2]);
 
         // Rotate the third page: width and height swap.
         let (w, h) = info.page_sizes[2];
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Rotate {
-                pages: vec![2],
-                quarter_turns: 1,
-            },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Rotate { pages: vec![2], quarter_turns: 1 } });
         let (info, m) = pages_changed(&engine);
         assert_eq!(info.page_sizes[2], (h, w));
         assert_eq!(m.changed, vec![2]);
 
         // Insert a blank page at the start and another PDF at the end.
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::InsertBlank {
-                at: 0,
-                size: (100.0, 200.0),
-            },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::InsertBlank { at: 0, size: (100.0, 200.0) } });
         let (info, _) = pages_changed(&engine);
         assert_eq!(info.page_sizes[0], (100.0, 200.0));
         let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
-        engine.send(Request::InsertFile {
-            doc: 1,
-            path: form,
-            at: 40,
-        });
+        engine.send(Request::InsertFile { doc: 1, path: form, at: 40 });
         let (info, _) = pages_changed(&engine);
         assert_eq!(info.page_sizes.len(), 41);
         // Deleted page 2, moved page 1 to the end, inserted a page in front: index 2.
         assert_eq!(pages_with_note(&engine), vec![2]);
 
         // Invalid operations are refused without changing anything.
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Delete {
-                pages: (0..41).collect(),
-            },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Delete { pages: (0..41).collect() } });
         recv_until(&engine, |r| matches!(r, Response::Error { .. }).then_some(()));
 
         // Undo everything: back to the original document, annotation on page 4.
@@ -678,37 +558,22 @@ mod tests {
 
         // Extract two pages, then split into files of 15 pages.
         let extracted = dir.join("two.pdf");
-        engine.send(Request::ExtractPages {
-            doc: 1,
-            pages: vec![0, 5],
-            path: extracted.clone(),
-        });
+        engine.send(Request::ExtractPages { doc: 1, pages: vec![0, 5], path: extracted.clone() });
         recv_until(&engine, |r| matches!(r, Response::Exported { .. }).then_some(()));
         assert_eq!(open(&engine, 3, extracted).page_sizes.len(), 2);
         let parts = dir.join("parts");
         std::fs::create_dir_all(&parts).unwrap();
-        engine.send(Request::SplitDocument {
-            doc: 1,
-            every: 15,
-            dir: parts.clone(),
-            stem: "doc".into(),
-        });
+        engine.send(Request::SplitDocument { doc: 1, every: 15, dir: parts.clone(), stem: "doc".into() });
         recv_until(&engine, |r| match r {
             Response::Exported { .. } => Some(()),
             Response::Error { message, .. } => panic!("{message}"),
             _ => None,
         });
-        let counts: Vec<usize> = (1..=3)
-            .map(|n| open(&engine, 10 + n, parts.join(format!("doc-{n:02}.pdf"))).page_sizes.len())
-            .collect();
+        let counts: Vec<usize> =
+            (1..=3).map(|n| open(&engine, 10 + n, parts.join(format!("doc-{n:02}.pdf"))).page_sizes.len()).collect();
         assert_eq!(counts, vec![15, 15, 9]);
         // Splitting again would overwrite: refused.
-        engine.send(Request::SplitDocument {
-            doc: 1,
-            every: 15,
-            dir: parts,
-            stem: "doc".into(),
-        });
+        engine.send(Request::SplitDocument { doc: 1, every: 15, dir: parts, stem: "doc".into() });
         recv_until(&engine, |r| matches!(r, Response::Error { .. }).then_some(()));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -718,12 +583,7 @@ mod tests {
     fn shape_fill_can_be_turned_on_and_off() {
         let (_serial, engine) = start();
         open(&engine, 1, sample());
-        let rect = PdfBox {
-            left: 100.0,
-            bottom: 300.0,
-            right: 300.0,
-            top: 500.0,
-        };
+        let rect = PdfBox { left: 100.0, bottom: 300.0, right: 300.0, top: 500.0 };
         engine.send(Request::AddAnnot {
             doc: 1,
             page: 0,
@@ -768,10 +628,7 @@ mod tests {
             doc: 1,
             page: 0,
             index,
-            change: AnnotChange {
-                interior: Some(interior),
-                ..Default::default()
-            },
+            change: AnnotChange { interior: Some(interior), ..Default::default() },
         };
         engine.send(set(Some([255, 0, 0])));
         let a = annots(&engine, 1);
@@ -804,12 +661,7 @@ mod tests {
         let form = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/form.pdf");
         open(&engine, 1, form);
         // An empty area of the page, 150 pt wide.
-        let rect = PdfBox {
-            left: 300.0,
-            bottom: 380.0,
-            right: 450.0,
-            top: 400.0,
-        };
+        let rect = PdfBox { left: 300.0, bottom: 380.0, right: 450.0, top: 400.0 };
         engine.send(Request::AddAnnot {
             doc: 1,
             page: 0,
@@ -843,14 +695,7 @@ mod tests {
 
         // Text pixels inside the box (rendered 600 px wide: 595 pt page).
         let blue_in_box = |engine: &Engine, version, r: PdfBox| {
-            let key = RenderKey {
-                doc: 1,
-                page: 0,
-                width_px: 600,
-                rotation: Rotation::R0,
-                version,
-                tile: 0,
-            };
+            let key = RenderKey { doc: 1, page: 0, width_px: 600, rotation: Rotation::R0, version, tile: 0 };
             engine.send(Request::Render { key, priority: 0.0 });
             let (size, rgba) = recv_until(engine, |m| match m {
                 Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
@@ -875,10 +720,7 @@ mod tests {
             doc: 1,
             page: 0,
             index,
-            change: AnnotChange {
-                text_color: Some([0, 0, 0]),
-                ..Default::default()
-            },
+            change: AnnotChange { text_color: Some([0, 0, 0]), ..Default::default() },
         });
         let list = annots(&engine, 1);
         assert_eq!(list.iter().find(|a| a.index == index).unwrap().text_color, Some([0, 0, 0]));
@@ -926,7 +768,11 @@ mod tests {
                     ink,
                     font_size: 12.0,
                     text_color: [0, 0, 0],
-                    ..NewAnnot::new(AnnotKind::Other, PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 }, [0, 0, 0])
+                    ..NewAnnot::new(
+                        AnnotKind::Other,
+                        PdfBox { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 },
+                        [0, 0, 0],
+                    )
                 },
             });
             recv_until(&engine, |r| match r {
@@ -934,18 +780,9 @@ mod tests {
                 _ => None,
             })
         };
-        let b = |l: f32, bo: f32, r: f32, t: f32| PdfBox {
-            left: l,
-            bottom: bo,
-            right: r,
-            top: t,
-        };
+        let b = |l: f32, bo: f32, r: f32, t: f32| PdfBox { left: l, bottom: bo, right: r, top: t };
         let square = add(AnnotKind::Square, b(100.0, 100.0, 200.0, 150.0), Vec::new());
-        let ink = add(
-            AnnotKind::Ink,
-            b(98.0, 298.0, 202.0, 402.0),
-            vec![vec![(100.0, 300.0), (200.0, 400.0)]],
-        );
+        let ink = add(AnnotKind::Ink, b(98.0, 298.0, 202.0, 402.0), vec![vec![(100.0, 300.0), (200.0, 400.0)]]);
         let rect_of = |list: &[AnnotInfo], i| list.iter().find(|a| a.index == i).unwrap().rect;
         let drain = |engine: &Engine| while engine.rx.recv_timeout(Duration::from_millis(100)).is_ok() {};
         let mv = |index, rect| {
@@ -954,10 +791,7 @@ mod tests {
                 doc: 1,
                 page: 0,
                 index,
-                change: AnnotChange {
-                    rect: Some(rect),
-                    ..Default::default()
-                },
+                change: AnnotChange { rect: Some(rect), ..Default::default() },
             });
             annots(&engine, 1)
         };
@@ -968,14 +802,7 @@ mod tests {
         // Red border pixels appear at the new place and not at the old one.
         // Rendered at 1200 px (about 2 px per point) so thin strokes are solid.
         let red_at = |engine: &Engine, version, x: f32, y: f32| {
-            let key = RenderKey {
-                doc: 1,
-                page: 0,
-                width_px: 1200,
-                rotation: Rotation::R0,
-                version,
-                tile: 0,
-            };
+            let key = RenderKey { doc: 1, page: 0, width_px: 1200, rotation: Rotation::R0, version, tile: 0 };
             engine.send(Request::Render { key, priority: 0.0 });
             let (size, rgba) = recv_until(engine, |m| match m {
                 Response::Rendered { key: k, size, rgba } if k == key => Some((size, rgba)),
@@ -1021,12 +848,7 @@ mod tests {
             page: 0,
             annot: NewAnnot {
                 kind: AnnotKind::Square,
-                rect: PdfBox {
-                    left: 100.0,
-                    bottom: 600.0,
-                    right: 200.0,
-                    top: 700.0,
-                },
+                rect: PdfBox { left: 100.0, bottom: 600.0, right: 200.0, top: 700.0 },
                 color: [0, 110, 230],
                 interior: Some([255, 255, 255]),
                 width: 10.0,
@@ -1071,12 +893,7 @@ mod tests {
             page: 0,
             annot: NewAnnot {
                 kind: AnnotKind::FreeText,
-                rect: PdfBox {
-                    left: 300.0,
-                    bottom: 380.0,
-                    right: 500.0,
-                    top: 400.0,
-                },
+                rect: PdfBox { left: 300.0, bottom: 380.0, right: 500.0, top: 400.0 },
                 color: [220, 30, 30],
                 interior: None,
                 width: 1.0,
@@ -1096,31 +913,13 @@ mod tests {
         let base = CharStyle::default();
         let rich = RichText {
             spans: vec![
-                Span {
-                    text: "Fett ".into(),
-                    style: CharStyle { bold: true, ..base },
-                },
-                Span {
-                    text: "kursiv ".into(),
-                    style: CharStyle { italic: true, ..base },
-                },
+                Span { text: "Fett ".into(), style: CharStyle { bold: true, ..base } },
+                Span { text: "kursiv ".into(), style: CharStyle { italic: true, ..base } },
                 Span {
                     text: "rot".into(),
-                    style: CharStyle {
-                        color: [220, 30, 30],
-                        underline: true,
-                        size: 18.0,
-                        ..base
-                    },
+                    style: CharStyle { color: [220, 30, 30], underline: true, size: 18.0, ..base },
                 },
-                Span {
-                    text: "\nGrüße, Привет".into(),
-                    style: CharStyle {
-                        bold: true,
-                        italic: true,
-                        ..base
-                    },
-                },
+                Span { text: "\nGrüße, Привет".into(), style: CharStyle { bold: true, italic: true, ..base } },
             ],
             align: Align::Center,
         };
@@ -1130,10 +929,7 @@ mod tests {
             doc: 1,
             page: 0,
             index,
-            change: AnnotChange {
-                rich: Some(rich.clone()),
-                ..Default::default()
-            },
+            change: AnnotChange { rich: Some(rich.clone()), ..Default::default() },
         });
         let list = annots(&engine, 1);
         let tb = list.iter().find(|a| a.index == index).unwrap();
@@ -1187,12 +983,7 @@ mod tests {
             page: 0,
             annot: NewAnnot {
                 kind: AnnotKind::FreeText,
-                rect: PdfBox {
-                    left: 100.0,
-                    bottom: 680.0,
-                    right: 300.0,
-                    top: 700.0,
-                },
+                rect: PdfBox { left: 100.0, bottom: 680.0, right: 300.0, top: 700.0 },
                 color: [0, 0, 0],
                 interior: None,
                 width: 1.0,
@@ -1216,28 +1007,15 @@ mod tests {
                 doc: 1,
                 page: 0,
                 index,
-                change: AnnotChange {
-                    rect: Some(rect),
-                    ..Default::default()
-                },
+                change: AnnotChange { rect: Some(rect), ..Default::default() },
             });
             annots(&engine, 1).into_iter().find(|a| a.index == index).unwrap().rect
         };
         // Taller and wider than the text: kept.
-        let big = PdfBox {
-            left: 100.0,
-            bottom: 500.0,
-            right: 400.0,
-            top: 700.0,
-        };
+        let big = PdfBox { left: 100.0, bottom: 500.0, right: 400.0, top: 700.0 };
         assert_eq!(resize(big), big);
         // Much smaller than the text: the height grows back to fit one line.
-        let r = resize(PdfBox {
-            left: 100.0,
-            bottom: 695.0,
-            right: 400.0,
-            top: 700.0,
-        });
+        let r = resize(PdfBox { left: 100.0, bottom: 695.0, right: 400.0, top: 700.0 });
         assert_eq!(r.top, 700.0);
         assert!((r.top - r.bottom - (8.0 + 15.0)).abs() < 0.01, "{r:?}");
     }
@@ -1251,12 +1029,7 @@ mod tests {
             page: 0,
             annot: NewAnnot {
                 kind: AnnotKind::FreeText,
-                rect: PdfBox {
-                    left: 100.0,
-                    bottom: 680.0,
-                    right: 300.0,
-                    top: 700.0,
-                },
+                rect: PdfBox { left: 100.0, bottom: 680.0, right: 300.0, top: 700.0 },
                 color: [0, 0, 0],
                 interior: None,
                 width: 1.0,
@@ -1296,12 +1069,7 @@ mod tests {
     }
 
     fn pdf_box(left: f32, bottom: f32, right: f32, top: f32) -> PdfBox {
-        PdfBox {
-            left,
-            bottom,
-            right,
-            top,
-        }
+        PdfBox { left, bottom, right, top }
     }
 
     /// Fraction of pixels in a region (fractions of the page, top-left origin) that
@@ -1370,10 +1138,7 @@ mod tests {
             doc: 1,
             page: 0,
             index: a,
-            change: AnnotChange {
-                transform: Some([1.0, 1.0, 0.0, -100.0]),
-                ..Default::default()
-            },
+            change: AnnotChange { transform: Some([1.0, 1.0, 0.0, -100.0]), ..Default::default() },
         });
         let list = annots(&engine, 1);
         let moved = list.iter().find(|x| x.index == a).unwrap();
@@ -1391,18 +1156,11 @@ mod tests {
         open(&engine, 1, sample());
         // A text stamp placed with a click (zero-size rect) gets its natural size.
         let mut stamp = NewAnnot::new(AnnotKind::Stamp, pdf_box(200.0, 0.0, 200.0, 600.0), [200, 0, 0]);
-        stamp.stamp = Some(StampSpec::Text {
-            title: "APPROVED".into(),
-            subtitle: "matthias, 2026-11-22".into(),
-        });
+        stamp.stamp = Some(StampSpec::Text { title: "APPROVED".into(), subtitle: "matthias, 2026-11-22".into() });
         let s = add(&engine, 1, stamp);
         // A half-transparent 2x1 image: left pixel blue, right pixel transparent.
         let mut image = NewAnnot::new(AnnotKind::Stamp, pdf_box(100.0, 100.0, 200.0, 150.0), [0, 0, 0]);
-        image.stamp = Some(StampSpec::Image {
-            width: 2,
-            height: 1,
-            rgba: vec![0, 0, 255, 255, 0, 0, 0, 0],
-        });
+        image.stamp = Some(StampSpec::Image { width: 2, height: 1, rgba: vec![0, 0, 255, 255, 0, 0, 0, 0] });
         let i = add(&engine, 1, image);
         let list = annots(&engine, 1);
         let info = |list: &[AnnotInfo], i: usize| list.iter().find(|x| x.index == i).unwrap().clone();
@@ -1423,27 +1181,28 @@ mod tests {
             doc: 1,
             page: 0,
             index: i,
-            change: AnnotChange {
-                rect: Some(pdf_box(100.0, 100.0, 400.0, 150.0)),
-                ..Default::default()
-            },
+            change: AnnotChange { rect: Some(pdf_box(100.0, 100.0, 400.0, 150.0)), ..Default::default() },
         });
         drain(&engine);
         let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 2);
         assert!(coloured(size, &rgba, (0.17, 0.83, 0.42, 0.87), 2) > 200, "blue half now 150 pt wide");
 
         let dark = |size: [usize; 2], rgba: &[u8]| {
-            let (x0, x1, y0, y1) = ((0.44 * size[0] as f32) as usize, (0.66 * size[0] as f32) as usize, (0.62 * size[1] as f32) as usize, (0.66 * size[1] as f32) as usize);
-            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| rgba[(y * size[0] + x) * 4..][..3].iter().all(|&c| c < 60)).count()
+            let (x0, x1, y0, y1) = (
+                (0.44 * size[0] as f32) as usize,
+                (0.66 * size[0] as f32) as usize,
+                (0.62 * size[1] as f32) as usize,
+                (0.66 * size[1] as f32) as usize,
+            );
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| rgba[(y * size[0] + x) * 4..][..3].iter().all(|&c| c < 60))
+                .count()
         };
         let dark_before = dark(size, &rgba);
         // Copy the image stamp and paste it elsewhere: the picture comes along.
         engine.send(Request::CopyAnnot { doc: 1, page: 0, index: i });
-        engine.send(Request::PasteAnnot {
-            doc: 1,
-            page: 0,
-            at: Some((250.0, 300.0)),
-        });
+        engine.send(Request::PasteAnnot { doc: 1, page: 0, at: Some((250.0, 300.0)) });
         let pasted = recv_until(&engine, |r| match r {
             Response::AnnotAdded { index, .. } => Some(index),
             Response::Error { message, .. } => panic!("{message}"),
@@ -1478,10 +1237,8 @@ mod tests {
             _ => None,
         });
         let list = annots(&engine, 1);
-        let (orig, copy) = (
-            list.iter().find(|x| x.index == t).unwrap(),
-            list.iter().find(|x| x.index == pasted).unwrap(),
-        );
+        let (orig, copy) =
+            (list.iter().find(|x| x.index == t).unwrap(), list.iter().find(|x| x.index == pasted).unwrap());
         assert_eq!(copy.rich.as_ref().unwrap().text(), "Hello world");
         assert!(copy.rich.as_ref().unwrap().spans[0].style.bold);
         assert_eq!((copy.rect.left - orig.rect.left, copy.rect.top - orig.rect.top), (12.0, -12.0));
@@ -1499,11 +1256,7 @@ mod tests {
         note.contents = "Check this".into();
         let n = add(&engine, 1, note);
         drain(&engine);
-        let replies = vec![Reply {
-            author: "Ann".into(),
-            date: "D:20261122120000".into(),
-            text: "Done".into(),
-        }];
+        let replies = vec![Reply { author: "Ann".into(), date: "D:20261122120000".into(), text: "Done".into() }];
         engine.send(Request::UpdateAnnot {
             doc: 1,
             page: 0,
@@ -1532,11 +1285,7 @@ mod tests {
         engine.send(Request::Search {
             doc,
             generation: 1,
-            query: SearchQuery {
-                text: text.into(),
-                match_case: false,
-                whole_word: false,
-            },
+            query: SearchQuery { text: text.into(), match_case: false, whole_word: false },
         });
         let mut found = Vec::new();
         loop {
@@ -1549,13 +1298,7 @@ mod tests {
     }
 
     fn run_ocr(engine: &Engine, doc: DocId, pages: Vec<usize>, exe: &std::path::Path, force: bool) -> OcrOutcome {
-        engine.send(Request::Ocr {
-            doc,
-            pages,
-            exe: exe.to_path_buf(),
-            languages: "eng".into(),
-            force,
-        });
+        engine.send(Request::Ocr { doc, pages, exe: exe.to_path_buf(), languages: "eng".into(), force });
         loop {
             let r = engine.rx.recv_timeout(Duration::from_secs(120)).expect("OCR response");
             if let Response::OcrFinished { doc: d, result } = r
@@ -1582,12 +1325,7 @@ mod tests {
         assert!(search_pages(&engine, 1, "fox").is_empty(), "image-only pages have no text");
 
         let result = run_ocr(&engine, 1, vec![0, 1], &exe, false);
-        let OcrOutcome::Done {
-            recognised: 2,
-            skipped: 0,
-            words,
-        } = result
-        else {
+        let OcrOutcome::Done { recognised: 2, skipped: 0, words } = result else {
             panic!("unexpected result {result:?}")
         };
         assert!(words > 20, "{words} words");
@@ -1612,11 +1350,7 @@ mod tests {
         assert!(text.contains("brown fox"), "{text:?}");
 
         // Pages with text are skipped the second time.
-        assert_eq!(run_ocr(&engine, 1, vec![0], &exe, false), OcrOutcome::Done {
-            recognised: 0,
-            skipped: 1,
-            words: 0
-        });
+        assert_eq!(run_ocr(&engine, 1, vec![0], &exe, false), OcrOutcome::Done { recognised: 0, skipped: 1, words: 0 });
 
         // One undo step removes the whole layer.
         engine.send(Request::Undo { doc: 1 });
@@ -1671,16 +1405,8 @@ mod tests {
             pages_changed(&engine).0
         };
         // Crop page 1 (A4 portrait) and page 6 (stored portrait, shown landscape).
-        let margins = Margins {
-            top: 100.0,
-            right: 0.0,
-            bottom: 0.0,
-            left: 50.0,
-        };
-        let cropped = edit(PageOp::Crop {
-            pages: vec![0, 5],
-            margins,
-        });
+        let margins = Margins { top: 100.0, right: 0.0, bottom: 0.0, left: 50.0 };
+        let cropped = edit(PageOp::Crop { pages: vec![0, 5], margins });
         assert_eq!(cropped.page_sizes[0], (545.0, 742.0));
         assert_eq!(info.page_sizes[5], (842.0, 595.0));
         assert_eq!(cropped.page_sizes[5], (792.0, 495.0), "margins apply as the page is shown");
@@ -1696,10 +1422,7 @@ mod tests {
             margin: 20.0,
             first_number: 1,
         };
-        edit(PageOp::HeaderFooter {
-            pages: (0..40).collect(),
-            spec: spec.clone(),
-        });
+        edit(PageOp::HeaderFooter { pages: (0..40).collect(), spec: spec.clone() });
         assert!(page_text(&engine, 1, 0).contains("Page 1 of 40"));
         let text = page_text(&engine, 1, 5);
         assert!(text.contains("Page 6 of 40") && text.contains("Confidential"), "{text}");
@@ -1710,10 +1433,7 @@ mod tests {
         let mut again = spec.clone();
         again.footer[1] = "– {page} –".into();
         again.first_number = 3;
-        edit(PageOp::HeaderFooter {
-            pages: vec![0],
-            spec: again,
-        });
+        edit(PageOp::HeaderFooter { pages: vec![0], spec: again });
         let text = page_text(&engine, 1, 0);
         assert!(text.contains("– 3 –") && !text.contains("Page 1 of 40"), "replaced: {text}");
         assert_eq!(text.matches("Confidential").count(), 1);
@@ -1726,18 +1446,10 @@ mod tests {
             OutlineItem {
                 title: "Einführung".into(),
                 page: Some(0),
-                children: vec![OutlineItem {
-                    title: "Details".into(),
-                    page: Some(2),
-                    ..Default::default()
-                }],
+                children: vec![OutlineItem { title: "Details".into(), page: Some(2), ..Default::default() }],
                 ..Default::default()
             },
-            OutlineItem {
-                title: "End".into(),
-                page: Some(39),
-                ..Default::default()
-            },
+            OutlineItem { title: "End".into(), page: Some(39), ..Default::default() },
         ];
         let info2 = edit(PageOp::SetOutline { outline: outline.clone() });
         assert_eq!(info2.outline, outline);
@@ -1764,7 +1476,7 @@ mod tests {
             .collect();
         let img = doc.add_object(Stream::new(
             dictionary! { "Type" => "XObject", "Subtype" => "Image", "Width" => 800, "Height" => 800,
-                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8 },
+            "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8 },
             pixels,
         ));
         let content = doc.add_object(Stream::new(dictionary! {}, b"q 144 0 0 144 100 500 cm /Im0 Do Q".to_vec()));
@@ -1813,16 +1525,8 @@ mod tests {
         // The first "quick" (line 1).
         let start = text.find("quick").unwrap();
         let start = text[..start].chars().count();
-        let area = chars[start..start + 5]
-            .iter()
-            .filter_map(|c| c.rect)
-            .reduce(PdfBox::union)
-            .unwrap()
-            .expand(0.5);
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Redact { areas: vec![(0, vec![area])] },
-        });
+        let area = chars[start..start + 5].iter().filter_map(|c| c.rect).reduce(PdfBox::union).unwrap().expand(0.5);
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Redact { areas: vec![(0, vec![area])] } });
         let (_, mapping) = pages_changed(&engine);
         assert_eq!(mapping.changed, vec![0]);
         let after = page_text(&engine, 1, 0);
@@ -1837,11 +1541,15 @@ mod tests {
         };
         let moved = brown(&page_chars(&engine, 1, 0));
         let orig = brown(&chars);
-        assert!((moved.left - orig.left).abs() < 0.5 && (moved.bottom - orig.bottom).abs() < 0.5, "{orig:?} -> {moved:?}");
+        assert!(
+            (moved.left - orig.left).abs() < 0.5 && (moved.bottom - orig.bottom).abs() < 0.5,
+            "{orig:?} -> {moved:?}"
+        );
         // Black where the word was.
         let (size, rgba) = render(&engine, 1, 0, Rotation::R0, 1);
         let (w, h) = (595.0, 842.0);
-        let region = (area.left / w + 0.002, 1.0 - area.top / h + 0.002, area.right / w - 0.002, 1.0 - area.bottom / h - 0.002);
+        let region =
+            (area.left / w + 0.002, 1.0 - area.top / h + 0.002, area.right / w - 0.002, 1.0 - area.bottom / h - 0.002);
         let px = (((region.2 - region.0) * size[0] as f32) * ((region.3 - region.1) * size[1] as f32)) as usize;
         assert!(dark_pixels(size, &rgba, region) * 10 >= px * 9, "covered black");
 
@@ -1874,10 +1582,7 @@ mod tests {
         open(&engine, 1, src);
         // The picture spans 100..244 × 500..644; redact its left half.
         let area = PdfBox { left: 90.0, bottom: 490.0, right: 172.0, top: 650.0 };
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Redact { areas: vec![(0, vec![area])] },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Redact { areas: vec![(0, vec![area])] } });
         pages_changed(&engine);
         let out = dir.join("redacted.pdf");
         engine.send(Request::Save { doc: 1, path: out.clone() });
@@ -1963,10 +1668,7 @@ mod tests {
         assert!(count(&rotated, &pink) > 2000, "on the rotated page too");
 
         // Applying again replaces it; removing takes it off.
-        edit(PageOp::Watermark {
-            pages: vec![0],
-            spec: Watermark { text: "COPY".into(), behind: true, ..spec },
-        });
+        edit(PageOp::Watermark { pages: vec![0], spec: Watermark { text: "COPY".into(), behind: true, ..spec } });
         let text = page_text(&engine, 1, 0);
         assert!(text.contains("COPY") && !text.contains("DRAFT"), "{text}");
         edit(PageOp::RemoveWatermark { pages: vec![0] });
@@ -2017,16 +1719,17 @@ mod tests {
             engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(r, col) });
         }
         let list = annots(&engine, 1);
-        let list = if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
-        let list = if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
-        let index_of = |list: &[AnnotInfo], r: PdfBox| list.iter().find(|x| x.kind == AnnotKind::Square && (x.rect.left - r.left).abs() < 3.0).unwrap().index;
+        let list =
+            if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
+        let list =
+            if list.iter().filter(|x| x.kind == AnnotKind::Square).count() == 3 { list } else { annots(&engine, 1) };
+        let index_of = |list: &[AnnotInfo], r: PdfBox| {
+            list.iter().find(|x| x.kind == AnnotKind::Square && (x.rect.left - r.left).abs() < 3.0).unwrap().index
+        };
         // Delete C in the app (hidden until saving), then redact over A.
         engine.send(Request::DeleteAnnot { doc: 1, page: 0, index: index_of(&list, c) });
         let _ = annots(&engine, 1);
-        engine.send(Request::EditPages {
-            doc: 1,
-            op: PageOp::Redact { areas: vec![(0, vec![a.expand(2.0)])] },
-        });
+        engine.send(Request::EditPages { doc: 1, op: PageOp::Redact { areas: vec![(0, vec![a.expand(2.0)])] } });
         pages_changed(&engine);
         // D takes the index C had before the redaction shifted everything.
         let d = PdfBox { left: 540.0, bottom: 300.0, right: 570.0, top: 350.0 };
@@ -2037,7 +1740,8 @@ mod tests {
         recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
         open(&engine, 2, path.clone());
         engine.send(Request::ScanAnnots { doc: 2 });
-        let left: Vec<f32> = annots(&engine, 2).iter().filter(|x| x.kind == AnnotKind::Square).map(|x| x.rect.left.round()).collect();
+        let left: Vec<f32> =
+            annots(&engine, 2).iter().filter(|x| x.kind == AnnotKind::Square).map(|x| x.rect.left.round()).collect();
         assert_eq!(left, vec![400.0, 540.0], "B and D are left: A redacted, C deleted");
         std::fs::remove_file(path).ok();
     }
@@ -2068,7 +1772,11 @@ mod tests {
         forged[at..at + 6].copy_from_slice(b"forged");
         std::fs::write(dir.join("forged.pdf"), &forged).unwrap();
         let info = open(&engine, 4, dir.join("forged.pdf"));
-        assert!(matches!(&info.signatures[0].check.status, SigStatus::Invalid(m) if m.contains("changed")), "{:?}", info.signatures[0].check.status);
+        assert!(
+            matches!(&info.signatures[0].check.status, SigStatus::Invalid(m) if m.contains("changed")),
+            "{:?}",
+            info.signatures[0].check.status
+        );
         // Something added after signing (an incremental update).
         let mut added = original.clone();
         added.extend_from_slice(b"% added later\n");
@@ -2088,15 +1796,21 @@ mod tests {
         let ap = |doc: &mut Document, rect: [f32; 4], ops: &str| {
             doc.add_object(Stream::new(
                 dictionary! { "Type" => "XObject", "Subtype" => "Form",
-                    "BBox" => rect.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
-                    "Resources" => dictionary! { "Font" => dictionary! { "F0" => font } } },
+                "BBox" => rect.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+                "Resources" => dictionary! { "Font" => dictionary! { "F0" => font } } },
                 ops.as_bytes().to_vec(),
             ))
         };
-        let xchange_ap = ap(&mut doc, [100.0, 600.0, 200.0, 660.0],
-            "1 1 0 rg 1 0 0 RG 1 w 100.5 600.5 99 59 re B BT 0 0 0 rg /F0 12 Tf 104 640 Td (Box 1) Tj ET");
-        let legacy_ap = ap(&mut doc, [300.0, 600.0, 400.0, 660.0],
-            "0 1 0 rg 300 600 100 60 re f 0 0 1 RG 1 w 300.5 600.5 99 59 re S BT 0 0 0 rg /F0 12 Tf 304 640 Td (Box 2) Tj ET");
+        let xchange_ap = ap(
+            &mut doc,
+            [100.0, 600.0, 200.0, 660.0],
+            "1 1 0 rg 1 0 0 RG 1 w 100.5 600.5 99 59 re B BT 0 0 0 rg /F0 12 Tf 104 640 Td (Box 1) Tj ET",
+        );
+        let legacy_ap = ap(
+            &mut doc,
+            [300.0, 600.0, 400.0, 660.0],
+            "0 1 0 rg 300 600 100 60 re f 0 0 1 RG 1 w 300.5 600.5 99 59 re S BT 0 0 0 rg /F0 12 Tf 304 640 Td (Box 2) Tj ET",
+        );
         let rect = |r: [f32; 4]| r.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>();
         let color = |c: [f32; 3]| c.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>();
         let s = |t: &str| Object::string_literal(t);
@@ -2117,7 +1831,10 @@ mod tests {
             "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
             "Annots" => vec![xchange.into(), legacy.into()],
         });
-        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }),
+        );
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         doc.trailer.set("Root", catalog);
         let mut out = Vec::new();
@@ -2168,7 +1885,10 @@ mod tests {
         assert!(p[2] > 200 && p[0] < 80, "box 2 border still blue: {p:?}");
         // Text stays black: no red or blue pixels inside either box apart from the border.
         let inside = |x0: f32, x1: f32, f: &dyn Fn(&[u8]) -> bool| {
-            (0..20).flat_map(|i| (0..10).map(move |j| (x0 + (x1 - x0) * i as f32 / 20.0, 510.0 + 4.0 * j as f32))).filter(|&(x, y)| f(&at(x, y))).count()
+            (0..20)
+                .flat_map(|i| (0..10).map(move |j| (x0 + (x1 - x0) * i as f32 / 20.0, 510.0 + 4.0 * j as f32)))
+                .filter(|&(x, y)| f(&at(x, y)))
+                .count()
         };
         assert_eq!(inside(103.0, 197.0, &|p| p[0] > 200 && p[1] < 80 && p[2] < 80), 0, "no red text in box 1");
         engine.send(Request::ScanAnnots { doc: 1 });
@@ -2190,14 +1910,28 @@ mod tests {
             .collect();
         assert_eq!(boxes.len(), 2);
         for d in boxes {
-            let text = |k: &[u8]| d.get(k).ok().and_then(|o| o.as_str().ok()).map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+            let text = |k: &[u8]| {
+                d.get(k)
+                    .ok()
+                    .and_then(|o| o.as_str().ok())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .unwrap_or_default()
+            };
             let c: Vec<f32> = d.get(b"C").unwrap().as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect();
             if text(b"Contents") == "Box 1" {
                 assert_eq!(c, vec![1.0, 1.0, 0.0]);
-                assert_eq!(textbox::parse_default_appearance(&text(b"DA")).1, Some([255, 0, 0]), "/DA holds the border");
+                assert_eq!(
+                    textbox::parse_default_appearance(&text(b"DA")).1,
+                    Some([255, 0, 0]),
+                    "/DA holds the border"
+                );
             } else {
                 assert_eq!(c, vec![0.0, 1.0, 0.0], "old magic-pdf box converted: /C is the fill");
-                assert_eq!(textbox::parse_default_appearance(&text(b"DA")).1, Some([0, 0, 255]), "/DA holds the border");
+                assert_eq!(
+                    textbox::parse_default_appearance(&text(b"DA")).1,
+                    Some([0, 0, 255]),
+                    "/DA holds the border"
+                );
             }
         }
         std::fs::remove_dir_all(dir).ok();
@@ -2215,7 +1949,10 @@ mod tests {
             let (px, py) = ((x / 595.0 * size[0] as f32) as usize, ((1.0 - y / 842.0) * size[1] as f32) as usize);
             rgba[(py * size[0] + px) * 4..][..3].to_vec()
         };
-        let pixels: Vec<Vec<u8>> = (0..20).flat_map(|i| (0..20).map(move |j| (451.0 + i as f32 * 0.9, 701.0 + j as f32 * 0.9))).map(|(x, y)| px(x, y)).collect();
+        let pixels: Vec<Vec<u8>> = (0..20)
+            .flat_map(|i| (0..20).map(move |j| (451.0 + i as f32 * 0.9, 701.0 + j as f32 * 0.9)))
+            .map(|(x, y)| px(x, y))
+            .collect();
         let blue = pixels.iter().filter(|p| p[2] > 180 && p[0] < 100).count();
         let yellow = pixels.iter().filter(|p| p[0] > 200 && p[1] > 180 && p[2] < 100).count();
         assert!(blue > 100 && yellow == 0, "blue {blue}, yellow {yellow}");
@@ -2256,7 +1993,11 @@ mod tests {
         assert_eq!(on2.len(), 1, "on page 3");
         assert_eq!(on2[0].contents, "Check this figure");
         assert_eq!(on2[0].color, Some([0, 90, 255]));
-        assert!((on2[0].rect.left - 100.0).abs() < 0.5 && (on2[0].rect.bottom - 300.0).abs() < 0.5, "{:?}", on2[0].rect);
+        assert!(
+            (on2[0].rect.left - 100.0).abs() < 0.5 && (on2[0].rect.bottom - 300.0).abs() < 0.5,
+            "{:?}",
+            on2[0].rect
+        );
 
         // One undo step brings it back; redo moves it again.
         engine.send(Request::Undo { doc: 1 });
@@ -2279,7 +2020,13 @@ mod tests {
     /// The reply annotations (/IRT) of a saved file: (parent object, author, text).
     fn standard_replies(path: &std::path::Path) -> Vec<(lopdf::ObjectId, String, String)> {
         let doc = lopdf::Document::load(path).unwrap();
-        let text = |d: &lopdf::Dictionary, k: &[u8]| d.get(k).ok().and_then(|o| o.as_str().ok()).map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+        let text = |d: &lopdf::Dictionary, k: &[u8]| {
+            d.get(k)
+                .ok()
+                .and_then(|o| o.as_str().ok())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .unwrap_or_default()
+        };
         doc.objects
             .values()
             .filter_map(|o| o.as_dict().ok())
@@ -2294,7 +2041,11 @@ mod tests {
         let rect = PdfBox { left: 300.0, bottom: 300.0, right: 400.0, top: 400.0 };
         engine.send(Request::AddAnnot { doc: 1, page: 0, annot: square(rect, [0, 0, 255]) });
         let sq = annots(&engine, 1).into_iter().find(|a| a.kind == AnnotKind::Square).unwrap();
-        let reply = |author: &str, text: &str| Reply { author: author.into(), date: "D:20261125120000Z".into(), text: text.into() };
+        let reply = |author: &str, text: &str| Reply {
+            author: author.into(),
+            date: "D:20261125120000Z".into(),
+            text: text.into(),
+        };
         engine.send(Request::UpdateAnnot {
             doc: 1,
             page: 0,
@@ -2322,7 +2073,10 @@ mod tests {
             doc: 2,
             page: 0,
             index: sq.index,
-            change: AnnotChange { replies: Some(vec![reply("Bob", "fixed in v2"), reply("Ann", "thanks")]), ..Default::default() },
+            change: AnnotChange {
+                replies: Some(vec![reply("Bob", "fixed in v2"), reply("Ann", "thanks")]),
+                ..Default::default()
+            },
         });
         let _ = annots(&engine, 2);
         let second = dir.join("second.pdf");
@@ -2400,15 +2154,13 @@ mod tests {
         engine.send(Request::Save { doc: 1, path: path.clone() });
         recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
         let doc = lopdf::Document::load(&path).unwrap();
-        let copy = doc
-            .objects
-            .values()
-            .filter_map(|o| o.as_dict().ok())
-            .find(|d| d.has(b"IRT"))
-            .expect("reply annotation");
+        let copy =
+            doc.objects.values().filter_map(|o| o.as_dict().ok()).find(|d| d.has(b"IRT")).expect("reply annotation");
         let raw = copy.get(b"Contents").unwrap().as_str().unwrap();
         let decoded = match raw.strip_prefix(&[0xFE, 0xFF]) {
-            Some(u) => String::from_utf16(&u.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>()).unwrap(),
+            Some(u) => {
+                String::from_utf16(&u.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>()).unwrap()
+            }
             None => raw.iter().map(|&b| b as char).collect(),
         };
         assert_eq!(decoded, text);
@@ -2459,29 +2211,46 @@ mod tests {
         use lopdf::{Document, Object, dictionary};
         let mut doc = Document::with_version("1.7");
         let pages_id = doc.new_object_id();
-        let page = |doc: &mut Document| doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()] });
+        let page = |doc: &mut Document| {
+            doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()] })
+        };
         let (p1, p2) = (page(&mut doc), page(&mut doc));
-        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![p1.into(), p2.into()], "Count" => 2 }));
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![p1.into(), p2.into()], "Count" => 2 }),
+        );
         let root = doc.new_object_id();
         let (a, b, c, c1) = (doc.new_object_id(), doc.new_object_id(), doc.new_object_id(), doc.new_object_id());
         let s = |t: &str| Object::string_literal(t);
-        doc.objects.insert(a, Object::Dictionary(dictionary! {
-            "Title" => s("Chapter"), "Parent" => root, "Next" => b,
-            "Dest" => vec![p1.into(), "XYZ".into(), 0.into(), 500.into(), 0.into()],
-            "C" => vec![1.into(), 0.into(), 0.into()], "F" => 2,
-        }));
-        doc.objects.insert(b, Object::Dictionary(dictionary! {
-            "Title" => s("Website"), "Parent" => root, "Prev" => a, "Next" => c,
-            "A" => dictionary! { "S" => "URI", "URI" => s("https://example.com/") },
-        }));
-        doc.objects.insert(c, Object::Dictionary(dictionary! {
-            "Title" => s("Appendix"), "Parent" => root, "Prev" => b, "First" => c1, "Last" => c1, "Count" => -1,
-            "Dest" => vec![p2.into(), "Fit".into()],
-        }));
+        doc.objects.insert(
+            a,
+            Object::Dictionary(dictionary! {
+                "Title" => s("Chapter"), "Parent" => root, "Next" => b,
+                "Dest" => vec![p1.into(), "XYZ".into(), 0.into(), 500.into(), 0.into()],
+                "C" => vec![1.into(), 0.into(), 0.into()], "F" => 2,
+            }),
+        );
+        doc.objects.insert(
+            b,
+            Object::Dictionary(dictionary! {
+                "Title" => s("Website"), "Parent" => root, "Prev" => a, "Next" => c,
+                "A" => dictionary! { "S" => "URI", "URI" => s("https://example.com/") },
+            }),
+        );
+        doc.objects.insert(
+            c,
+            Object::Dictionary(dictionary! {
+                "Title" => s("Appendix"), "Parent" => root, "Prev" => b, "First" => c1, "Last" => c1, "Count" => -1,
+                "Dest" => vec![p2.into(), "Fit".into()],
+            }),
+        );
         doc.objects.insert(c1, Object::Dictionary(dictionary! {
             "Title" => s("Tables"), "Parent" => c, "Dest" => vec![p2.into(), "XYZ".into(), 0.into(), 300.into(), 0.into()],
         }));
-        doc.objects.insert(root, Object::Dictionary(dictionary! { "Type" => "Outlines", "First" => a, "Last" => c, "Count" => 3 }));
+        doc.objects.insert(
+            root,
+            Object::Dictionary(dictionary! { "Type" => "Outlines", "First" => a, "Last" => c, "Count" => 3 }),
+        );
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id, "Outlines" => root });
         doc.trailer.set("Root", catalog);
         let mut out = Vec::new();
@@ -2587,11 +2356,17 @@ mod tests {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => reply,
             "Contents" => Object::string_literal("Thanks"), "T" => Object::string_literal("Ann"), "P" => page_id,
         });
-        doc.objects.insert(page_id, Object::Dictionary(dictionary! {
-            "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
-            "Annots" => vec![square.into(), reply.into(), reply2.into()],
-        }));
-        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }));
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "Annots" => vec![square.into(), reply.into(), reply2.into()],
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }),
+        );
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         doc.trailer.set("Root", catalog);
         let mut out = Vec::new();
@@ -2648,7 +2423,13 @@ mod tests {
             (before[0].index, AnnotChange { color: Some([0, 0, 0]), interior: Some(None), ..Default::default() }),
             (before[0].index, AnnotChange { rect: Some(r(120.0, 450.0)), ..Default::default() }),
             (before[1].index, AnnotChange { rect: Some(r(260.0, 400.0)), ..Default::default() }),
-            (before[2].index, AnnotChange { rect: Some(PdfBox { left: 100.0, bottom: 300.0, right: 260.0, top: 380.0 }), ..Default::default() }),
+            (
+                before[2].index,
+                AnnotChange {
+                    rect: Some(PdfBox { left: 100.0, bottom: 300.0, right: 260.0, top: 380.0 }),
+                    ..Default::default()
+                },
+            ),
         ];
         for (index, change) in changes.clone() {
             engine.send(Request::UpdateAnnot { doc: 1, page: 0, index, change });
@@ -2659,7 +2440,12 @@ mod tests {
             engine.send(Request::Undo { doc: 1 });
         }
         let after = list(&engine);
-        let near = |a: &PdfBox, b: &PdfBox| (a.left - b.left).abs() < 0.6 && (a.bottom - b.bottom).abs() < 0.6 && (a.right - b.right).abs() < 0.6 && (a.top - b.top).abs() < 0.6;
+        let near = |a: &PdfBox, b: &PdfBox| {
+            (a.left - b.left).abs() < 0.6
+                && (a.bottom - b.bottom).abs() < 0.6
+                && (a.right - b.right).abs() < 0.6
+                && (a.top - b.top).abs() < 0.6
+        };
         for (a, b) in after.iter().zip(&before) {
             assert_eq!((a.kind, a.color, a.interior), (b.kind, b.color, b.interior), "{:?}", a.kind);
             assert!(near(&a.rect, &b.rect), "{:?}: {:?} vs {:?}", a.kind, a.rect, b.rect);
@@ -2671,7 +2457,12 @@ mod tests {
         // Moving and undoing again and again: the freehand drawing's frame does not creep.
         let ink = before[1].index;
         for _ in 0..4 {
-            engine.send(Request::UpdateAnnot { doc: 1, page: 0, index: ink, change: AnnotChange { rect: Some(r(260.0, 400.0)), ..Default::default() } });
+            engine.send(Request::UpdateAnnot {
+                doc: 1,
+                page: 0,
+                index: ink,
+                change: AnnotChange { rect: Some(r(260.0, 400.0)), ..Default::default() },
+            });
             engine.send(Request::Undo { doc: 1 });
         }
         let again = list(&engine);
@@ -2743,11 +2534,7 @@ mod tests {
         open(&engine, 1, src.clone());
         let (size, before) = render(&engine, 1, 0, Rotation::R0, 0);
         let out = dir.join("small.pdf");
-        engine.send(Request::SaveOptimized {
-            doc: 1,
-            path: out.clone(),
-            image_dpi: Some(150),
-        });
+        engine.send(Request::SaveOptimized { doc: 1, path: out.clone(), image_dpi: Some(150) });
         let message = recv_until(&engine, |r| match r {
             Response::Exported { message } => Some(message),
             Response::Error { message, .. } => panic!("{message}"),
@@ -2770,14 +2557,7 @@ mod tests {
     fn tiles_match_the_same_area_of_a_whole_page_render() {
         let (_serial, engine) = start();
         open(&engine, 1, sample());
-        let full = RenderKey {
-            doc: 1,
-            page: 0,
-            width_px: 1100,
-            rotation: Rotation::R90,
-            version: 0,
-            tile: 0,
-        };
+        let full = RenderKey { doc: 1, page: 0, width_px: 1100, rotation: Rotation::R90, version: 0, tile: 0 };
         let get = |key: RenderKey| {
             engine.send(Request::Render { key, priority: 0.0 });
             recv_until(&engine, |r| match r {
@@ -2789,10 +2569,7 @@ mod tests {
         let (fsize, frgba) = get(full);
         // Tile (column 1, row 0) and the last, partial column (2).
         for col in [1u32, 2] {
-            let (size, rgba) = get(RenderKey {
-                tile: RenderKey::tile_at(col, 0),
-                ..full
-            });
+            let (size, rgba) = get(RenderKey { tile: RenderKey::tile_at(col, 0), ..full });
             let x0 = (col * TILE) as usize;
             assert_eq!(size, [(fsize[0] - x0).min(512), 512.min(fsize[1])]);
             let mut differ = 0;
@@ -2819,11 +2596,7 @@ mod tests {
         engine.send(Request::Search {
             doc: 1,
             generation: 1,
-            query: SearchQuery {
-                text: "LAYOUT LINE 3,".into(),
-                match_case: false,
-                whole_word: false,
-            },
+            query: SearchQuery { text: "LAYOUT LINE 3,".into(), match_case: false, whole_word: false },
         });
         let context = recv_until(&engine, |r| match r {
             Response::SearchResults { page: 0, context, hits, .. } => {
@@ -2908,10 +2681,7 @@ mod tests {
             doc: 1,
             page: 0,
             index: i,
-            change: AnnotChange {
-                transform: Some([2.0, 1.0, -100.0, 0.0]),
-                ..Default::default()
-            },
+            change: AnnotChange { transform: Some([2.0, 1.0, -100.0, 0.0]), ..Default::default() },
         });
         let list = annots(&engine, 1);
         assert_eq!(get(&list, i).contents, "5.08 m");
@@ -2929,8 +2699,12 @@ mod tests {
             "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
             "Contents" => content,
         });
-        doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
-        let file = doc.add_object(Stream::new(dictionary! { "Type" => "EmbeddedFile", "Subtype" => "text#2Fxml" }, xml.to_vec()));
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }),
+        );
+        let file = doc
+            .add_object(Stream::new(dictionary! { "Type" => "EmbeddedFile", "Subtype" => "text#2Fxml" }, xml.to_vec()));
         let spec = doc.add_object(dictionary! {
             "Type" => "Filespec", "F" => Object::string_literal("factur-x.xml"), "UF" => Object::string_literal("factur-x.xml"),
             "EF" => dictionary! { "F" => file }, "AFRelationship" => "Data",
@@ -2938,12 +2712,15 @@ mod tests {
         let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF><rdf:Description>\
 <dc:title><rdf:Alt><rdf:li xml:lang='x-default'>Invoice</rdf:li></rdf:Alt></dc:title>\
 </rdf:Description></rdf:RDF></x:xmpmeta>";
-        let metadata = doc.add_object(Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, xmp.to_vec()));
+        let metadata =
+            doc.add_object(Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, xmp.to_vec()));
         let catalog = doc.add_object(dictionary! {
             "Type" => "Catalog", "Pages" => pages_id, "Metadata" => metadata, "AF" => vec![spec.into()],
             "Names" => dictionary! { "EmbeddedFiles" => dictionary! { "Names" => vec![Object::string_literal("factur-x.xml"), spec.into()] } },
         });
-        let info = doc.add_object(dictionary! { "Title" => Object::string_literal("Invoice"), "Producer" => Object::string_literal("Test") });
+        let info = doc.add_object(
+            dictionary! { "Title" => Object::string_literal("Invoice"), "Producer" => Object::string_literal("Test") },
+        );
         doc.trailer.set("Root", catalog);
         doc.trailer.set("Info", info);
         let mut out = Vec::new();
@@ -2998,4 +2775,3 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 }
-

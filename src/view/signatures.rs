@@ -15,7 +15,9 @@ const RED: Color32 = Color32::from_rgb(210, 50, 50);
 fn status(s: &SignatureInfo) -> (&'static str, Color32, String) {
     match &s.check.status {
         SigStatus::Valid => ("✔", GREEN, t("Signature valid: the document is unchanged since it was signed.").into()),
-        SigStatus::ChangedAfter => ("⚠", ORANGE, t("The signed version is unchanged, but the file was changed after signing.").into()),
+        SigStatus::ChangedAfter => {
+            ("⚠", ORANGE, t("The signed version is unchanged, but the file was changed after signing.").into())
+        }
         SigStatus::Invalid(why) => ("✖", RED, tf("Signature invalid: {why}.", &[("why", &t(why))])),
         SigStatus::Unknown(why) => ("?", ORANGE, tf("Signature not checked: {why}.", &[("why", &t(why))])),
     }

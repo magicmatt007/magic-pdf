@@ -92,24 +92,21 @@ mod tests {
     use super::*;
 
     fn item(title: &str, children: Vec<OutlineItem>) -> OutlineItem {
-        OutlineItem {
-            title: title.into(),
-            page: None,
-            children,
-            origin: None,
-        }
+        OutlineItem { title: title.into(), page: None, children, origin: None }
     }
 
     fn titles(items: &[OutlineItem]) -> String {
         items
             .iter()
-            .map(|i| {
-                if i.children.is_empty() {
-                    i.title.clone()
-                } else {
-                    format!("{}({})", i.title, titles(&i.children))
-                }
-            })
+            .map(
+                |i| {
+                    if i.children.is_empty() {
+                        i.title.clone()
+                    } else {
+                        format!("{}({})", i.title, titles(&i.children))
+                    }
+                },
+            )
             .collect::<Vec<_>>()
             .join(" ")
     }

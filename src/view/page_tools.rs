@@ -1,7 +1,7 @@
 //! Dialogs for page tools: crop, header and footer, and saving an optimized copy.
 
-use std::path::PathBuf;
 use crate::i18n::{t, tf};
+use std::path::PathBuf;
 
 use eframe::egui::{self, Ui};
 
@@ -48,10 +48,7 @@ fn buttons(ui: &mut Ui, ok: &str) -> (bool, bool) {
 }
 
 fn window(title: &str) -> egui::Window<'_> {
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+    egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
 }
 
 #[derive(Default)]
@@ -87,10 +84,7 @@ pub fn crop_dialog(ctx: &egui::Context, d: &mut CropDialog, tab: &DocTab) -> (Op
             result = (
                 Some(Request::EditPages {
                     doc: tab.id,
-                    op: PageOp::Crop {
-                        pages: pages(d.scope, tab),
-                        margins: Margins { top, right, bottom, left },
-                    },
+                    op: PageOp::Crop { pages: pages(d.scope, tab), margins: Margins { top, right, bottom, left } },
                 }),
                 false,
             );
@@ -183,13 +177,7 @@ pub fn header_footer_dialog(
                 first_number: d.first_number,
             };
             result = (
-                Some(Request::EditPages {
-                    doc: tab.id,
-                    op: PageOp::HeaderFooter {
-                        pages: pages(d.scope, tab),
-                        spec,
-                    },
-                }),
+                Some(Request::EditPages { doc: tab.id, op: PageOp::HeaderFooter { pages: pages(d.scope, tab), spec } }),
                 false,
             );
         } else if cancel {
@@ -224,7 +212,12 @@ impl Default for WatermarkDialog {
     }
 }
 
-pub fn watermark_dialog(ctx: &egui::Context, d: &mut WatermarkDialog, tab: &DocTab, recent: &mut Vec<Rgb>) -> (Option<Request>, bool) {
+pub fn watermark_dialog(
+    ctx: &egui::Context,
+    d: &mut WatermarkDialog,
+    tab: &DocTab,
+    recent: &mut Vec<Rgb>,
+) -> (Option<Request>, bool) {
     let mut result = (None, true);
     window(t("Watermark")).show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -279,7 +272,10 @@ pub fn watermark_dialog(ctx: &egui::Context, d: &mut WatermarkDialog, tab: &DocT
                 angle: d.angle,
                 behind: d.behind,
             };
-            result = (Some(Request::EditPages { doc: tab.id, op: PageOp::Watermark { pages: pages(d.scope, tab), spec } }), false);
+            result = (
+                Some(Request::EditPages { doc: tab.id, op: PageOp::Watermark { pages: pages(d.scope, tab), spec } }),
+                false,
+            );
         } else if cancel {
             result = (None, false);
         }

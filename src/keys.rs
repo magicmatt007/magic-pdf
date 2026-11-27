@@ -6,11 +6,7 @@ pub fn kb(label: &str) -> String {
 }
 
 fn mac(label: &str) -> String {
-    label
-        .replace("Ctrl+Shift+", "⇧⌘")
-        .replace("Ctrl+", "⌘")
-        .replace("Shift+", "⇧")
-        .replace("Alt+", "⌥")
+    label.replace("Ctrl+Shift+", "⇧⌘").replace("Ctrl+", "⌘").replace("Shift+", "⇧").replace("Alt+", "⌥")
 }
 
 #[cfg(test)]

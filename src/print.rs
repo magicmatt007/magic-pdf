@@ -13,21 +13,15 @@ pub struct Printers {
 
 /// Lists CUPS destinations and the default one.
 pub fn list_printers() -> Result<Printers, String> {
-    let out = Command::new("lpstat")
-        .arg("-e")
-        .output()
-        .map_err(|e| format!("CUPS is not available (lpstat: {e})"))?;
+    let out = Command::new("lpstat").arg("-e").output().map_err(|e| format!("CUPS is not available (lpstat: {e})"))?;
     let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
-    let default = Command::new("lpstat")
-        .arg("-d")
-        .output()
-        .ok()
-        .and_then(|o| parse_default(&String::from_utf8_lossy(&o.stdout)));
+    let default =
+        Command::new("lpstat").arg("-d").output().ok().and_then(|o| parse_default(&String::from_utf8_lossy(&o.stdout)));
     Ok(Printers { names, default })
 }
 
@@ -87,14 +81,7 @@ pub fn lp_args(job: &PrintJob) -> Vec<String> {
         args.push(pages.clone());
     }
     args.push("-o".into());
-    args.push(
-        if job.two_sided {
-            "sides=two-sided-long-edge"
-        } else {
-            "sides=one-sided"
-        }
-        .into(),
-    );
+    args.push(if job.two_sided { "sides=two-sided-long-edge" } else { "sides=one-sided" }.into());
     if job.fit_to_page {
         args.push("-o".into());
         args.push("fit-to-page".into());
@@ -145,10 +132,7 @@ mod tests {
 
     #[test]
     fn default_printer() {
-        assert_eq!(
-            parse_default("system default destination: Office_Laser\n").as_deref(),
-            Some("Office_Laser")
-        );
+        assert_eq!(parse_default("system default destination: Office_Laser\n").as_deref(), Some("Office_Laser"));
         assert_eq!(parse_default("no system default destination\n"), None);
     }
 

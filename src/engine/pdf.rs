@@ -1,9 +1,9 @@
 //! Thin safe-ish wrapper over the raw PDFium C API (via pdfium-render's bindings).
 //! Everything here must only be used from the PDFium worker thread.
 
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_ulong};
-use std::cell::{Cell, RefCell};
 use std::ptr;
 
 use pdfium_render::prelude::*;
@@ -187,10 +187,8 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// PDF date string for "now" in UTC, e.g. `D:20261122101500Z`.
 pub fn pdf_date_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     // Civil-from-days (Howard Hinnant's algorithm).
@@ -203,12 +201,7 @@ pub fn pdf_date_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "D:{y:04}{m:02}{d:02}{:02}{:02}{:02}Z",
-        rem / 3600,
-        (rem / 60) % 60,
-        rem % 60
-    )
+    format!("D:{y:04}{m:02}{d:02}{:02}{:02}{:02}Z", rem / 3600, (rem / 60) % 60, rem % 60)
 }
 
 #[repr(C)]
@@ -316,11 +309,7 @@ impl Doc {
         info.version = 1;
         info.FFI_Invalidate = Some(ffi_invalidate);
         info.FFI_OnChange = Some(ffi_on_change);
-        let mut env = Box::new(FormEnv {
-            info,
-            invalidated: RefCell::new(Vec::new()),
-            changed: Cell::new(false),
-        });
+        let mut env = Box::new(FormEnv { info, invalidated: RefCell::new(Vec::new()), changed: Cell::new(false) });
         let form = unsafe { lib.FPDFDOC_InitFormFillEnvironment(handle, &mut env.info) };
         if !form.is_null() {
             unsafe {
@@ -329,14 +318,7 @@ impl Doc {
                 lib.FPDF_SetFormFieldHighlightAlpha(form, 90);
             }
         }
-        Ok(Doc {
-            lib,
-            handle,
-            form,
-            pages: RefCell::new(Vec::new()),
-            env,
-            _data: data,
-        })
+        Ok(Doc { lib, handle, form, pages: RefCell::new(Vec::new()), env, _data: data })
     }
 
     pub fn page_count(&self) -> usize {
@@ -344,13 +326,9 @@ impl Doc {
     }
 
     pub fn page_size(&self, index: usize) -> (f32, f32) {
-        let mut size = FS_SIZEF {
-            width: 0.0,
-            height: 0.0,
-        };
+        let mut size = FS_SIZEF { width: 0.0, height: 0.0 };
         unsafe {
-            self.lib
-                .FPDF_GetPageSizeByIndexF(self.handle, index as c_int, &mut size);
+            self.lib.FPDF_GetPageSizeByIndexF(self.handle, index as c_int, &mut size);
         }
         (size.width.abs().max(1.0), size.height.abs().max(1.0))
     }
@@ -360,10 +338,7 @@ impl Doc {
         if let Some(pos) = pages.iter().position(|(i, _)| *i == index) {
             let entry = pages.remove(pos);
             pages.push(entry);
-            return Some(Page {
-                doc: self,
-                handle: entry.1,
-            });
+            return Some(Page { doc: self, handle: entry.1 });
         }
         let handle = unsafe { self.lib.FPDF_LoadPage(self.handle, index as c_int) };
         if handle.is_null() {
@@ -448,7 +423,8 @@ impl Doc {
                 let n = lib.FPDFSignatureObj_GetByteRange(sig, ptr::null_mut(), 0) as usize;
                 let mut range = vec![0 as c_int; n];
                 lib.FPDFSignatureObj_GetByteRange(sig, range.as_mut_ptr(), n as c_ulong);
-                let ranges: Vec<(usize, usize)> = range.as_chunks::<2>().0.iter().map(|p| (p[0].max(0) as usize, p[1].max(0) as usize)).collect();
+                let ranges: Vec<(usize, usize)> =
+                    range.as_chunks::<2>().0.iter().map(|p| (p[0].max(0) as usize, p[1].max(0) as usize)).collect();
                 let ascii = |f: &dyn Fn(*mut std::os::raw::c_char, c_ulong) -> c_ulong| {
                     let len = f(ptr::null_mut(), 0) as usize;
                     let mut buf = vec![0u8; len];
@@ -482,11 +458,7 @@ impl Doc {
             handle,
             form: ptr::null_mut(),
             pages: RefCell::new(Vec::new()),
-            env: Box::new(FormEnv {
-                info,
-                invalidated: RefCell::new(Vec::new()),
-                changed: Cell::new(false),
-            }),
+            env: Box::new(FormEnv { info, invalidated: RefCell::new(Vec::new()), changed: Cell::new(false) }),
             _data: Vec::new(),
         })
     }
@@ -543,7 +515,8 @@ impl Doc {
             PageOp::Watermark { pages, spec } => {
                 const FPDF_FONT_TRUETYPE: c_int = 2;
                 let ttf = crate::fonts::BOLD;
-                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                let font =
+                    unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
                     return Err("PDFium could not load the watermark font".into());
                 }
@@ -598,7 +571,8 @@ impl Doc {
             PageOp::HeaderFooter { pages, spec } => {
                 const FPDF_FONT_TRUETYPE: c_int = 2;
                 let ttf = crate::fonts::REGULAR;
-                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                let font =
+                    unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
                     return Err("PDFium could not load the header font".into());
                 }
@@ -620,7 +594,9 @@ impl Doc {
             PageOp::RemoveHeaderFooter { pages } => {
                 for &i in pages {
                     let page = self.page(i).ok_or("page not found")?;
-                    if page.remove_marked(HEADER_FOOTER_MARK) > 0 && !lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
+                    if page.remove_marked(HEADER_FOOTER_MARK) > 0
+                        && !lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) })
+                    {
                         return Err("PDFium could not write the page content".into());
                     }
                 }
@@ -632,7 +608,8 @@ impl Doc {
                 let ttf = crate::fonts::REGULAR;
                 // One embedded font (as CID font, so any Unicode text can be stored)
                 // shared by all text objects of this operation.
-                let font = unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
+                let font =
+                    unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
                     return Err("PDFium could not load the text layer font".into());
                 }
@@ -664,13 +641,15 @@ impl Doc {
             None => (0..src.page_count() as c_int).collect(),
         };
         let ok = unsafe {
-            lib.FPDF_ImportPagesByIndex(self.handle, src.handle, indices.as_ptr(), indices.len() as c_ulong, at as c_int)
+            lib.FPDF_ImportPagesByIndex(
+                self.handle,
+                src.handle,
+                indices.as_ptr(),
+                indices.len() as c_ulong,
+                at as c_int,
+            )
         };
-        if lib.is_true(ok) {
-            Ok(indices.len())
-        } else {
-            Err("PDFium could not import the pages".into())
-        }
+        if lib.is_true(ok) { Ok(indices.len()) } else { Err("PDFium could not import the pages".into()) }
     }
 
     pub fn kill_form_focus(&self) {
@@ -681,9 +660,7 @@ impl Doc {
 
     pub fn properties(&self) -> DocProperties {
         let meta = |tag: &str| {
-            read_utf16(|buf, len| unsafe { self.lib.FPDF_GetMetaText(self.handle, tag, buf, len) })
-                .trim()
-                .to_string()
+            read_utf16(|buf, len| unsafe { self.lib.FPDF_GetMetaText(self.handle, tag, buf, len) }).trim().to_string()
         };
         let mut v = 0;
         let version = self.lib.is_true(unsafe { self.lib.FPDF_GetFileVersion(self.handle, &mut v) }).then_some(v);
@@ -776,39 +753,18 @@ impl Doc {
                 }
             }
             let child = unsafe { self.lib.FPDFBookmark_GetFirstChild(self.handle, bm) };
-            let children = if depth < MAX_DEPTH {
-                self.outline_level(child, depth + 1, count)
-            } else {
-                Vec::new()
-            };
-            items.push(OutlineItem {
-                title,
-                page,
-                children,
-                origin: Some(OutlineOrigin { index, page }),
-            });
+            let children = if depth < MAX_DEPTH { self.outline_level(child, depth + 1, count) } else { Vec::new() };
+            items.push(OutlineItem { title, page, children, origin: Some(OutlineOrigin { index, page }) });
             bm = unsafe { self.lib.FPDFBookmark_GetNextSibling(self.handle, bm) };
         }
         items
     }
 
     pub fn save_to_bytes(&self) -> Result<Vec<u8>, String> {
-        let mut writer = VecWriter {
-            base: FPDF_FILEWRITE {
-                version: 1,
-                WriteBlock: Some(write_block),
-            },
-            out: Vec::new(),
-        };
-        let ok = unsafe {
-            self.lib
-                .FPDF_SaveAsCopy(self.handle, &mut writer.base, FPDF_NO_INCREMENTAL)
-        };
-        if self.lib.is_true(ok) {
-            Ok(writer.out)
-        } else {
-            Err("PDFium could not write the document".into())
-        }
+        let mut writer =
+            VecWriter { base: FPDF_FILEWRITE { version: 1, WriteBlock: Some(write_block) }, out: Vec::new() };
+        let ok = unsafe { self.lib.FPDF_SaveAsCopy(self.handle, &mut writer.base, FPDF_NO_INCREMENTAL) };
+        if self.lib.is_true(ok) { Ok(writer.out) } else { Err("PDFium could not write the document".into()) }
     }
 }
 
@@ -825,11 +781,7 @@ impl<'d> Page<'d> {
             unsafe { lib.FPDFPage_GetMediaBox(self.handle, &mut l, &mut b, &mut r, &mut t) };
         }
         let rotation = Rotation::from_quarter_turns(unsafe { lib.FPDFPage_GetRotation(self.handle) });
-        PageGeom {
-            size: ((r - l).abs().max(1.0), (t - b).abs().max(1.0)),
-            origin: (l.min(r), b.min(t)),
-            rotation,
-        }
+        PageGeom { size: ((r - l).abs().max(1.0), (t - b).abs().max(1.0)), origin: (l.min(r), b.min(t)), rotation }
     }
 
     /// Renders into an RGBA buffer `width` x `height` pixels (already rotated by
@@ -847,7 +799,12 @@ impl<'d> Page<'d> {
 
     /// Renders the part `region` (x, y, width, height in pixels) of the page drawn at
     /// `full` size.
-    pub fn render_region(&self, full: (usize, usize), region: (usize, usize, usize, usize), rotation: Rotation) -> Option<Vec<u8>> {
+    pub fn render_region(
+        &self,
+        full: (usize, usize),
+        region: (usize, usize, usize, usize),
+        rotation: Rotation,
+    ) -> Option<Vec<u8>> {
         self.render_bitmap(full, region, rotation, true, false)
     }
 
@@ -910,9 +867,12 @@ impl<'d> Page<'d> {
             let mut out = Vec::with_capacity(width * height);
             for y in 0..height {
                 let row = std::slice::from_raw_parts(buf.add(y * stride), width * 4);
-                out.extend(row.as_chunks::<4>().0.iter().map(|px| {
-                    ((px[0] as u32 * 114 + px[1] as u32 * 587 + px[2] as u32 * 299) / 1000) as u8
-                }));
+                out.extend(
+                    row.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|px| ((px[0] as u32 * 114 + px[1] as u32 * 587 + px[2] as u32 * 299) / 1000) as u8),
+                );
             }
             lib.FPDFBitmap_Destroy(bitmap);
             Some(out)
@@ -925,7 +885,9 @@ impl<'d> Page<'d> {
         let Some(tp) = self.text_page() else { return 0 };
         let n = unsafe { lib.FPDFText_CountChars(tp.handle) };
         (0..n)
-            .filter(|&i| char::from_u32(unsafe { lib.FPDFText_GetUnicode(tp.handle, i) }).is_some_and(|c| !c.is_whitespace()))
+            .filter(|&i| {
+                char::from_u32(unsafe { lib.FPDFText_GetUnicode(tp.handle, i) }).is_some_and(|c| !c.is_whitespace())
+            })
             .count()
     }
 
@@ -950,7 +912,12 @@ impl<'d> Page<'d> {
     }
 
     /// Places words recognised on a `width` x `height` rendering of this page.
-    pub fn place_ocr_words(&self, width: usize, height: usize, words: Vec<super::ocr::HocrWord>) -> Vec<super::ocr::OcrWord> {
+    pub fn place_ocr_words(
+        &self,
+        width: usize,
+        height: usize,
+        words: Vec<super::ocr::HocrWord>,
+    ) -> Vec<super::ocr::OcrWord> {
         words
             .into_iter()
             .filter_map(|w| {
@@ -1013,12 +980,7 @@ impl<'d> Page<'d> {
                 lib.FPDFPage_GetMediaBox(self.handle, &mut l, &mut b, &mut r, &mut t);
             }
         }
-        PdfBox {
-            left: l.min(r),
-            bottom: b.min(t),
-            right: l.max(r),
-            top: b.max(t),
-        }
+        PdfBox { left: l.min(r), bottom: b.min(t), right: l.max(r), top: b.max(t) }
     }
 
     fn rotation_turns(&self) -> usize {
@@ -1032,12 +994,7 @@ impl<'d> Page<'d> {
         // Unrotated sides (top, right, bottom, left) from the displayed ones.
         let m: [f32; 4] = std::array::from_fn(|i| disp[(i + r) % 4]);
         let b = self.crop_box();
-        let new = PdfBox {
-            left: b.left + m[3],
-            bottom: b.bottom + m[2],
-            right: b.right - m[1],
-            top: b.top - m[0],
-        };
+        let new = PdfBox { left: b.left + m[3], bottom: b.bottom + m[2], right: b.right - m[1], top: b.top - m[0] };
         if new.right - new.left < 36.0 || new.top - new.bottom < 36.0 {
             return Err("The margins leave less than half an inch of the page.".into());
         }
@@ -1066,10 +1023,7 @@ impl<'d> Page<'d> {
             (b.right - b.left, b.top - b.bottom)
         };
         let [cr, cg, cb] = spec.color;
-        let rows = [
-            (&spec.header, h - spec.margin - spec.size * 0.75),
-            (&spec.footer, spec.margin + spec.size * 0.2),
-        ];
+        let rows = [(&spec.header, h - spec.margin - spec.size * 0.75), (&spec.footer, spec.margin + spec.size * 0.2)];
         for (texts, baseline) in rows {
             for (slot, text) in texts.iter().enumerate() {
                 let text = super::pages::HeaderFooter::resolve(text, index, count, spec.first_number);
@@ -1093,7 +1047,15 @@ impl<'d> Page<'d> {
                         _ => w - spec.margin - tw,
                     };
                     let ((ox, oy), (ax, ay), (cx, cy)) = self.displayed_to_page(u, baseline);
-                    lib.FPDFPageObj_Transform(obj, ax as f64, ay as f64, cx as f64, cy as f64, (ox - ax * l) as f64, (oy - ay * l) as f64);
+                    lib.FPDFPageObj_Transform(
+                        obj,
+                        ax as f64,
+                        ay as f64,
+                        cx as f64,
+                        cy as f64,
+                        (ox - ax * l) as f64,
+                        (oy - ay * l) as f64,
+                    );
                     lib.FPDFPageObj_AddMark(obj, HEADER_FOOTER_MARK);
                     lib.FPDFPage_InsertObject(self.handle, obj);
                 }
@@ -1136,7 +1098,11 @@ impl<'d> Page<'d> {
             let unit_width = (r - l).max(0.01);
             let (sin, cos) = angle.sin_cos();
             // Longest line through the centre at this angle that stays on the page.
-            let reach = (if cos.abs() > 1e-3 { w / cos.abs() } else { f32::MAX }).min(if sin.abs() > 1e-3 { h / sin.abs() } else { f32::MAX });
+            let reach = (if cos.abs() > 1e-3 { w / cos.abs() } else { f32::MAX }).min(if sin.abs() > 1e-3 {
+                h / sin.abs()
+            } else {
+                f32::MAX
+            });
             let size = spec.size.min(0.8 * reach / unit_width).max(4.0);
             let obj = lib.FPDFPageObj_CreateTextObj(self.doc.handle, font, size);
             if obj.is_null() {
@@ -1182,7 +1148,12 @@ impl<'d> Page<'d> {
                     let mut len: c_ulong = 0;
                     let mut buf = [0u16; 64];
                     !mark.is_null()
-                        && lib.is_true(lib.FPDFPageObjMark_GetName(mark, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong, &mut len))
+                        && lib.is_true(lib.FPDFPageObjMark_GetName(
+                            mark,
+                            buf.as_mut_ptr(),
+                            (buf.len() * 2) as c_ulong,
+                            &mut len,
+                        ))
                         && utf16_buf_to_string(&buf) == name
                 });
                 if marked && lib.is_true(lib.FPDFPage_RemoveObject(self.handle, obj)) {
@@ -1212,7 +1183,10 @@ impl<'d> Page<'d> {
                     continue;
                 }
                 let shown_dpi = meta.horizontal_dpi.min(meta.vertical_dpi);
-                if meta.bits_per_pixel < 8 || shown_dpi <= dpi * 1.25 || (meta.width as u64 * meta.height as u64) < 100_000 {
+                if meta.bits_per_pixel < 8
+                    || shown_dpi <= dpi * 1.25
+                    || (meta.width as u64 * meta.height as u64) < 100_000
+                {
                     continue;
                 }
                 let raw_len = lib.FPDFImageObj_GetImageDataRaw(obj, ptr::null_mut(), 0) as usize;
@@ -1293,17 +1267,15 @@ impl<'d> Page<'d> {
             bbox: PdfBox,
             remove: bool,
         }
-        let objects: Vec<FPDF_PAGEOBJECT> =
-            unsafe { (0..lib.FPDFPage_CountObjects(self.handle)).map(|i| lib.FPDFPage_GetObject(self.handle, i)).collect() };
-        let bounds = |obj: FPDF_PAGEOBJECT| {
-            let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            unsafe { lib.is_true(lib.FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) }.then_some(PdfBox {
-                left: l,
-                bottom: b,
-                right: r,
-                top: t,
-            })
+        let objects: Vec<FPDF_PAGEOBJECT> = unsafe {
+            (0..lib.FPDFPage_CountObjects(self.handle)).map(|i| lib.FPDFPage_GetObject(self.handle, i)).collect()
         };
+        let bounds =
+            |obj: FPDF_PAGEOBJECT| {
+                let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                unsafe { lib.is_true(lib.FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) }
+                    .then_some(PdfBox { left: l, bottom: b, right: r, top: t })
+            };
 
         // 1. Text: characters per text object.
         let mut glyphs: Vec<(FPDF_PAGEOBJECT, Vec<Glyph>)> = Vec::new();
@@ -1323,18 +1295,8 @@ impl<'d> Page<'d> {
                     {
                         continue;
                     }
-                    let bbox = PdfBox {
-                        left: l as f32,
-                        bottom: b as f32,
-                        right: r as f32,
-                        top: t as f32,
-                    };
-                    let g = Glyph {
-                        ch,
-                        origin: (x, y),
-                        bbox,
-                        remove: removes_char(&bbox, areas),
-                    };
+                    let bbox = PdfBox { left: l as f32, bottom: b as f32, right: r as f32, top: t as f32 };
+                    let g = Glyph { ch, origin: (x, y), bbox, remove: removes_char(&bbox, areas) };
                     match glyphs.iter_mut().find(|(o, _)| *o == obj) {
                         Some((_, v)) => v.push(g),
                         None => glyphs.push((obj, vec![g])),
@@ -1408,7 +1370,8 @@ impl<'d> Page<'d> {
         {
             for (obj, ch, bbox) in &created {
                 let mut buf = [0u16; 8];
-                let len = unsafe { lib.FPDFTextObj_GetText(*obj, tp.handle, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong) };
+                let len =
+                    unsafe { lib.FPDFTextObj_GetText(*obj, tp.handle, buf.as_mut_ptr(), (buf.len() * 2) as c_ulong) };
                 let got = utf16_buf_to_string(&buf[..(len as usize / 2).min(buf.len())]);
                 if got.chars().next().map(u32::from) != Some(*ch) {
                     patches.push(*bbox);
@@ -1535,7 +1498,8 @@ impl<'d> Page<'d> {
             (dx, dy)
         };
         let dev_rect = |b: &PdfBox| {
-            let pts = [to_dev(b.left, b.bottom), to_dev(b.right, b.top), to_dev(b.left, b.top), to_dev(b.right, b.bottom)];
+            let pts =
+                [to_dev(b.left, b.bottom), to_dev(b.right, b.top), to_dev(b.left, b.top), to_dev(b.right, b.bottom)];
             let x0 = pts.iter().map(|p| p.0).min().unwrap_or(0).clamp(0, wi);
             let x1 = pts.iter().map(|p| p.0).max().unwrap_or(0).clamp(0, wi);
             let y0 = pts.iter().map(|p| p.1).min().unwrap_or(0).clamp(0, hi);
@@ -1569,14 +1533,7 @@ impl<'d> Page<'d> {
         let o = to_page(x0, y1);
         let ux = to_page(x1, y1);
         let vy = to_page(x0, y0);
-        let m = FS_MATRIX {
-            a: ux.0 - o.0,
-            b: ux.1 - o.1,
-            c: vy.0 - o.0,
-            d: vy.1 - o.1,
-            e: o.0,
-            f: o.1,
-        };
+        let m = FS_MATRIX { a: ux.0 - o.0, b: ux.1 - o.1, c: vy.0 - o.0, d: vy.1 - o.1, e: o.0, f: o.1 };
         unsafe {
             let bmp = rgba_bitmap(lib, pw, ph, &crop).ok_or("out of memory for the redaction")?;
             let img = lib.FPDFPageObj_NewImageObj(self.doc.handle);
@@ -1635,11 +1592,7 @@ impl<'d> Page<'d> {
 
     fn text_page(&self) -> Option<TextPage<'_>> {
         let handle = unsafe { self.lib().FPDFText_LoadPage(self.handle) };
-        (!handle.is_null()).then(|| TextPage {
-            lib: self.lib(),
-            handle,
-            _page: std::marker::PhantomData,
-        })
+        (!handle.is_null()).then(|| TextPage { lib: self.lib(), handle, _page: std::marker::PhantomData })
     }
 
     pub fn text(&self) -> PageText {
@@ -1651,34 +1604,22 @@ impl<'d> Page<'d> {
             for i in 0..n {
                 let code = unsafe { lib.FPDFText_GetUnicode(tp.handle, i) };
                 let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-                let mut r = FS_RECTF {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
+                let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
                 let ok = unsafe { lib.FPDFText_GetLooseCharBox(tp.handle, i, &mut r) };
-                let rect = Some(to_box(&r))
-                    .filter(|b| lib.is_true(ok) && b.right - b.left > 0.0 && b.top - b.bottom > 0.0);
+                let rect =
+                    Some(to_box(&r)).filter(|b| lib.is_true(ok) && b.right - b.left > 0.0 && b.top - b.bottom > 0.0);
                 text.chars.push(TextChar { ch, rect });
             }
         }
         let mut pos: c_int = 0;
         let mut link: FPDF_LINK = ptr::null_mut();
         while lib.is_true(unsafe { lib.FPDFLink_Enumerate(self.handle, &mut pos, &mut link) }) {
-            let mut r = FS_RECTF {
-                left: 0.0,
-                top: 0.0,
-                right: 0.0,
-                bottom: 0.0,
-            };
+            let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
             if !lib.is_true(unsafe { lib.FPDFLink_GetAnnotRect(link, &mut r) }) {
                 continue;
             }
-            let mut target = self
-                .doc
-                .dest_page(unsafe { lib.FPDFLink_GetDest(self.doc.handle, link) })
-                .map(LinkTarget::Page);
+            let mut target =
+                self.doc.dest_page(unsafe { lib.FPDFLink_GetDest(self.doc.handle, link) }).map(LinkTarget::Page);
             if target.is_none() {
                 let action = unsafe { lib.FPDFLink_GetAction(link) };
                 if !action.is_null() {
@@ -1691,9 +1632,9 @@ impl<'d> Page<'d> {
                         }
                         PDFACTION_URI => {
                             // URI is returned as 7-bit ASCII bytes.
-                            let needed = unsafe {
-                                lib.FPDFAction_GetURIPath(self.doc.handle, action, ptr::null_mut(), 0)
-                            } as usize;
+                            let needed =
+                                unsafe { lib.FPDFAction_GetURIPath(self.doc.handle, action, ptr::null_mut(), 0) }
+                                    as usize;
                             if needed > 1 {
                                 let mut buf = vec![0u8; needed];
                                 unsafe {
@@ -1713,10 +1654,7 @@ impl<'d> Page<'d> {
                 }
             }
             if let Some(target) = target {
-                text.links.push(PageLink {
-                    rect: to_box(&r),
-                    target,
-                });
+                text.links.push(PageLink { rect: to_box(&r), target });
             }
         }
         text
@@ -1748,12 +1686,7 @@ impl<'d> Page<'d> {
                 for i in 0..n {
                     let (mut l, mut t, mut r, mut b) = (0.0, 0.0, 0.0, 0.0);
                     if lib.is_true(lib.FPDFText_GetRect(tp.handle, i, &mut l, &mut t, &mut r, &mut b)) {
-                        rects.push(PdfBox {
-                            left: l as f32,
-                            bottom: b as f32,
-                            right: r as f32,
-                            top: t as f32,
-                        });
+                        rects.push(PdfBox { left: l as f32, bottom: b as f32, right: r as f32, top: t as f32 });
                     }
                 }
                 if !rects.is_empty() {
@@ -1787,9 +1720,18 @@ impl<'d> Page<'d> {
                     let gap = |s: &str| !s.is_empty() && !s.ends_with('…');
                     let context = HitContext {
                         // Keep the space between the context and the match.
-                        before: if gap(&before) && lib.FPDFText_GetUnicode(tp.handle, (start - 1).max(0)) == ' ' as u32 { before + " " } else { before },
+                        before: if gap(&before) && lib.FPDFText_GetUnicode(tp.handle, (start - 1).max(0)) == ' ' as u32
+                        {
+                            before + " "
+                        } else {
+                            before
+                        },
                         text: get(start, count),
-                        after: if !after.is_empty() && lib.FPDFText_GetUnicode(tp.handle, start + count) == ' ' as u32 { format!(" {after}") } else { after },
+                        after: if !after.is_empty() && lib.FPDFText_GetUnicode(tp.handle, start + count) == ' ' as u32 {
+                            format!(" {after}")
+                        } else {
+                            after
+                        },
                     };
                     hits.push((rects, context));
                 }
@@ -1805,10 +1747,7 @@ impl<'d> Page<'d> {
 
     fn annot(&self, index: usize) -> Option<Annot> {
         let handle = unsafe { self.lib().FPDFPage_GetAnnot(self.handle, index as c_int) };
-        (!handle.is_null()).then(|| Annot {
-            lib: self.lib(),
-            handle,
-        })
+        (!handle.is_null()).then(|| Annot { lib: self.lib(), handle })
     }
 
     pub fn annot_flags(&self, index: usize) -> Option<i32> {
@@ -1823,11 +1762,7 @@ impl<'d> Page<'d> {
 
     pub fn set_annot_hidden(&self, index: usize, hidden: bool) -> Option<i32> {
         let flags = self.annot_flags(index)?;
-        let new = if hidden {
-            flags | FPDF_ANNOT_FLAG_HIDDEN
-        } else {
-            flags & !FPDF_ANNOT_FLAG_HIDDEN
-        };
+        let new = if hidden { flags | FPDF_ANNOT_FLAG_HIDDEN } else { flags & !FPDF_ANNOT_FLAG_HIDDEN };
         self.set_annot_flags(index, new);
         Some(flags)
     }
@@ -1866,12 +1801,7 @@ impl<'d> Page<'d> {
                 },
                 _ => AnnotKind::Other,
             };
-            let mut r = FS_RECTF {
-                left: 0.0,
-                top: 0.0,
-                right: 0.0,
-                bottom: 0.0,
-            };
+            let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
             unsafe { lib.FPDFAnnot_GetRect(a.handle, &mut r) };
             let string = |key: &str| {
                 read_utf16(|buf, len| unsafe {
@@ -1880,7 +1810,8 @@ impl<'d> Page<'d> {
             };
             let (mut hr, mut vr, mut w) = (0.0, 0.0, 1.0);
             unsafe { lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut w) };
-            let (mut color, mut interior) = (self.annot_color(&a, COLORTYPE_COLOR), self.annot_color(&a, COLORTYPE_INTERIOR));
+            let (mut color, mut interior) =
+                (self.annot_color(&a, COLORTYPE_COLOR), self.annot_color(&a, COLORTYPE_INTERIOR));
             let box_colors = (kind == AnnotKind::FreeText).then(|| self.box_colors(&a));
             if let Some((border, fill)) = box_colors {
                 color = border;
@@ -1920,11 +1851,7 @@ impl<'d> Page<'d> {
                 font_size: None,
                 text_color: None,
                 rich: None,
-                vertices: if kind.shape().is_some() {
-                    shapes::decode_points(&string(POINTS_KEY))
-                } else {
-                    Vec::new()
-                },
+                vertices: if kind.shape().is_some() { shapes::decode_points(&string(POINTS_KEY)) } else { Vec::new() },
                 replies: serde_json::from_str(&string(REPLIES_KEY)).unwrap_or_default(),
                 status: string(STATUS_KEY),
                 other_replies: Vec::new(),
@@ -1974,11 +1901,7 @@ impl<'d> Page<'d> {
                     p.status = state;
                 }
             } else {
-                p.other_replies.push(Reply {
-                    author: c.author,
-                    date: c.modified,
-                    text: c.contents,
-                });
+                p.other_replies.push(Reply { author: c.author, date: c.modified, text: c.contents });
             }
         }
         out
@@ -2005,23 +1928,13 @@ impl<'d> Page<'d> {
     }
 
     fn annot_rect(&self, a: &Annot) -> PdfBox {
-        let mut r = FS_RECTF {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-        };
+        let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
         unsafe { self.lib().FPDFAnnot_GetRect(a.handle, &mut r) };
         to_box(&r)
     }
 
     fn set_rect(&self, a: &Annot, b: PdfBox) {
-        let r = FS_RECTF {
-            left: b.left,
-            top: b.top,
-            right: b.right,
-            bottom: b.bottom,
-        };
+        let r = FS_RECTF { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
         unsafe { self.lib().FPDFAnnot_SetRect(a.handle, &r) };
     }
 
@@ -2056,14 +1969,7 @@ impl<'d> Page<'d> {
                 return Err("PDFium could not store the image".into());
             }
             let (w, h) = ((rect.right - rect.left) as f64, (rect.top - rect.bottom) as f64);
-            let m = FS_MATRIX {
-                a: w as f32,
-                b: 0.0,
-                c: 0.0,
-                d: h as f32,
-                e: rect.left,
-                f: rect.bottom,
-            };
+            let m = FS_MATRIX { a: w as f32, b: 0.0, c: 0.0, d: h as f32, e: rect.left, f: rect.bottom };
             lib.FPDFPageObj_SetMatrix(img, &m);
             if !lib.is_true(lib.FPDFAnnot_AppendObject(a.handle, img)) {
                 lib.FPDFPageObj_Destroy(img);
@@ -2090,11 +1996,7 @@ impl<'d> Page<'d> {
     /// Everything needed to recreate an annotation elsewhere (copy and paste).
     pub fn annot_clip(&self, index: usize) -> Result<NewAnnot, String> {
         let lib = self.lib();
-        let info = self
-            .annots(|i| i != index)
-            .into_iter()
-            .next()
-            .ok_or("this annotation cannot be copied")?;
+        let info = self.annots(|i| i != index).into_iter().next().ok_or("this annotation cannot be copied")?;
         let a = self.annot(index).ok_or("annotation not found")?;
         if matches!(info.kind, AnnotKind::Other | AnnotKind::Line) {
             return Err(format!("{} annotations cannot be copied", info.kind.label()));
@@ -2115,16 +2017,7 @@ impl<'d> Page<'d> {
         }
         unsafe {
             for i in 0..lib.FPDFAnnot_CountAttachmentPoints(a.handle) {
-                let mut q = FS_QUADPOINTSF {
-                    x1: 0.0,
-                    y1: 0.0,
-                    x2: 0.0,
-                    y2: 0.0,
-                    x3: 0.0,
-                    y3: 0.0,
-                    x4: 0.0,
-                    y4: 0.0,
-                };
+                let mut q = FS_QUADPOINTSF { x1: 0.0, y1: 0.0, x2: 0.0, y2: 0.0, x3: 0.0, y3: 0.0, x4: 0.0, y4: 0.0 };
                 if lib.is_true(lib.FPDFAnnot_GetAttachmentPoints(a.handle, i, &mut q)) {
                     n.quads.push([q.x1, q.y1, q.x2, q.y2, q.x3, q.y3, q.x4, q.y4]);
                 }
@@ -2142,10 +2035,7 @@ impl<'d> Page<'d> {
             let text = self.annot_string(&a, STAMP_KEY);
             n.stamp = if !text.is_empty() {
                 let (title, subtitle) = text.split_once('\n').unwrap_or((&text, ""));
-                Some(StampSpec::Text {
-                    title: title.to_string(),
-                    subtitle: subtitle.to_string(),
-                })
+                Some(StampSpec::Text { title: title.to_string(), subtitle: subtitle.to_string() })
             } else {
                 let (width, height, rgba) = self.stamp_image(&a).ok_or("this stamp cannot be copied")?;
                 Some(StampSpec::Image { width, height, rgba })
@@ -2191,12 +2081,7 @@ impl<'d> Page<'d> {
         let a = Annot { lib, handle };
         let index = unsafe { lib.FPDFPage_GetAnnotIndex(self.handle, a.handle) };
         unsafe {
-            let rect = FS_RECTF {
-                left: n.rect.left,
-                top: n.rect.top,
-                right: n.rect.right,
-                bottom: n.rect.bottom,
-            };
+            let rect = FS_RECTF { left: n.rect.left, top: n.rect.top, right: n.rect.right, bottom: n.rect.bottom };
             lib.FPDFAnnot_SetRect(a.handle, &rect);
             lib.FPDFAnnot_SetFlags(a.handle, FPDF_ANNOT_FLAG_PRINT);
             if n.kind != AnnotKind::FreeText {
@@ -2210,16 +2095,8 @@ impl<'d> Page<'d> {
                 lib.FPDFAnnot_SetBorder(a.handle, 0.0, 0.0, n.width);
             }
             for q in &n.quads {
-                let qp = FS_QUADPOINTSF {
-                    x1: q[0],
-                    y1: q[1],
-                    x2: q[2],
-                    y2: q[3],
-                    x3: q[4],
-                    y3: q[5],
-                    x4: q[6],
-                    y4: q[7],
-                };
+                let qp =
+                    FS_QUADPOINTSF { x1: q[0], y1: q[1], x2: q[2], y2: q[3], x3: q[4], y3: q[5], x4: q[6], y4: q[7] };
                 lib.FPDFAnnot_AppendAttachmentPoints(a.handle, &qp);
             }
             let shape = n.kind.shape();
@@ -2241,11 +2118,7 @@ impl<'d> Page<'d> {
                 lib.FPDFAnnot_SetStringValue_str(a.handle, "Name", "Comment");
             }
             if n.kind == AnnotKind::FreeText {
-                let style = CharStyle {
-                    size: n.font_size,
-                    color: n.text_color,
-                    ..Default::default()
-                };
+                let style = CharStyle { size: n.font_size, color: n.text_color, ..Default::default() };
                 let rich = n.rich.clone().unwrap_or_else(|| RichText::plain(&n.contents, style));
                 self.write_rich(&a, &rich);
                 self.write_box_colors(&a, n.color, n.interior, rich.first_style(style).size);
@@ -2366,12 +2239,7 @@ impl<'d> Page<'d> {
                 undo.rich = Some(old);
             }
             if change.rect.is_some() || change.transform.is_some() {
-                let mut r = FS_RECTF {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
+                let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
                 lib.FPDFAnnot_GetRect(a.handle, &mut r);
                 let current = to_box(&r);
                 // A freehand drawing's frame is its strokes plus half the line width:
@@ -2406,17 +2274,13 @@ impl<'d> Page<'d> {
                     lib.FPDFAnnot_SetStringValue_str(a.handle, POINTS_KEY, &shapes::encode_points(&pts));
                 }
                 let new = apply_transform_box(t, current);
-                let nr = FS_RECTF {
-                    left: new.left,
-                    top: new.top,
-                    right: new.right,
-                    bottom: new.bottom,
-                };
+                let nr = FS_RECTF { left: new.left, top: new.top, right: new.right, bottom: new.bottom };
                 lib.FPDFAnnot_SetRect(a.handle, &nr);
             }
             if let Some(replies) = &change.replies {
                 undo.replies = Some(serde_json::from_str(&string(REPLIES_KEY)).unwrap_or_default());
-                let json = if replies.is_empty() { String::new() } else { serde_json::to_string(replies).unwrap_or_default() };
+                let json =
+                    if replies.is_empty() { String::new() } else { serde_json::to_string(replies).unwrap_or_default() };
                 lib.FPDFAnnot_SetStringValue_str(a.handle, REPLIES_KEY, &json);
             }
             if let Some(status) = &change.status {
@@ -2545,30 +2409,17 @@ impl<'d> Page<'d> {
         unsafe {
             // Without an appearance PDFium lets us read the colours.
             lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
-            let mut r = FS_RECTF {
-                left: 0.0,
-                top: 0.0,
-                right: 0.0,
-                bottom: 0.0,
-            };
+            let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
             lib.FPDFAnnot_GetRect(a.handle, &mut r);
             let (mut hr, mut vr, mut width) = (0.0, 0.0, 1.0);
             lib.FPDFAnnot_GetBorder(a.handle, &mut hr, &mut vr, &mut width);
             let (border, fill) = self.box_colors(&a);
-            let style = BoxStyle {
-                border: (border.unwrap_or([0, 0, 0]), width),
-                fill,
-            };
+            let style = BoxStyle { border: (border.unwrap_or([0, 0, 0]), width), fill };
             let rich = self.read_rich(&a);
             // Older magic-pdf boxes switch to the convention other applications use.
             self.write_box_colors(&a, style.border.0, fill, rich.first_style(CharStyle::default()).size);
             let (rect, content) = textbox::appearance(to_box(&r), &rich, &style, fonts);
-            let new = FS_RECTF {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-            };
+            let new = FS_RECTF { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
             lib.FPDFAnnot_SetRect(a.handle, &new);
             let content = wide(&content);
             if !lib.is_true(lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, content.as_ptr())) {
@@ -2588,11 +2439,7 @@ impl<'d> Page<'d> {
         // The text colour is in /DS; /DA holds it only for boxes without /DS (in the
         // Acrobat convention its colour is the border's).
         let color = textbox::parse_default_style_color(&string("DS")).or(da_color);
-        let default = CharStyle {
-            size: size.unwrap_or(12.0),
-            color: color.unwrap_or([0, 0, 0]),
-            ..Default::default()
-        };
+        let default = CharStyle { size: size.unwrap_or(12.0), color: color.unwrap_or([0, 0, 0]), ..Default::default() };
         // Rich text without any characters (a new, still empty box) carries no style;
         // the box's default style (/DA) then decides, so typing starts in the size and
         // colour chosen for the box.
@@ -2612,7 +2459,11 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetStringValue_str(a.handle, "DS", &rich.default_style_string());
             // /DA's colour is the border's; keep it, update the size.
             let (_, border) = textbox::parse_default_appearance(&self.annot_string(a, "DA"));
-            lib.FPDFAnnot_SetStringValue_str(a.handle, "DA", &textbox::default_appearance(first.size, border.unwrap_or([0, 0, 0])));
+            lib.FPDFAnnot_SetStringValue_str(
+                a.handle,
+                "DA",
+                &textbox::default_appearance(first.size, border.unwrap_or([0, 0, 0])),
+            );
         }
     }
 
@@ -2622,9 +2473,12 @@ impl<'d> Page<'d> {
     fn box_colors(&self, a: &Annot) -> (Option<Rgb>, Option<Rgb>) {
         const FPDF_OBJECT_ARRAY: FPDF_OBJECT_TYPE = 5;
         let lib = self.lib();
-        let legacy = self.annot_string(a, BOX_STYLE_KEY).is_empty() && textbox::is_legacy_magic_style(&self.annot_string(a, "DS"));
+        let legacy = self.annot_string(a, BOX_STYLE_KEY).is_empty()
+            && textbox::is_legacy_magic_style(&self.annot_string(a, "DS"));
         let ap = || {
-            read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, buf as *mut FPDF_WCHAR, len) })
+            read_utf16(|buf, len| unsafe {
+                lib.FPDFAnnot_GetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, buf as *mut FPDF_WCHAR, len)
+            })
         };
         if legacy {
             let (stroke, fill) = appearance_colors(&ap());
@@ -2757,12 +2611,7 @@ impl<'d> Page<'d> {
             if unsafe { lib.FPDFAnnot_GetSubtype(a.handle) } != SUBTYPE_WIDGET {
                 continue;
             }
-            let mut r = FS_RECTF {
-                left: 0.0,
-                top: 0.0,
-                right: 0.0,
-                bottom: 0.0,
-            };
+            let mut r = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
             unsafe { lib.FPDFAnnot_GetRect(a.handle, &mut r) };
             let field_type = unsafe { lib.FPDFAnnot_GetFormFieldType(form, a.handle) };
             let name = read_utf16(|buf, len| unsafe {
@@ -2772,13 +2621,7 @@ impl<'d> Page<'d> {
                 lib.FPDFAnnot_GetFormFieldValue(form, a.handle, buf as *mut FPDF_WCHAR, len)
             });
             let checked = lib.is_true(unsafe { lib.FPDFAnnot_IsChecked(form, a.handle) });
-            out.push(WidgetInfo {
-                rect: to_box(&r),
-                field_type,
-                name,
-                value,
-                checked,
-            });
+            out.push(WidgetInfo { rect: to_box(&r), field_type, name, value, checked });
         }
         out
     }
@@ -2821,7 +2664,6 @@ impl<'d> Page<'d> {
         }
     }
 }
-
 
 /// The four faces of the text box font family.
 pub struct FontFamily {
@@ -2873,13 +2715,7 @@ impl PdfiumFont {
         }
         let mut ascent = 0.8;
         unsafe { lib.FPDFFont_GetAscent(font, 1.0, &mut ascent) };
-        Ok(PdfiumFont {
-            lib,
-            _doc: doc,
-            font,
-            advances: RefCell::new(std::collections::HashMap::new()),
-            ascent,
-        })
+        Ok(PdfiumFont { lib, _doc: doc, font, advances: RefCell::new(std::collections::HashMap::new()), ascent })
     }
 }
 
@@ -2946,7 +2782,6 @@ impl GlyphSource for PdfiumFont {
     }
 }
 
-
 /// The transform `[sx, sy, tx, ty]` mapping rectangle `from` onto `to`.
 pub fn rect_transform(from: PdfBox, to: PdfBox) -> [f32; 4] {
     let scale = |f0: f32, f1: f32, t0: f32, t1: f32| {
@@ -2964,12 +2799,7 @@ pub fn invert_transform([sx, sy, tx, ty]: [f32; 4]) -> [f32; 4] {
 pub fn apply_transform_box([sx, sy, tx, ty]: [f32; 4], b: PdfBox) -> PdfBox {
     let (x0, x1) = (sx * b.left + tx, sx * b.right + tx);
     let (y0, y1) = (sy * b.bottom + ty, sy * b.top + ty);
-    PdfBox {
-        left: x0.min(x1),
-        bottom: y0.min(y1),
-        right: x0.max(x1),
-        top: y0.max(y1),
-    }
+    PdfBox { left: x0.min(x1), bottom: y0.min(y1), right: x0.max(x1), top: y0.max(y1) }
 }
 
 #[cfg(test)]
@@ -2978,18 +2808,8 @@ mod transform_tests {
 
     #[test]
     fn transforms_map_rectangles_and_invert_exactly() {
-        let a = PdfBox {
-            left: 10.0,
-            bottom: 20.0,
-            right: 110.0,
-            top: 70.0,
-        };
-        let b = PdfBox {
-            left: 300.0,
-            bottom: 400.0,
-            right: 500.0,
-            top: 425.0,
-        };
+        let a = PdfBox { left: 10.0, bottom: 20.0, right: 110.0, top: 70.0 };
+        let b = PdfBox { left: 300.0, bottom: 400.0, right: 500.0, top: 425.0 };
         let t = rect_transform(a, b);
         assert_eq!(apply_transform_box(t, a), b);
         let back = apply_transform_box(invert_transform(t), b);
@@ -2998,7 +2818,6 @@ mod transform_tests {
         }
     }
 }
-
 
 /// Stroke and fill colours used for drawing in a content stream (the first of each
 /// that is actually painted with). Understands RG/rg, G/g and K/k colour operators.

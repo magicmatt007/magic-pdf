@@ -83,7 +83,12 @@ pub fn whats_new(body: &str) -> Option<Vec<NoteBlock>> {
         } else if let Some(item) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
             blocks.push(NoteBlock::Bullet(item.trim().to_string()));
             open = true;
-        } else if !open && text.len() > 4 && text.starts_with("**") && text.ends_with("**") && !text[2..text.len() - 2].contains("**") {
+        } else if !open
+            && text.len() > 4
+            && text.starts_with("**")
+            && text.ends_with("**")
+            && !text[2..text.len() - 2].contains("**")
+        {
             blocks.push(NoteBlock::Heading(text[2..text.len() - 2].to_string()));
         } else if open && let Some(NoteBlock::Bullet(t) | NoteBlock::Paragraph(t)) = blocks.last_mut() {
             t.push(' ');
@@ -109,11 +114,7 @@ pub fn bold_parts(text: &str) -> Vec<(String, bool)> {
 /// Compares dotted version numbers ("0.10.2" > "0.9.9"). Non-numeric parts count as 0.
 pub fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .take(3)
-            .map(|p| p.parse().unwrap_or(0))
-            .collect()
+        v.trim_start_matches('v').split(['.', '-', '+']).take(3).map(|p| p.parse().unwrap_or(0)).collect()
     };
     let (a, b) = (parse(candidate), parse(current));
     for i in 0..a.len().max(b.len()) {
@@ -227,10 +228,8 @@ pub fn check() -> Result<Option<Release>, String> {
 
 /// Checks a file against a GitHub digest ("sha256:<hex>").
 pub fn verify(path: &Path, digest: &str) -> Result<(), String> {
-    let expected = digest
-        .strip_prefix("sha256:")
-        .ok_or_else(|| format!("unsupported digest {digest}"))?
-        .to_ascii_lowercase();
+    let expected =
+        digest.strip_prefix("sha256:").ok_or_else(|| format!("unsupported digest {digest}"))?.to_ascii_lowercase();
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if actual == expected {
@@ -242,10 +241,7 @@ pub fn verify(path: &Path, digest: &str) -> Result<(), String> {
 
 /// Downloads and verifies the installer; returns its path.
 pub fn download_installer(asset: &Asset) -> Result<PathBuf, String> {
-    let digest = asset
-        .digest
-        .as_deref()
-        .ok_or("GitHub did not publish a checksum for the installer")?;
+    let digest = asset.digest.as_deref().ok_or("GitHub did not publish a checksum for the installer")?;
     let path = download_path(asset)?;
     // No overall time limit (a slow connection still gets there); a download that
     // stalls (under 1 kB/s for a minute) is given up.
@@ -285,10 +281,7 @@ pub fn run_installer(path: &Path) -> Result<(), String> {
             result?;
             program
         };
-        return Command::new(&program)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("could not start the new version: {e}"));
+        return Command::new(&program).spawn().map(|_| ()).map_err(|e| format!("could not start the new version: {e}"));
     }
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = Command::new("open");

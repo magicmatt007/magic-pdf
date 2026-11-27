@@ -73,7 +73,11 @@ pub fn attachments_list(ui: &mut Ui, tab: &DocTab, invoice: Option<&EInvoice>) -
             ui.label(RichText::new(&a.name).strong());
             ui.weak(file_size(a.size as u64));
             ui.horizontal(|ui| {
-                if ui.button(t("Open")).on_hover_text(t("Open with the program your computer uses for this kind of file")).clicked() {
+                if ui
+                    .button(t("Open"))
+                    .on_hover_text(t("Open with the program your computer uses for this kind of file"))
+                    .clicked()
+                {
                     action = Some((i, AttachmentAction::Open));
                 }
                 if ui.button(t("Save…")).clicked() {
@@ -117,74 +121,66 @@ pub fn properties_dialog(ctx: &egui::Context, d: &mut PropertiesDialog, tab: &Do
     let p = &info.properties;
     let mut result = (None, true);
     let mut open = true;
-    egui::Window::new(t("Document properties"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| {
-            egui::Grid::new("props").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                for (label, value) in [
-                    (t("Title"), &mut d.fields.title),
-                    (t("Author"), &mut d.fields.author),
-                    (t("Subject"), &mut d.fields.subject),
-                    (t("Keywords"), &mut d.fields.keywords),
-                ] {
-                    ui.label(label);
-                    ui.add(egui::TextEdit::singleline(value).desired_width(320.0));
-                    ui.end_row();
-                }
-                ui.label("");
-                ui.separator();
+    egui::Window::new(t("Document properties")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        egui::Grid::new("props").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for (label, value) in [
+                (t("Title"), &mut d.fields.title),
+                (t("Author"), &mut d.fields.author),
+                (t("Subject"), &mut d.fields.subject),
+                (t("Keywords"), &mut d.fields.keywords),
+            ] {
+                ui.label(label);
+                ui.add(egui::TextEdit::singleline(value).desired_width(320.0));
                 ui.end_row();
-                let size = std::fs::metadata(&tab.path).map(|m| file_size(m.len())).unwrap_or_default();
-                let page = info.page_sizes.get(tab.current_page).map(|(w, h)| {
-                    format!("{:.0} × {:.0} mm", w * 25.4 / 72.0, h * 25.4 / 72.0)
-                });
-                let rows = [
-                    (t("Created with"), p.creator.clone()),
-                    (t("PDF producer"), p.producer.clone()),
-                    (t("Created"), format_pdf_date(&p.created)),
-                    (t("Modified"), format_pdf_date(&p.modified)),
-                    (t("PDF version"), p.version.map(|v| format!("{}.{}", v / 10, v % 10)).unwrap_or_default()),
-                    (t("Pages"), info.page_sizes.len().to_string()),
-                    (t("Page size"), page.unwrap_or_default()),
-                    (t("File size"), size),
-                    (t("File"), tab.path.display().to_string()),
-                ];
-                for (label, value) in rows {
-                    if value.is_empty() {
-                        continue;
-                    }
-                    ui.label(label);
-                    ui.add(egui::Label::new(RichText::new(value).weak()).wrap());
-                    ui.end_row();
+            }
+            ui.label("");
+            ui.separator();
+            ui.end_row();
+            let size = std::fs::metadata(&tab.path).map(|m| file_size(m.len())).unwrap_or_default();
+            let page = info
+                .page_sizes
+                .get(tab.current_page)
+                .map(|(w, h)| format!("{:.0} × {:.0} mm", w * 25.4 / 72.0, h * 25.4 / 72.0));
+            let rows = [
+                (t("Created with"), p.creator.clone()),
+                (t("PDF producer"), p.producer.clone()),
+                (t("Created"), format_pdf_date(&p.created)),
+                (t("Modified"), format_pdf_date(&p.modified)),
+                (t("PDF version"), p.version.map(|v| format!("{}.{}", v / 10, v % 10)).unwrap_or_default()),
+                (t("Pages"), info.page_sizes.len().to_string()),
+                (t("Page size"), page.unwrap_or_default()),
+                (t("File size"), size),
+                (t("File"), tab.path.display().to_string()),
+            ];
+            for (label, value) in rows {
+                if value.is_empty() {
+                    continue;
                 }
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let changed = d.fields
-                    != EditableProperties {
-                        title: p.title.clone(),
-                        author: p.author.clone(),
-                        subject: p.subject.clone(),
-                        keywords: p.keywords.clone(),
-                    };
-                if ui.add_enabled(changed, egui::Button::new(t("Apply"))).clicked() {
-                    result = (
-                        Some(Request::EditPages {
-                            doc: d.doc,
-                            op: PageOp::SetProperties {
-                                properties: d.fields.clone(),
-                            },
-                        }),
-                        false,
-                    );
-                }
-                if ui.button(t("Close")).clicked() {
-                    result.1 = false;
-                }
-            });
+                ui.label(label);
+                ui.add(egui::Label::new(RichText::new(value).weak()).wrap());
+                ui.end_row();
+            }
         });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let changed = d.fields
+                != EditableProperties {
+                    title: p.title.clone(),
+                    author: p.author.clone(),
+                    subject: p.subject.clone(),
+                    keywords: p.keywords.clone(),
+                };
+            if ui.add_enabled(changed, egui::Button::new(t("Apply"))).clicked() {
+                result = (
+                    Some(Request::EditPages { doc: d.doc, op: PageOp::SetProperties { properties: d.fields.clone() } }),
+                    false,
+                );
+            }
+            if ui.button(t("Close")).clicked() {
+                result.1 = false;
+            }
+        });
+    });
     if !open {
         result.1 = false;
     }
@@ -230,30 +226,29 @@ fn qty(v: f64) -> String {
 /// when the user wants the XML saved.
 pub fn einvoice_window(ctx: &egui::Context, inv: &EInvoice, page_text: Option<&str>, save_xml: &mut bool) -> bool {
     let mut open = true;
-    egui::Window::new(t("E-invoice"))
-        .open(&mut open)
-        .default_size([760.0, 640.0])
-        .resizable(true)
-        .show(ctx, |ui| {
-            let invoice = match &inv.invoice {
-                Ok(i) => i,
-                Err(e) => {
-                    ui.colored_label(ui.visuals().error_fg_color, tf("The invoice data could not be read: {e}", &[("e", e)]));
-                    *save_xml = ui.button(t("Save XML…")).clicked();
-                    return;
-                }
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.heading(format!("{} {}", t(einvoice::type_name(&invoice.type_code)), invoice.number));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    *save_xml = ui.button(t("Save XML…")).clicked();
-                    ui.weak(format!("{} · {}", inv.label(), inv.name));
-                });
-            });
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                invoice_body(ui, invoice, page_text);
+    egui::Window::new(t("E-invoice")).open(&mut open).default_size([760.0, 640.0]).resizable(true).show(ctx, |ui| {
+        let invoice = match &inv.invoice {
+            Ok(i) => i,
+            Err(e) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    tf("The invoice data could not be read: {e}", &[("e", e)]),
+                );
+                *save_xml = ui.button(t("Save XML…")).clicked();
+                return;
+            }
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(format!("{} {}", t(einvoice::type_name(&invoice.type_code)), invoice.number));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                *save_xml = ui.button(t("Save XML…")).clicked();
+                ui.weak(format!("{} · {}", inv.label(), inv.name));
             });
         });
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            invoice_body(ui, invoice, page_text);
+        });
+    });
     open
 }
 
@@ -268,14 +263,20 @@ fn invoice_body(ui: &mut Ui, inv: &Invoice, page_text: Option<&str>) {
             what: if found {
                 tf("The amount {amount} also appears on the page", &[("amount", &money(total))])
             } else {
-                tf("The amount {amount} was not found on the page; compare the page with this data", &[("amount", &money(total))])
+                tf(
+                    "The amount {amount} was not found on the page; compare the page with this data",
+                    &[("amount", &money(total))],
+                )
             },
         });
     }
     for what in einvoice::missing_required(inv) {
         checks.push(einvoice::Check {
             ok: false,
-            what: tf("Missing: {field}, required by EN 16931; a validator would reject this invoice", &[("field", &t(what))]),
+            what: tf(
+                "Missing: {field}, required by EN 16931; a validator would reject this invoice",
+                &[("field", &t(what))],
+            ),
         });
     }
     let all_ok = checks.iter().all(|c| c.ok);

@@ -17,14 +17,7 @@ pub struct CharStyle {
 
 impl Default for CharStyle {
     fn default() -> Self {
-        Self {
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            color: [0, 0, 0],
-            size: 12.0,
-        }
+        Self { bold: false, italic: false, underline: false, strike: false, color: [0, 0, 0], size: 12.0 }
     }
 }
 
@@ -60,13 +53,7 @@ pub struct RichText {
 
 impl RichText {
     pub fn plain(text: &str, style: CharStyle) -> RichText {
-        RichText {
-            spans: vec![Span {
-                text: text.to_string(),
-                style,
-            }],
-            align: Align::Left,
-        }
+        RichText { spans: vec![Span { text: text.to_string(), style }], align: Align::Left }
     }
 
     pub fn text(&self) -> String {
@@ -75,10 +62,7 @@ impl RichText {
 
     /// One style per character (for editing).
     pub fn chars(&self) -> Vec<(char, CharStyle)> {
-        self.spans
-            .iter()
-            .flat_map(|s| s.text.chars().map(move |c| (c, s.style)))
-            .collect()
+        self.spans.iter().flat_map(|s| s.text.chars().map(move |c| (c, s.style))).collect()
     }
 
     /// Builds rich text from per-character styles, merging equal neighbours.
@@ -87,10 +71,7 @@ impl RichText {
         for &(c, style) in chars {
             match spans.last_mut() {
                 Some(last) if last.style == style => last.text.push(c),
-                _ => spans.push(Span {
-                    text: c.to_string(),
-                    style,
-                }),
+                _ => spans.push(Span { text: c.to_string(), style }),
             }
         }
         RichText { spans, align }
@@ -381,34 +362,18 @@ mod tests {
     use super::*;
 
     fn st(bold: bool, color: Rgb) -> CharStyle {
-        CharStyle {
-            bold,
-            color,
-            ..Default::default()
-        }
+        CharStyle { bold, color, ..Default::default() }
     }
 
     #[test]
     fn round_trip_through_xhtml() {
         let rich = RichText {
             spans: vec![
-                Span {
-                    text: "Hello ".into(),
-                    style: st(false, [0, 0, 0]),
-                },
-                Span {
-                    text: "bold & <red>".into(),
-                    style: st(true, [220, 30, 30]),
-                },
+                Span { text: "Hello ".into(), style: st(false, [0, 0, 0]) },
+                Span { text: "bold & <red>".into(), style: st(true, [220, 30, 30]) },
                 Span {
                     text: "\nПривет".into(),
-                    style: CharStyle {
-                        italic: true,
-                        underline: true,
-                        strike: true,
-                        size: 18.0,
-                        ..Default::default()
-                    },
+                    style: CharStyle { italic: true, underline: true, strike: true, size: 18.0, ..Default::default() },
                 },
             ],
             align: Align::Center,

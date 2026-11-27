@@ -79,12 +79,7 @@ impl PdfBox {
     }
 
     pub fn expand(self, d: f32) -> PdfBox {
-        PdfBox {
-            left: self.left - d,
-            bottom: self.bottom - d,
-            right: self.right + d,
-            top: self.top + d,
-        }
+        PdfBox { left: self.left - d, bottom: self.bottom - d, right: self.right + d, top: self.top + d }
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
@@ -363,7 +358,12 @@ impl AnnotKind {
     pub fn movable(self) -> bool {
         matches!(
             self,
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::Note | AnnotKind::FreeText | AnnotKind::Stamp
+            AnnotKind::Square
+                | AnnotKind::Circle
+                | AnnotKind::Ink
+                | AnnotKind::Note
+                | AnnotKind::FreeText
+                | AnnotKind::Stamp
         ) || self.shape().is_some()
     }
 
@@ -371,14 +371,17 @@ impl AnnotKind {
     pub fn resize(self) -> Resize {
         match self {
             // A text box can be made larger than its text, never smaller.
-            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::FreeText | AnnotKind::Stamp => Resize::Free,
+            AnnotKind::Square | AnnotKind::Circle | AnnotKind::Ink | AnnotKind::FreeText | AnnotKind::Stamp => {
+                Resize::Free
+            }
             k if k.shape().is_some() => Resize::Free,
             _ => Resize::None,
         }
     }
 
     pub fn has_border_width(self) -> bool {
-        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText) || self.shape().is_some()
+        matches!(self, AnnotKind::Ink | AnnotKind::Square | AnnotKind::Circle | AnnotKind::FreeText)
+            || self.shape().is_some()
     }
 
     pub fn has_interior(self) -> bool {

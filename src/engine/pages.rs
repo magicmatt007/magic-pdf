@@ -152,11 +152,7 @@ impl PageMapping {
             }
         }
         let changed = self.changed.iter().filter_map(|n| map[*n]).collect();
-        PageMapping {
-            map,
-            new_count: self.map.len(),
-            changed,
-        }
+        PageMapping { map, new_count: self.map.len(), changed }
     }
 }
 
@@ -250,11 +246,7 @@ impl PageOp {
                         }
                     })
                     .collect();
-                PageMapping {
-                    map,
-                    new_count: count - del.len(),
-                    changed: Vec::new(),
-                }
+                PageMapping { map, new_count: count - del.len(), changed: Vec::new() }
             }
             PageOp::Move { pages, to } => {
                 let moved = sorted_unique(pages);
@@ -265,11 +257,7 @@ impl PageOp {
                 for (new, old) in order.iter().enumerate() {
                     map[*old] = Some(new);
                 }
-                PageMapping {
-                    map,
-                    new_count: count,
-                    changed: Vec::new(),
-                }
+                PageMapping { map, new_count: count, changed: Vec::new() }
             }
             PageOp::Rotate { pages, .. }
             | PageOp::Crop { pages, .. }
@@ -277,11 +265,9 @@ impl PageOp {
             | PageOp::RemoveHeaderFooter { pages }
             | PageOp::Watermark { pages, .. }
             | PageOp::RemoveWatermark { pages }
-            | PageOp::Flatten { pages } => PageMapping {
-                map: (0..count).map(Some).collect(),
-                new_count: count,
-                changed: sorted_unique(pages),
-            },
+            | PageOp::Flatten { pages } => {
+                PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: sorted_unique(pages) }
+            }
             PageOp::TextLayer { pages, .. } => PageMapping {
                 map: (0..count).map(Some).collect(),
                 new_count: count,
@@ -292,11 +278,9 @@ impl PageOp {
                 new_count: count,
                 changed: sorted_unique(&areas.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             },
-            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => PageMapping {
-                map: (0..count).map(Some).collect(),
-                new_count: count,
-                changed: Vec::new(),
-            },
+            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => {
+                PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: Vec::new() }
+            }
             PageOp::InsertBlank { at, .. } => insert_mapping(count, *at, 1),
             PageOp::InsertFile { at, count: n, .. } => insert_mapping(count, *at, *n),
         }
@@ -316,10 +300,7 @@ fn insert_mapping(count: usize, at: usize, n: usize) -> PageMapping {
 pub fn move_target(pages: &[usize], gap: usize, count: usize) -> Option<usize> {
     let moved = sorted_unique(pages);
     let to = gap - moved.iter().filter(|&&p| p < gap).count();
-    let op = PageOp::Move {
-        pages: moved.clone(),
-        to,
-    };
+    let op = PageOp::Move { pages: moved.clone(), to };
     let m = op.mapping(count);
     let identity = m.map.iter().enumerate().all(|(o, n)| *n == Some(o));
     (!identity).then_some(to)
@@ -369,11 +350,7 @@ mod tests {
 
     #[test]
     fn insert_and_inverse() {
-        let m = PageOp::InsertBlank {
-            at: 1,
-            size: (595.0, 842.0),
-        }
-        .mapping(3);
+        let m = PageOp::InsertBlank { at: 1, size: (595.0, 842.0) }.mapping(3);
         assert_eq!(m.map, vec![Some(0), Some(2), Some(3)]);
         let inv = m.inverse();
         assert_eq!(inv.map, vec![Some(0), None, Some(1), Some(2)]);
@@ -382,11 +359,7 @@ mod tests {
 
     #[test]
     fn rotate_marks_pages_changed() {
-        let m = PageOp::Rotate {
-            pages: vec![2, 0],
-            quarter_turns: 1,
-        }
-        .mapping(3);
+        let m = PageOp::Rotate { pages: vec![2, 0], quarter_turns: 1 }.mapping(3);
         assert_eq!(m.changed, vec![0, 2]);
         assert_eq!(m.inverse().changed, vec![0, 2]);
     }

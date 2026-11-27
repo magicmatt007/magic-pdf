@@ -9,9 +9,9 @@ use pdfium_render::prelude::{Pdfium, PdfiumLibraryBindingsAccessor};
 use std::sync::Arc;
 
 use super::commands::*;
-use super::pages::{PageMapping, PageOp};
 use super::library_search_dirs;
 use super::ocr::{self, OcrWord};
+use super::pages::{PageMapping, PageOp};
 use super::pdf::{Doc, FontFamily, Lib, OpenError};
 
 const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
@@ -20,12 +20,26 @@ const MAX_SEARCH_HITS_PER_PAGE: usize = 10_000;
 /// annotations until the document is saved.
 #[derive(Clone, Debug)]
 enum Edit {
-    Add { page: usize, index: usize },
-    Delete { page: usize, index: usize },
-    Update { page: usize, index: usize, undo: Box<AnnotChange>, redo: Box<AnnotChange> },
+    Add {
+        page: usize,
+        index: usize,
+    },
+    Delete {
+        page: usize,
+        index: usize,
+    },
+    Update {
+        page: usize,
+        index: usize,
+        undo: Box<AnnotChange>,
+        redo: Box<AnnotChange>,
+    },
     /// An annotation moved to another page: a copy added at `to`, the original at
     /// `from` deleted (one undo step).
-    Move { from: (usize, usize), to: (usize, usize) },
+    Move {
+        from: (usize, usize),
+        to: (usize, usize),
+    },
     /// A page operation. Undo restores the document from `snapshot` (taken before the
     /// operation, with the annotation bookkeeping of that moment); redo re-applies `op`.
     Pages(Box<PagesEdit>),
@@ -304,12 +318,7 @@ impl Worker {
             }
             Request::Search { doc, generation, query } => {
                 self.searches.retain(|s| s.doc != doc);
-                self.searches.push(SearchJob {
-                    doc,
-                    generation,
-                    query,
-                    next_page: 0,
-                });
+                self.searches.push(SearchJob { doc, generation, query, next_page: 0 });
             }
             Request::CancelSearch { doc } => self.searches.retain(|s| s.doc != doc),
             Request::ScanAnnots { doc } => {
@@ -332,26 +341,21 @@ impl Worker {
                 }
             }
             Request::PasteAnnot { doc, page, at } => self.paste_annot(doc, page, at),
-            Request::MoveAnnotToPage { doc, page, index, to_page, rect } => self.move_annot_to_page(doc, page, index, to_page, rect),
+            Request::MoveAnnotToPage { doc, page, index, to_page, rect } => {
+                self.move_annot_to_page(doc, page, index, to_page, rect)
+            }
             Request::Undo { doc } => self.undo_redo(doc, true),
             Request::Redo { doc } => self.undo_redo(doc, false),
             Request::Save { doc, path } => self.save(doc, &path),
-            Request::FormMouse {
-                doc,
-                page,
-                event,
-                x,
-                y,
-                modifiers,
-            } => {
+            Request::FormMouse { doc, page, event, x, y, modifiers } => {
                 let mut toggled = false;
                 if let Some(od) = self.docs.get(&doc)
                     && let Some(p) = od.doc.page(page)
                 {
                     p.form_mouse(event, x, y, modifiers);
                     // Releasing on a checkbox, radio button or list changes its value.
-                    toggled = event == FormMouse::Up
-                        && od.doc.focused_field().is_some_and(|(_, t)| (2..=5).contains(&t));
+                    toggled =
+                        event == FormMouse::Up && od.doc.focused_field().is_some_and(|(_, t)| (2..=5).contains(&t));
                 }
                 self.after_form(doc, event != FormMouse::Move, toggled);
             }
@@ -406,17 +410,8 @@ impl Worker {
             }
             Request::InsertFile { doc, path, at } => match std::fs::read(&path) {
                 Ok(bytes) => {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let op = PageOp::InsertFile {
-                        at,
-                        source: Arc::new(bytes),
-                        name,
-                        pages: None,
-                        count: 0,
-                    };
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let op = PageOp::InsertFile { at, source: Arc::new(bytes), name, pages: None, count: 0 };
                     self.edit_pages(doc, op);
                 }
                 Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
@@ -429,9 +424,8 @@ impl Worker {
             }
             Request::Compare { a, b } => {
                 let (Some(da), Some(db)) = (self.docs.get(&a), self.docs.get(&b)) else { return };
-                let words = |d: &OpenDoc, i: usize| {
-                    d.doc.page(i).map(|p| super::compare::words(&p.text())).unwrap_or_default()
-                };
+                let words =
+                    |d: &OpenDoc, i: usize| d.doc.page(i).map(|p| super::compare::words(&p.text())).unwrap_or_default();
                 let n = da.doc.page_count().max(db.doc.page_count());
                 let diffs = (0..n)
                     .map(|i| super::compare::diff_page(i, &words(da, i), &words(db, i)))
@@ -443,18 +437,16 @@ impl Worker {
                 Ok(message) => self.send(Response::Exported { message }),
                 Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
             },
-            Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => match self.export_images(doc, &pages, dpi, jpeg, &dir, &stem) {
-                Ok(n) => self.send(Response::Exported {
-                    message: format!("Saved {n} pictures to {}", dir.display()),
-                }),
+            Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => match self
+                .export_images(doc, &pages, dpi, jpeg, &dir, &stem)
+            {
+                Ok(n) => self.send(Response::Exported { message: format!("Saved {n} pictures to {}", dir.display()) }),
                 Err(e) => self.error(doc, format!("Exporting pictures failed: {e}")),
             },
             Request::ExtractPages { doc, pages, path } => {
                 let result = self.extract(doc, &[(pages, path.clone())]);
                 match result {
-                    Ok(()) => self.send(Response::Exported {
-                        message: format!("Saved pages to {}", path.display()),
-                    }),
+                    Ok(()) => self.send(Response::Exported { message: format!("Saved pages to {}", path.display()) }),
                     Err(e) => self.error(doc, format!("Extracting pages failed: {e}")),
                 }
             }
@@ -465,25 +457,21 @@ impl Worker {
                     .step_by(every)
                     .enumerate()
                     .map(|(n, start)| {
-                        (
-                            (start..(start + every).min(count)).collect(),
-                            dir.join(format!("{stem}-{:02}.pdf", n + 1)),
-                        )
+                        ((start..(start + every).min(count)).collect(), dir.join(format!("{stem}-{:02}.pdf", n + 1)))
                     })
                     .collect();
                 let n = parts.len();
                 match self.extract(doc, &parts) {
-                    Ok(()) => self.send(Response::Exported {
-                        message: format!("Split into {n} files in {}", dir.display()),
-                    }),
+                    Ok(()) => {
+                        self.send(Response::Exported { message: format!("Split into {n} files in {}", dir.display()) })
+                    }
                     Err(e) => self.error(doc, format!("Splitting failed: {e}")),
                 }
             }
             Request::ExportToFile { doc, path } => {
                 let Some(od) = self.docs.get(&doc) else { return };
-                let result = od
-                    .export(self.lib)
-                    .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+                let result =
+                    od.export(self.lib).and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
                 match result {
                     Ok(()) => self.send(Response::ExportedTo { doc, path }),
                     Err(e) => self.error(doc, format!("Moving the document failed: {e}")),
@@ -495,18 +483,8 @@ impl Worker {
                 }
                 self.send_edit_state(doc);
             }
-            Request::PrintNative {
-                doc,
-                title,
-                current_page,
-            } => self.print_native(doc, &title, current_page),
-            Request::Ocr {
-                doc,
-                pages,
-                exe,
-                languages,
-                force,
-            } => {
+            Request::PrintNative { doc, title, current_page } => self.print_native(doc, &title, current_page),
+            Request::Ocr { doc, pages, exe, languages, force } => {
                 if self.ocr.is_some() {
                     self.send(Response::OcrFinished {
                         doc,
@@ -555,17 +533,9 @@ impl Worker {
             let recognised = job.results.iter().filter(|(_, w)| !w.is_empty()).count();
             let words = job.results.iter().map(|(_, w)| w.len()).sum();
             let pages: Vec<_> = job.results.into_iter().filter(|(_, w)| !w.is_empty()).collect();
-            let ok = pages.is_empty()
-                || self.edit_pages(doc, PageOp::TextLayer {
-                    pages,
-                    replace: job.force,
-                });
+            let ok = pages.is_empty() || self.edit_pages(doc, PageOp::TextLayer { pages, replace: job.force });
             let result = if ok {
-                OcrOutcome::Done {
-                    recognised,
-                    skipped: job.skipped,
-                    words,
-                }
+                OcrOutcome::Done { recognised, skipped: job.skipped, words }
             } else {
                 OcrOutcome::Failed("The recognised text could not be added to the document.".into())
             };
@@ -583,7 +553,8 @@ impl Worker {
         let (w, h) = od.doc.page_size(page_index);
         let scale = (ocr::DPI / 72.0).min(ocr::MAX_SIDE / w.max(h));
         let size = ((w * scale).round().max(1.0) as usize, (h * scale).round().max(1.0) as usize);
-        let image = std::env::temp_dir().join(format!("magic-pdf-ocr-{}-{}-{page_index}.pgm", std::process::id(), job.id));
+        let image =
+            std::env::temp_dir().join(format!("magic-pdf-ocr-{}-{}-{page_index}.pgm", std::process::id(), job.id));
         let written = page
             .render_gray(size.0, size.1)
             .ok_or_else(|| "could not render the page".to_string())
@@ -598,12 +569,7 @@ impl Worker {
         let spawned = std::thread::Builder::new().name("ocr".into()).spawn(move || {
             let hocr = ocr::recognise(&exe, &image, &languages);
             let _ = std::fs::remove_file(&image);
-            let _ = tx.send(OcrPageResult {
-                job: id,
-                page: page_index,
-                size,
-                hocr,
-            });
+            let _ = tx.send(OcrPageResult { job: id, page: page_index, size, hocr });
         });
         if let Err(e) = spawned {
             self.end_ocr(doc, OcrOutcome::Failed(e.to_string()));
@@ -660,11 +626,7 @@ impl Worker {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                self.send(Response::OpenFailed {
-                    doc: id,
-                    error: e.to_string(),
-                    password_required: false,
-                });
+                self.send(Response::OpenFailed { doc: id, error: e.to_string(), password_required: false });
                 return;
             }
         };
@@ -734,12 +696,7 @@ impl Worker {
     fn page_text(&mut self, doc: DocId, page_index: usize) {
         let Some(od) = self.docs.get(&doc) else { return };
         let Some(page) = od.doc.page(page_index) else { return };
-        let resp = Response::PageText {
-            doc,
-            page: page_index,
-            geom: page.geom(),
-            text: page.text(),
-        };
+        let resp = Response::PageText { doc, page: page_index, geom: page.geom(), text: page.text() };
         self.send(resp);
     }
 
@@ -759,17 +716,11 @@ impl Worker {
         job.next_page += 1;
         let (doc, generation) = (job.doc, job.generation);
         let Some(page) = od.doc.page(page_index) else { return };
-        let (hits, context): (Vec<_>, Vec<_>) = page.search_with_context(&job.query, MAX_SEARCH_HITS_PER_PAGE).into_iter().unzip();
+        let (hits, context): (Vec<_>, Vec<_>) =
+            page.search_with_context(&job.query, MAX_SEARCH_HITS_PER_PAGE).into_iter().unzip();
         let geom = page.geom();
         if !hits.is_empty() {
-            self.send(Response::SearchResults {
-                doc,
-                generation,
-                page: page_index,
-                geom,
-                hits,
-                context,
-            });
+            self.send(Response::SearchResults { doc, generation, page: page_index, geom, hits, context });
         }
     }
 
@@ -803,12 +754,7 @@ impl Worker {
             }
         }
         let geom = page.geom();
-        self.send(Response::PageAnnots {
-            doc,
-            page: page_index,
-            geom,
-            annots,
-        });
+        self.send(Response::PageAnnots { doc, page: page_index, geom, annots });
         self.send_widgets(doc, page_index);
     }
 
@@ -856,12 +802,7 @@ impl Worker {
                     *n = inserted;
                 }
                 let mapping = op.mapping(count);
-                let edit = PagesEdit {
-                    op,
-                    snapshot,
-                    deleted: od.deleted.clone(),
-                    colors: od.colors.clone(),
-                };
+                let edit = PagesEdit { op, snapshot, deleted: od.deleted.clone(), colors: od.colors.clone() };
                 remap_bookkeeping(od, &mapping);
                 Self::push_edit(od, Edit::Pages(Box::new(edit)));
                 trim_snapshots(od);
@@ -874,11 +815,14 @@ impl Worker {
                     od.doc = d;
                 }
                 self.error(doc, format!("{} failed: {e}", op.label()));
-                self.pages_changed(doc, PageMapping {
-                    map: (0..count).map(Some).collect(),
-                    new_count: count,
-                    changed: (0..count).collect(),
-                });
+                self.pages_changed(
+                    doc,
+                    PageMapping {
+                        map: (0..count).map(Some).collect(),
+                        new_count: count,
+                        changed: (0..count).collect(),
+                    },
+                );
                 false
             }
         }
@@ -921,7 +865,15 @@ impl Worker {
     /// Writes a smaller copy of the document; returns a summary for the user.
     /// Renders `pages` (as displayed, with annotations and form fields) to picture
     /// files. Returns how many were written.
-    fn export_images(&self, doc: DocId, pages: &[usize], dpi: u32, jpeg: bool, dir: &Path, stem: &str) -> Result<usize, String> {
+    fn export_images(
+        &self,
+        doc: DocId,
+        pages: &[usize],
+        dpi: u32,
+        jpeg: bool,
+        dir: &Path,
+        stem: &str,
+    ) -> Result<usize, String> {
         let od = self.docs.get(&doc).ok_or("document not open")?;
         let count = od.doc.page_count();
         let digits = count.to_string().len().max(3);
@@ -947,10 +899,20 @@ impl Worker {
                         [0, 1, 2].map(|c| ((u16::from(p[c]) * a + 255 * (255 - a)) / 255) as u8)
                     })
                     .collect();
-                image::codecs::jpeg::JpegEncoder::new_with_quality(out, 90).encode(&rgb, pw as u32, ph as u32, image::ExtendedColorType::Rgb8)
+                image::codecs::jpeg::JpegEncoder::new_with_quality(out, 90).encode(
+                    &rgb,
+                    pw as u32,
+                    ph as u32,
+                    image::ExtendedColorType::Rgb8,
+                )
             } else {
                 use image::ImageEncoder;
-                image::codecs::png::PngEncoder::new(out).write_image(&rgba, pw as u32, ph as u32, image::ExtendedColorType::Rgba8)
+                image::codecs::png::PngEncoder::new(out).write_image(
+                    &rgba,
+                    pw as u32,
+                    ph as u32,
+                    image::ExtendedColorType::Rgba8,
+                )
             };
             result.map_err(|e| format!("{}: {e}", path.display()))?;
             written += 1;
@@ -996,7 +958,8 @@ impl Worker {
         if let Some((_, p)) = parts.iter().find(|(_, p)| p.exists() && parts.len() > 1) {
             return Err(format!("{} already exists", p.display()));
         }
-        let source = Doc::open_bytes(self.lib, od.export(self.lib)?, None).map_err(|_| "could not prepare the pages")?;
+        let source =
+            Doc::open_bytes(self.lib, od.export(self.lib)?, None).map_err(|_| "could not prepare the pages")?;
         for (pages, path) in parts {
             let out = Doc::create(self.lib)?;
             out.import_pages(&source, Some(pages), 0)?;
@@ -1039,10 +1002,7 @@ impl Worker {
             self.send_edit_state(doc);
         }
         if report_focus {
-            self.send(Response::FormFocus {
-                doc,
-                page: focus.map(|f| f.0),
-            });
+            self.send(Response::FormFocus { doc, page: focus.map(|f| f.0) });
         }
     }
 
@@ -1050,11 +1010,7 @@ impl Worker {
         let Some(od) = self.docs.get(&doc) else { return };
         let Some(page) = od.doc.page(page_index) else { return };
         let widgets = page.widgets();
-        self.send(Response::PageWidgets {
-            doc,
-            page: page_index,
-            widgets,
-        });
+        self.send(Response::PageWidgets { doc, page: page_index, widgets });
     }
 
     #[cfg(windows)]
@@ -1074,10 +1030,7 @@ impl Worker {
     fn paste_annot(&mut self, doc: DocId, page: usize, at: Option<(f32, f32)>) {
         let Some((from_doc, from_page, mut n)) = self.clip.clone() else { return };
         let (dx, dy) = match at {
-            Some((x, y)) => (
-                x - (n.rect.left + n.rect.right) / 2.0,
-                y - (n.rect.bottom + n.rect.top) / 2.0,
-            ),
+            Some((x, y)) => (x - (n.rect.left + n.rect.right) / 2.0, y - (n.rect.bottom + n.rect.top) / 2.0),
             // Next to the original, or at the same place on another page.
             None if from_doc == doc && from_page == page => (12.0, -12.0),
             None => (0.0, 0.0),
@@ -1157,10 +1110,7 @@ impl Worker {
     }
 
     fn error(&self, doc: DocId, message: impl Into<String>) {
-        self.send(Response::Error {
-            doc,
-            message: message.into(),
-        });
+        self.send(Response::Error { doc, message: message.into() });
     }
 
     fn push_edit(od: &mut OpenDoc, edit: Edit) {
@@ -1180,33 +1130,21 @@ impl Worker {
                 let (w, h) = super::shapes::stamp_size(title, subtitle, 20.0, fonts);
                 let (cx, cy) = (annot.rect.left, annot.rect.top);
                 let mut n = annot.clone();
-                n.rect = PdfBox {
-                    left: cx - w / 2.0,
-                    bottom: cy - h / 2.0,
-                    right: cx + w / 2.0,
-                    top: cy + h / 2.0,
-                };
+                n.rect = PdfBox { left: cx - w / 2.0, bottom: cy - h / 2.0, right: cx + w / 2.0, top: cy + h / 2.0 };
                 sized = n;
                 &sized
             }
             _ => annot,
         };
         let Some(od) = self.docs.get_mut(&doc) else { return };
-        let result = od
-            .doc
-            .page(page_index)
-            .ok_or_else(|| "page not found".to_string())
-            .and_then(|p| p.add_annot(annot));
+        let result =
+            od.doc.page(page_index).ok_or_else(|| "page not found".to_string()).and_then(|p| p.add_annot(annot));
         match result {
             Ok(index) => {
                 od.colors.insert((page_index, index), (Some(annot.color), annot.interior));
                 Self::push_edit(od, Edit::Add { page: page_index, index });
                 self.refresh_text_box(doc, page_index, index);
-                self.send(Response::AnnotAdded {
-                    doc,
-                    page: page_index,
-                    index,
-                });
+                self.send(Response::AnnotAdded { doc, page: page_index, index });
                 self.after_edit(doc, page_index);
             }
             Err(e) => self.error(doc, e),
@@ -1225,12 +1163,7 @@ impl Worker {
                 remember_colors(od, page_index, index, &change);
                 Self::push_edit(
                     od,
-                    Edit::Update {
-                        page: page_index,
-                        index,
-                        undo: Box::new(undo),
-                        redo: Box::new(change),
-                    },
+                    Edit::Update { page: page_index, index, undo: Box::new(undo), redo: Box::new(change) },
                 );
                 self.refresh_text_box(doc, page_index, index);
                 self.after_edit(doc, page_index);
@@ -1266,7 +1199,11 @@ impl Worker {
             {
                 log::warn!("could not show annotation {show:?}");
             }
-            if undo { od.redo.push(edit) } else { od.undo.push(edit) }
+            if undo {
+                od.redo.push(edit)
+            } else {
+                od.undo.push(edit)
+            }
             self.after_edit(doc, from.0);
             self.after_edit(doc, to.0);
             return;
@@ -1291,10 +1228,9 @@ impl Worker {
                     }
                     flags.is_some()
                 }
-                (Edit::Add { index, .. }, false) | (Edit::Delete { index, .. }, true) => od
-                    .deleted
-                    .remove(&(page_index, *index))
-                    .is_some_and(|f| page.set_annot_flags(*index, f)),
+                (Edit::Add { index, .. }, false) | (Edit::Delete { index, .. }, true) => {
+                    od.deleted.remove(&(page_index, *index)).is_some_and(|f| page.set_annot_flags(*index, f))
+                }
                 (Edit::Update { index, undo: u, redo: r, .. }, is_undo) => {
                     page.update_annot(*index, if is_undo { u } else { r }).is_ok()
                 }
@@ -1323,19 +1259,14 @@ impl Worker {
 
     fn save(&mut self, doc: DocId, path: &Path) {
         let Some(od) = self.docs.get_mut(&doc) else { return };
-        let result = od
-            .export(self.lib)
-            .and_then(|bytes| write_atomically(path, &bytes).map_err(|e| e.to_string()));
+        let result = od.export(self.lib).and_then(|bytes| write_atomically(path, &bytes).map_err(|e| e.to_string()));
         match result {
             Ok(()) => {
                 od.saved_at = Some(od.undo.len());
                 od.form_dirty = false;
                 // Saving ended editing of a form field.
                 self.send(Response::FormFocus { doc, page: None });
-                self.send(Response::Saved {
-                    doc,
-                    path: path.to_path_buf(),
-                });
+                self.send(Response::Saved { doc, path: path.to_path_buf() });
                 self.send_edit_state(doc);
             }
             Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
@@ -1352,7 +1283,8 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
     match op {
         PageOp::SetProperties { properties } => {
             od.doc.kill_form_focus();
-            let bytes = super::lopdf_ops::write_properties(&od.doc.save_to_bytes()?, properties, &super::pdf::pdf_date_now())?;
+            let bytes =
+                super::lopdf_ops::write_properties(&od.doc.save_to_bytes()?, properties, &super::pdf::pdf_date_now())?;
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
             Ok(0)
         }
