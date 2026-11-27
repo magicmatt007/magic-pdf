@@ -1636,7 +1636,7 @@ mod tests {
                 Response::Error { message, .. } => panic!("{message}"),
                 _ => None,
             });
-            assert!(message.contains("Saved 2 pictures"), "{message}");
+            assert!(matches!(message, Exported::Pictures { count: 2, .. }), "{message:?}");
         }
         let size = |name: &str| image::image_dimensions(dir.join(name)).unwrap();
         assert_eq!(size("sample-p001.png"), (1190, 1684), "A4 at 144 dpi");
@@ -2142,6 +2142,79 @@ mod tests {
     }
 
     #[test]
+    fn combined_files_follow_each_other_with_a_bookmark_each() {
+        let (_serial, engine) = start();
+        let dir = std::env::temp_dir().join(format!("magic-pdf-combine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("both.pdf");
+        let files = vec![fixtures().join("form.pdf"), sample()];
+        engine.send(Request::Combine { files, out: out.clone(), bookmarks: true });
+        recv_until(&engine, |r| match r {
+            Response::Combined { path } => Some(path),
+            Response::CombineFailed { error, .. } => panic!("{error}"),
+            _ => None,
+        });
+        let form_pages = open(&engine, 1, fixtures().join("form.pdf")).page_sizes.len();
+        let sample_info = open(&engine, 2, sample());
+        let info = open(&engine, 3, out.clone());
+        assert_eq!(info.page_sizes.len(), form_pages + sample_info.page_sizes.len());
+        let titles: Vec<(&str, Option<usize>)> = info.outline.iter().map(|i| (i.title.as_str(), i.page)).collect();
+        assert_eq!(titles, vec![("form", Some(0)), ("sample", Some(form_pages))]);
+        // The second file's own bookmarks are under its bookmark, pointing to its pages.
+        let own: Vec<Option<usize>> = sample_info.outline.iter().map(|i| i.page.map(|p| p + form_pages)).collect();
+        assert!(!own.is_empty(), "the sample has bookmarks");
+        let kept: Vec<Option<usize>> = info.outline[1].children.iter().map(|i| i.page).collect();
+        assert_eq!(kept, own);
+
+        // A file that cannot be read is named.
+        let missing = dir.join("missing.pdf");
+        engine.send(Request::Combine { files: vec![sample(), missing.clone()], out, bookmarks: false });
+        let failed = recv_until(&engine, |r| match r {
+            Response::CombineFailed { file, .. } => Some(file),
+            Response::Combined { .. } => panic!("combined a missing file"),
+            _ => None,
+        });
+        assert_eq!(failed, Some(missing));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn page_changes_to_a_signed_file_keep_its_signature_intact() {
+        let (_serial, engine) = start();
+        let original = std::fs::read(fixtures().join("signed.pdf")).unwrap();
+        for (n, op) in [
+            PageOp::Rotate { pages: vec![0], quarter_turns: 1 },
+            PageOp::InsertBlank { at: 1, size: (595.0, 842.0) },
+            PageOp::SetOutline {
+                outline: vec![OutlineItem { title: "A".into(), page: Some(0), children: vec![], origin: None }],
+            },
+            PageOp::SetProperties { properties: EditableProperties { title: "Signed".into(), ..Default::default() } },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let doc = 10 + n as DocId;
+            open(&engine, doc, fixtures().join("signed.pdf"));
+            engine.send(Request::EditPages { doc, op: op.clone() });
+            let _ = pages_changed(&engine);
+            let path = std::env::temp_dir().join(format!("magic-pdf-signed-op{n}-{}.pdf", std::process::id()));
+            engine.send(Request::Save { doc, path: path.clone() });
+            recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+            let saved = std::fs::read(&path).unwrap();
+            let info = open(&engine, doc + 100, path.clone());
+            assert!(saved.starts_with(&original), "{op:?}: appended, not rewritten");
+            assert_eq!(info.signatures[0].check.status, signatures::SigStatus::ChangedAfter, "{op:?}");
+            if let PageOp::SetOutline { .. } = op {
+                assert_eq!(info.outline[0].title, "A", "the change was saved");
+            }
+            if let PageOp::SetProperties { .. } = op {
+                assert_eq!(info.title.as_deref(), Some("Signed"), "the change was saved");
+            }
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
     fn saving_a_signed_file_keeps_its_signature() {
         let (_serial, engine) = start();
         let original = std::fs::read(fixtures().join("signed.pdf")).unwrap();
@@ -2583,7 +2656,7 @@ mod tests {
             Response::Error { message, .. } => panic!("{message}"),
             _ => None,
         });
-        assert!(message.contains("1 image scaled down"), "{message}");
+        assert!(matches!(message, Exported::Optimized { images: 1, .. }), "{message:?}");
         let (a, b) = (std::fs::metadata(&src).unwrap().len(), std::fs::metadata(&out).unwrap().len());
         assert!(b * 4 < a, "{a} -> {b} bytes");
         open(&engine, 2, out);

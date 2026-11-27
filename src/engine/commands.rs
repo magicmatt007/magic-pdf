@@ -443,6 +443,33 @@ pub enum StampSpec {
     Image { width: u32, height: u32, rgba: Vec<u8> },
 }
 
+/// `CombineFailed::error` for a file that needs a password.
+pub const PASSWORD_PROTECTED: &str = "password protected";
+
+/// What was written to other files.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Exported {
+    Pictures {
+        count: usize,
+        dir: PathBuf,
+    },
+    Pages {
+        path: PathBuf,
+    },
+    Split {
+        files: usize,
+        dir: PathBuf,
+    },
+    /// An optimized copy: its name, the sizes before and after (bytes), and how many
+    /// pictures were scaled down.
+    Optimized {
+        name: String,
+        before: usize,
+        after: usize,
+        images: usize,
+    },
+}
+
 /// A reply in a comment thread.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Reply {
@@ -775,6 +802,13 @@ pub enum Request {
         pages: Vec<usize>,
         path: PathBuf,
     },
+    /// Write the files' pages, one file after the other, to `out`; with `bookmarks`,
+    /// a bookmark for each file holds that file's own bookmarks.
+    Combine {
+        files: Vec<PathBuf>,
+        out: PathBuf,
+        bookmarks: bool,
+    },
     /// Write the document as several files of `every` pages each, named
     /// `<stem>-01.pdf`, `<stem>-02.pdf`, … in `dir`.
     SplitDocument {
@@ -901,9 +935,19 @@ pub enum Response {
         doc: DocId,
         path: PathBuf,
     },
-    /// Pages were written to other files.
+    /// Pages were written to other files (the app words the message).
     Exported {
-        message: String,
+        message: Exported,
+    },
+    /// Files were combined into `path`.
+    Combined {
+        path: PathBuf,
+    },
+    /// Combining failed: the file that could not be read (if that was the
+    /// problem), or why.
+    CombineFailed {
+        file: Option<PathBuf>,
+        error: String,
     },
     /// Form widgets of a page (sent with `PageAnnots` and after field edits).
     PageWidgets {

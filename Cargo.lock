@@ -2476,6 +2476,7 @@ name = "magic-pdf"
 version = "0.13.0"
 dependencies = [
  "block2 0.6.2",
+ "chrono",
  "crossbeam-channel",
  "directories",
  "eframe",

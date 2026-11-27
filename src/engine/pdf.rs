@@ -186,23 +186,31 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// PDF date string for "now" in UTC, e.g. `D:20261122101500Z`.
+/// PDF date string for "now" in local time, e.g. `D:20261127150000+01'00'`.
 pub fn pdf_date_now() -> String {
-    let secs =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    // Civil-from-days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("D:{y:04}{m:02}{d:02}{:02}{:02}{:02}Z", rem / 3600, (rem / 60) % 60, rem % 60)
+    pdf_date(chrono::Local::now().fixed_offset())
+}
+
+/// A PDF date in the time's own zone (`Z` for UTC).
+fn pdf_date(time: chrono::DateTime<chrono::FixedOffset>) -> String {
+    let offset = time.offset().local_minus_utc();
+    let stamp = time.format("%Y%m%d%H%M%S");
+    if offset == 0 {
+        return format!("D:{stamp}Z");
+    }
+    let (sign, minutes) = (if offset < 0 { '-' } else { '+' }, offset.abs() / 60);
+    format!("D:{stamp}{sign}{:02}'{:02}'", minutes / 60, minutes % 60)
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn pdf_dates_carry_their_zone() {
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
+        assert_eq!(super::pdf_date(at("2026-11-27T15:04:05+01:00")), "D:20261127150405+01'00'");
+        assert_eq!(super::pdf_date(at("2026-07-01T08:00:00-05:30")), "D:20260701080000-05'30'");
+        assert_eq!(super::pdf_date(at("2026-11-27T14:04:05Z")), "D:20261127140405Z");
+    }
 }
 
 #[repr(C)]

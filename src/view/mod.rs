@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod color_picker;
+pub mod combine;
 pub mod doc_info;
 pub mod document_view;
 pub mod layout;

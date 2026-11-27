@@ -84,6 +84,9 @@ pub struct App {
     /// Signing in the background: the document, where the result goes, the outcome.
     sign_results: (Sender<SignResult>, Receiver<SignResult>),
     signing: bool,
+    combine_dialog: Option<crate::view::combine::CombineDialog>,
+    /// Combining files in the engine.
+    combining: bool,
     /// Debug aid: with MAGIC_PDF_SCREENSHOT=<file.ppm> the app captures its own window
     /// once pages have rendered, saves it and quits.
     screenshot_to: Option<PathBuf>,
@@ -314,6 +317,8 @@ impl App {
             identities: HashMap::new(),
             sign_results: std::sync::mpsc::channel(),
             signing: false,
+            combine_dialog: None,
+            combining: false,
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             screenshot_requested: false,
             selftest_to: std::env::var_os("MAGIC_PDF_SELFTEST").map(PathBuf::from),
@@ -364,6 +369,12 @@ impl App {
             app.show_settings = wanted == "settings";
             app.signatures_on_load = wanted == "signatures";
             app.present_on_load = wanted == "present";
+            if wanted == "combine" {
+                // The Combine files window with the files given on the command line.
+                let mut d = crate::view::combine::CombineDialog::new(None);
+                d.add(args.files.clone());
+                app.combine_dialog = Some(d);
+            }
             if wanted == "sign" {
                 // The signing dialog for a box on the first page; MAGIC_PDF_P12 and
                 // MAGIC_PDF_P12_PASSWORD open a certificate file in it.
@@ -1095,7 +1106,23 @@ impl App {
                     self.send(Request::ScanAnnots { doc });
                 }
             }
-            Response::Exported { message } => self.notice(&message),
+            Response::Exported { message } => self.notice(&exported_text(&message)),
+            Response::Combined { path } => {
+                self.combining = false;
+                self.notice(&tf("Combined into {file}", &[("file", &path.display())]));
+                self.open(&path);
+            }
+            Response::CombineFailed { file, error } => {
+                self.combining = false;
+                self.error = Some(match file {
+                    Some(f) if error == crate::engine::PASSWORD_PROTECTED => tf(
+                        "{file} is password protected. Open it, save a copy without the password, then combine that.",
+                        &[("file", &f.display())],
+                    ),
+                    Some(f) => tf("{file} could not be read: {e}", &[("file", &f.display()), ("e", &error)]),
+                    None => tf("Combining failed: {e}", &[("e", &error)]),
+                });
+            }
             Response::ExportedTo { doc, path } => {
                 if let Some(target) = self.moves.remove(&doc) {
                     self.complete_move(doc, path, target);
@@ -1300,6 +1327,13 @@ impl App {
                     &[("n", &tab.redactions.len()), ("pages", &pages.len())],
                 ));
                 ui.label(t("Undo works until the document is closed. Once saved, the removed content cannot be recovered from the file."));
+                if tab.info().is_some_and(|i| !i.signatures.is_empty()) {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        t("This document is signed. To remove the content for good, redacting rewrites the whole file, so its signatures will no longer be valid."),
+                    );
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button(t("Apply redactions")).clicked() {
@@ -1660,6 +1694,22 @@ impl App {
         }
     }
 
+    fn combine_ui(&mut self, ctx: &egui::Context) {
+        if self.combining {
+            busy(ctx, t("Combining…"));
+        }
+        let Some(dialog) = &mut self.combine_dialog else { return };
+        let unsaved: Vec<PathBuf> = self.tabs.iter().filter(|t| t.dirty).map(|t| t.path.clone()).collect();
+        let (request, open) = dialog.show(ctx, &unsaved);
+        if !open {
+            self.combine_dialog = None;
+        }
+        if let Some(r) = request {
+            self.combining = true;
+            self.send(r);
+        }
+    }
+
     /// The digital signature tool: drag a box, then the signing dialog.
     fn start_digital_signature(&mut self) {
         self.tool = Tool::DigitalSign;
@@ -1687,16 +1737,7 @@ impl App {
             self.sign_dialog = Some(crate::sign_dialog::SignDialog::new(tab.id, page, rect));
         }
         if self.signing {
-            egui::Area::new(egui::Id::unique("signing"))
-                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(t("Signing…"));
-                        });
-                    });
-                });
+            busy(ctx, t("Signing…"));
         }
         let Some(dialog) = &mut self.sign_dialog else { return };
         let Some(tab) = self.tabs.iter().find(|t| t.id == dialog.doc) else {
@@ -2475,6 +2516,10 @@ impl App {
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Export pages as pictures…"))).clicked() {
                     self.images_dialog = Some(Default::default());
+                }
+                if ui.button(t("Combine files…")).clicked() {
+                    let first = self.tabs.get(self.active).map(|t| t.path.clone());
+                    self.combine_dialog = Some(crate::view::combine::CombineDialog::new(first));
                 }
                 if ui.add_enabled(has_tab, egui::Button::new(t("Sign with certificate…"))).clicked() {
                     self.start_digital_signature();
@@ -3395,6 +3440,11 @@ impl App {
         if dropped.is_empty() {
             return;
         }
+        // Dropped on the Combine files window: added to its list.
+        if let Some(d) = &mut self.combine_dialog {
+            d.add(dropped);
+            return;
+        }
         let gap = self.tabs.get_mut(self.active).and_then(|t| t.thumb_drop_gap.take());
         match gap {
             // Dropped between thumbnails: insert the pages there.
@@ -3749,6 +3799,7 @@ impl eframe::App for App {
             self.settings.save();
         }
         self.sign_ui(&ctx);
+        self.combine_ui(&ctx);
 
         if self.settings.recent_colors != recent_before {
             self.settings.save();
@@ -4051,6 +4102,45 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
         });
     }
     action
+}
+
+/// The notice after pages were written to other files.
+fn exported_text(e: &crate::engine::Exported) -> String {
+    use crate::engine::Exported;
+    let mb = |n: usize| format!("{:.1} MB", n as f64 / 1_048_576.0);
+    match e {
+        Exported::Pictures { count, dir } => {
+            tf("Saved {n} pictures to {dir}", &[("n", count), ("dir", &dir.display())])
+        }
+        Exported::Pages { path } => tf("Saved pages to {file}", &[("file", &path.display())]),
+        Exported::Split { files, dir } => tf("Split into {n} files in {dir}", &[("n", files), ("dir", &dir.display())]),
+        Exported::Optimized { name, before, after, images } => {
+            let saved = tf(
+                "Saved {file}: {before} → {after}",
+                &[("file", name), ("before", &mb(*before)), ("after", &mb(*after))],
+            );
+            match images {
+                0 => saved,
+                1 => format!("{saved} ({})", t("1 picture scaled down")),
+                n => format!("{saved} ({})", tf("{n} pictures scaled down", &[("n", n)])),
+            }
+        }
+    }
+}
+
+/// A spinner with a short text in the middle of the window, for work in the background.
+fn busy(ctx: &egui::Context, text: &str) {
+    egui::Area::new(egui::Id::unique("busy")).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
+        ctx,
+        |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(text);
+                });
+            });
+        },
+    );
 }
 
 #[cfg(test)]
