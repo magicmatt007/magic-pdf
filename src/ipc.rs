@@ -308,7 +308,9 @@ fn request(peer: &Peer, command: &str, args: &[String]) -> std::io::Result<Strin
 }
 
 impl Peer {
+    /// Sends a file or tab to this instance, which then comes to the front.
     pub fn send(&self, m: &Message) -> bool {
+        allow_to_front(self.pid);
         let (command, args) = message_args(m);
         request(self, command, &args).is_ok_and(|r| r.starts_with("OK"))
     }
@@ -317,6 +319,18 @@ impl Peer {
         request(self, "WINDOW", &[]).ok().map(|r| parse_window(&r))
     }
 }
+
+/// Windows lets a program come to the front only if the user just used it, so a
+/// window receiving a file could stay hidden behind others. The sender was just used
+/// (a double-click in Explorer starts it; a tab is dragged out of it) and passes that
+/// permission on.
+#[cfg(windows)]
+fn allow_to_front(pid: u32) {
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid) };
+}
+
+#[cfg(not(windows))]
+fn allow_to_front(_pid: u32) {}
 
 /// Other running instances, most recently used first. Entries of instances that
 /// are gone are removed.
