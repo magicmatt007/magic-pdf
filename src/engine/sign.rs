@@ -471,8 +471,8 @@ fn appearance(doc: &mut Document, w: f32, h: f32, rotation: i64, req: &SignReque
 
 /// An RGB image with its alpha channel as a soft mask.
 fn image_xobject(doc: &mut Document, width: u32, height: u32, rgba: &[u8]) -> ObjectId {
-    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     let image = |color_space: &[u8], data: Vec<u8>| {
         let mut d = Dictionary::new();
         d.set("Type", Object::Name(b"XObject".to_vec()));
