@@ -61,26 +61,78 @@ pub fn show(
 
 /// The row choosing what the sidebar shows.
 pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
-    // Wraps onto several lines in a narrow sidebar instead of keeping it wide.
+    let attached = tab.info().map_or(0, |i| i.attachments.len());
+    if attached == 0 && *sidebar == SidebarTab::Attachments {
+        *sidebar = SidebarTab::Pages;
+    }
+    let n: usize = tab.annots.values().flatten().filter(|a| a.in_reply_to.is_none()).count();
+    let comments = if n == 0 { t("Comments").to_string() } else { tf("Comments ({n})", &[("n", &n)]) };
+    let search = if tab.search.hits.is_empty() {
+        t("Search").to_string()
+    } else {
+        tf("Search ({n})", &[("n", &tab.search.hits.len())])
+    };
+    let mut tabs = vec![
+        (SidebarTab::Pages, icons::FILES, t("Pages").to_string()),
+        (SidebarTab::Outline, icons::LIST_BULLETS, t("Outline").to_string()),
+        (SidebarTab::Comments, icons::CHAT_TEXT, comments),
+        (SidebarTab::Search, icons::MAGNIFYING_GLASS, search),
+    ];
+    if attached > 0 {
+        tabs.push((SidebarTab::Attachments, icons::PAPERCLIP, tf("Attachments ({n})", &[("n", &attached)])));
+    }
+    // Wraps only in a sidebar too slim even for the icons.
     ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(sidebar, SidebarTab::Pages, t("Pages"));
-        ui.selectable_value(sidebar, SidebarTab::Outline, t("Outline"));
-        let n: usize = tab.annots.values().flatten().filter(|a| a.in_reply_to.is_none()).count();
-        let label = if n == 0 { t("Comments").to_string() } else { tf("Comments ({n})", &[("n", &n)]) };
-        ui.selectable_value(sidebar, SidebarTab::Comments, label);
-        let label = if tab.search.hits.is_empty() {
-            t("Search").to_string()
-        } else {
-            tf("Search ({n})", &[("n", &tab.search.hits.len())])
-        };
-        ui.selectable_value(sidebar, SidebarTab::Search, label);
-        let attached = tab.info().map_or(0, |i| i.attachments.len());
-        if attached > 0 {
-            ui.selectable_value(sidebar, SidebarTab::Attachments, tf("Attachments ({n})", &[("n", &attached)]));
-        } else if *sidebar == SidebarTab::Attachments {
-            *sidebar = SidebarTab::Pages;
+        // Tight padding so the labels fit on one line at the usual sidebar width.
+        ui.spacing_mut().button_padding.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let pad = 2.0 * ui.spacing().button_padding.x;
+        let width_of = |ui: &Ui, text: String| ui.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), Color32::WHITE)).size().x;
+        let labels: f32 = tabs.iter().map(|(_, _, label)| width_of(ui, label.clone())).sum();
+        let gaps = pad * tabs.len() as f32 + ui.spacing().item_spacing.x * (tabs.len() - 1) as f32;
+        let open_label = tabs.iter().find(|(v, _, _)| v == sidebar).map_or(0.0, |(_, _, l)| width_of(ui, format!(" {l}")));
+        // Too narrow (longer labels, counts, a slim sidebar): icons, with the label
+        // only on the open tab and in the others' tooltips; slimmer still, icons only.
+        let compact = labels + gaps > ui.available_width();
+        let icons_only = 16.0 * tabs.len() as f32 + gaps + open_label > ui.available_width();
+        for (value, icon, label) in tabs {
+            let open = *sidebar == value;
+            let text: egui::WidgetText = if !compact {
+                label.clone().into()
+            } else if open && !icons_only {
+                let mut job = egui::text::LayoutJob::default();
+                let (style, align) = (ui.style(), egui::Align::Center);
+                icons::sized(icon, 15.0).append_to(&mut job, style, egui::FontSelection::Default, align);
+                egui::RichText::new(format!(" {label}")).append_to(&mut job, style, egui::FontSelection::Default, align);
+                job.into()
+            } else {
+                icons::sized(icon, 15.0).into()
+            };
+            let resp = ui.selectable_label(open, text);
+            let resp = if compact && (icons_only || !open) { resp.on_hover_text(&label) } else { resp };
+            if resp.clicked() {
+                *sidebar = value;
+            }
         }
     });
+}
+
+/// A comment's text, cut to `max_rows` lines with an ellipsis when given.
+fn comment_text(ui: &mut Ui, text: &str, max_rows: Option<usize>) {
+    let Some(max_rows) = max_rows else {
+        ui.label(text);
+        return;
+    };
+    let format = egui::TextFormat::simple(egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), format);
+    job.wrap = egui::text::TextWrapping {
+        max_width: ui.available_width(),
+        max_rows,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    ui.label(job);
 }
 
 /// Page operations requested from the sidebar or the Pages menu.
@@ -239,8 +291,8 @@ fn thumbnails(
         }
     }
     let accent = ui.visuals().selection.bg_fill;
-    // Stronger shade of the accent for the current page's border and badge.
-    let strong = ui.visuals().selection.stroke.color;
+    // The solid accent marks the current page's border and badge.
+    let (frame, badge_fill) = (crate::theme::ACCENT, crate::theme::ACCENT_DEEP);
     let mut cells: Vec<(usize, Rect)> = Vec::new();
     let mut clip = Rect::NOTHING;
     let output = area.show_viewport(ui, |ui, viewport| {
@@ -291,7 +343,7 @@ fn thumbnails(
                 );
             }
             let stroke = if current {
-                Stroke::new(3.0, strong)
+                Stroke::new(2.0, frame)
             } else if tab.visible_pages.contains(&page) {
                 // Also on screen (e.g. several pages side by side).
                 Stroke::new(2.0, accent)
@@ -307,7 +359,7 @@ fn thumbnails(
             if current {
                 let galley = painter.layout_no_wrap((page + 1).to_string(), font, Color32::WHITE);
                 let badge = Rect::from_center_size(label_center, galley.size() + vec2(14.0, 4.0));
-                painter.rect_filled(badge, CornerRadius::same(255), strong);
+                painter.rect_filled(badge, CornerRadius::same(255), badge_fill);
                 painter.galley(badge.center() - galley.size() / 2.0, galley, Color32::WHITE);
             } else {
                 painter.text(
@@ -781,8 +833,10 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                             if !a.author.is_empty() {
                                 ui.weak(&a.author);
                             }
+                            // Long texts are cut to a short preview; the selected
+                            // comment shows them in full.
                             if !a.contents.is_empty() {
-                                ui.label(&a.contents);
+                                comment_text(ui, &a.contents, (!is_selected).then_some(4));
                             }
                             for r in a.other_replies.iter().chain(&a.replies) {
                                 ui.horizontal_wrapped(|ui| {
@@ -793,7 +847,7 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
                                 });
                                 ui.horizontal_wrapped(|ui| {
                                     ui.add_space(22.0);
-                                    ui.label(&r.text);
+                                    comment_text(ui, &r.text, (!is_selected).then_some(2));
                                 });
                             }
                         })

@@ -52,6 +52,10 @@ pub const FUNNEL: &str = "\u{e266}";
 pub const RULER: &str = "\u{e6b8}";
 pub const AREA: &str = "\u{e69a}"; // selection
 pub const EYE_SLASH: &str = "\u{e224}";
+pub const FILES: &str = "\u{e710}";
+pub const LIST_BULLETS: &str = "\u{e2f2}";
+pub const CHAT_TEXT: &str = "\u{e17a}";
+pub const PAPERCLIP: &str = "\u{e39a}";
 
 /// Size of toolbar icons in points.
 pub const SIZE: f32 = 17.0;

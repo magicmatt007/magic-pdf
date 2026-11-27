@@ -5,6 +5,7 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Could not check for updates: {e}", "Nach Updates suchen hat nicht geklappt: {e}"),
     ("The update could not be downloaded: {e}", "Das Update konnte nicht heruntergeladen werden: {e}"),
     ("Update available", "Update verfügbar"),
+    ("magic-pdf {new} is available (you have {current}).", "magic-pdf {new} ist verfügbar (installiert ist {current})."),
     ("Downloading and verifying…", "Wird heruntergeladen und geprüft…"),
     ("Install now", "Jetzt installieren"),
     ("Later", "Später"),
