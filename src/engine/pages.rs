@@ -79,12 +79,16 @@ pub enum PageOp {
     SetProperties {
         properties: super::commands::EditableProperties,
     },
-    /// Replaces the text of a text object on a page (`index` in the page's objects,
-    /// as listed by `TextObjects`).
+    /// Changes text on a page (its text objects as listed by `TextObjects`).
     EditText {
         page: usize,
-        index: usize,
-        text: String,
+        change: super::commands::TextChange,
+    },
+    /// Replaces `find` with `replace` in the text of every page.
+    ReplaceText {
+        find: String,
+        replace: String,
+        match_case: bool,
     },
 }
 
@@ -190,6 +194,7 @@ impl PageOp {
             PageOp::RemoveWatermark { .. } => "Remove watermark",
             PageOp::Flatten { .. } => "Flatten annotations and form fields",
             PageOp::EditText { .. } => "Edit text",
+            PageOp::ReplaceText { .. } => "Replace text",
         }
     }
 
@@ -206,7 +211,12 @@ impl PageOp {
         };
         match self {
             PageOp::EditText { page, .. } if *page >= count => Err(t("page does not exist").into()),
+            PageOp::EditText { change, .. } if change.objects.is_empty() => {
+                Err(t("the text was not found on the page").into())
+            }
             PageOp::EditText { .. } => Ok(()),
+            PageOp::ReplaceText { find, .. } if find.is_empty() => Err(t("nothing to find").into()),
+            PageOp::ReplaceText { .. } => Ok(()),
             PageOp::Delete { pages } => {
                 in_range(pages)?;
                 if sorted_unique(pages).len() >= count {
@@ -294,6 +304,9 @@ impl PageOp {
             }
             PageOp::EditText { page, .. } => {
                 PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: vec![*page] }
+            }
+            PageOp::ReplaceText { .. } => {
+                PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: (0..count).collect() }
             }
             PageOp::InsertBlank { at, .. } => insert_mapping(count, *at, 1),
             PageOp::InsertFile { at, count: n, .. } => insert_mapping(count, *at, *n),

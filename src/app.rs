@@ -96,6 +96,8 @@ pub struct App {
     sign_results: (Sender<SignResult>, Receiver<SignResult>),
     signing: bool,
     combine_dialog: Option<crate::view::combine::CombineDialog>,
+    /// The Replace text window: what to find, what to put instead, match case.
+    replace_dialog: Option<(String, String, bool)>,
     /// Combining files in the engine.
     combining: bool,
     /// Debug aid: with MAGIC_PDF_SCREENSHOT=<file.ppm> the app captures its own window
@@ -341,6 +343,7 @@ impl App {
             sign_results: std::sync::mpsc::channel(),
             signing: false,
             combine_dialog: None,
+            replace_dialog: None,
             combining: false,
             screenshot_to: std::env::var_os("MAGIC_PDF_SCREENSHOT").map(PathBuf::from),
             bench: std::env::var_os("MAGIC_PDF_BENCH").map(|p| Bench::new(p.into())),
@@ -393,6 +396,9 @@ impl App {
             app.show_settings = wanted == "settings";
             app.signatures_on_load = wanted == "signatures";
             app.present_on_load = wanted == "present";
+            if wanted == "replace" {
+                app.replace_dialog = Some(("lazy dog".into(), "sleepy cat".into(), false));
+            }
             if wanted == "combine" {
                 // The Combine files window with the files given on the command line.
                 let mut d = crate::view::combine::CombineDialog::new(None);
@@ -1088,12 +1094,54 @@ impl App {
                     *tab.page_versions.entry(page).or_insert(0) += 1;
                     tab.text_objects.remove(&page);
                     tab.text_objects_requested.remove(&page);
+                    tab.text_paragraphs.remove(&page);
                 }
             }
-            Response::TextObjects { doc, page, objects } => {
+            Response::TextObjects { doc, page, objects, paragraphs } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     tab.text_objects.insert(page, objects);
+                    tab.text_paragraphs.insert(page, paragraphs);
                 }
+            }
+            Response::TextPreview { doc, page, change, preview } => {
+                let ctx = self.ctx.clone();
+                if let Some(tab) = self.tab_mut(doc)
+                    && let Some(e) = tab.text_editing.as_mut()
+                    && e.page == page
+                    && e.asked.as_ref() == Some(&change)
+                {
+                    e.waiting = false;
+                    match preview {
+                        Ok(p) => {
+                            let image = egui::ColorImage::from_rgba_unmultiplied(p.size, &p.rgba);
+                            let texture = ctx.load_texture("text_preview", image, egui::TextureOptions::LINEAR);
+                            e.preview = Some((change, p.region, texture));
+                            e.preview_text = p.text;
+                            e.error = None;
+                        }
+                        Err(message) => {
+                            e.preview = None;
+                            e.error = Some(message);
+                        }
+                    }
+                }
+            }
+            Response::Replaced { doc, replaced, failed } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.text_editing = None;
+                }
+                let mut message = if replaced == 0 && failed == 0 {
+                    t("Nothing found to replace").to_string()
+                } else {
+                    tf("Replaced: {n}", &[("n", &replaced)])
+                };
+                if failed > 0 {
+                    message.push_str(&tf(
+                        " ({n} not replaced: the text's font cannot write the new characters)",
+                        &[("n", &failed)],
+                    ));
+                }
+                self.notice(&message);
             }
             Response::AnnotAdded { doc, page, index } => {
                 let tool = self.tool;
@@ -1744,6 +1792,59 @@ impl App {
         }
     }
 
+    /// Opens the Replace text window, starting with what is in the search box.
+    fn open_replace(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if self.replace_dialog.is_none() {
+            self.replace_dialog = Some((tab.search.query.clone(), String::new(), tab.search.match_case));
+        }
+    }
+
+    fn replace_ui(&mut self, ctx: &egui::Context) {
+        let Some((find, replace, match_case)) = &mut self.replace_dialog else { return };
+        let mut open = true;
+        let mut go = false;
+        egui::Window::new(t("Replace text"))
+            .open(&mut open)
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 110.0))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("replace_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    ui.label(t("Find"));
+                    let r = ui.add(egui::TextEdit::singleline(find).desired_width(260.0));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        go = true;
+                    }
+                    ui.end_row();
+                    ui.label(t("Replace with"));
+                    let r = ui.add(egui::TextEdit::singleline(replace).desired_width(260.0));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        go = true;
+                    }
+                    ui.end_row();
+                });
+                ui.checkbox(match_case, t("Match case"));
+                ui.weak(t("Replaces the text in all pages. Text the PDF stores in pieces may not be found."));
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!find.is_empty(), egui::Button::new(t("Replace all"))).clicked() {
+                        go = true;
+                    }
+                });
+            });
+        if go && !find.is_empty() {
+            let op = PageOp::ReplaceText { find: find.clone(), replace: replace.clone(), match_case: *match_case };
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.outbox.push(Request::EditPages { doc: tab.id, op });
+            }
+        }
+        if !open {
+            self.replace_dialog = None;
+        }
+    }
+
     /// The digital signature tool: drag a box, then the signing dialog.
     fn start_digital_signature(&mut self) {
         self.tool = Tool::DigitalSign;
@@ -2298,6 +2399,9 @@ impl App {
         if shortcut(cmd, Key::F) {
             self.focus_search = true;
         }
+        if shortcut(cmd, Key::H) {
+            self.open_replace();
+        }
         if shortcut(cmd, Key::D) {
             self.props_dialog = self.tabs.get(self.active).and_then(crate::view::doc_info::PropertiesDialog::new);
         }
@@ -2655,6 +2759,10 @@ impl App {
                     // From the menu: next to the original (or at the same place on this page).
                     let page = tab.current_page;
                     tab.outbox.push(Request::PasteAnnot { doc: tab.id, page, at: None });
+                }
+                ui.separator();
+                if ui.add_enabled(has_tab, egui::Button::new(kb(t("Replace text…\tCtrl+H")))).clicked() {
+                    self.open_replace();
                 }
                 ui.separator();
                 if ui.button(kb(t("Settings…\tCtrl+,"))).clicked() {
@@ -4050,6 +4158,7 @@ impl eframe::App for App {
         }
         self.check_signature_trust(&ctx);
         self.combine_ui(&ctx);
+        self.replace_ui(&ctx);
 
         if self.settings.recent_colors != recent_before {
             self.settings.save();

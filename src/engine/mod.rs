@@ -2224,6 +2224,185 @@ mod tests {
         })
     }
 
+    fn edit(index: usize, text: &str) -> TextChange {
+        TextChange { objects: vec![index], text: Some(text.into()), ..Default::default() }
+    }
+
+    fn text_objects_and_paragraphs(engine: &Engine, doc: DocId, page: usize) -> (Vec<TextObject>, Vec<Vec<usize>>) {
+        engine.send(Request::TextObjects { doc, page });
+        recv_until(engine, |r| match r {
+            Response::TextObjects { objects, paragraphs, .. } => Some((objects, paragraphs)),
+            _ => None,
+        })
+    }
+
+    /// The sample's first page: its heading and the paragraph of 32 body lines.
+    fn sample_paragraph(engine: &Engine, doc: DocId) -> (Vec<TextObject>, Vec<usize>) {
+        let (objects, paragraphs) = text_objects_and_paragraphs(engine, doc, 0);
+        let body = paragraphs.iter().max_by_key(|p| p.len()).unwrap().clone();
+        (objects, body)
+    }
+
+    fn edit_and_wait(engine: &Engine, doc: DocId, change: TextChange) {
+        engine.send(Request::EditPages { doc, op: PageOp::EditText { page: 0, change } });
+        let _ = pages_changed(engine);
+    }
+
+    #[test]
+    fn body_lines_group_into_a_paragraph() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let (objects, paragraphs) = text_objects_and_paragraphs(&engine, 1, 0);
+        let heading = objects.iter().find(|o| o.text == "Page 1").unwrap();
+        assert!(paragraphs.contains(&vec![heading.index]), "the heading stands alone: {paragraphs:?}");
+        let body = paragraphs.iter().max_by_key(|p| p.len()).unwrap();
+        assert_eq!(body.len(), 32, "{paragraphs:?}");
+        let mut all: Vec<usize> = paragraphs.concat();
+        all.sort();
+        assert_eq!(all, objects.iter().map(|o| o.index).collect::<Vec<_>>(), "every object in one paragraph");
+    }
+
+    #[test]
+    fn editing_a_paragraph_keeps_unchanged_lines_and_wraps_the_rest() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let (objects, body) = sample_paragraph(&engine, 1);
+        let line = |i: usize| objects.iter().find(|o| o.index == body[i]).unwrap().clone();
+        let texts: Vec<String> = (0..body.len()).map(|i| line(i).text.trim().to_string()).collect();
+        // Make the third line much longer: it wraps onto a new line, the others stay.
+        let mut new = texts.clone();
+        new[2] = format!("{} and then it ran all the way home through the long grass", texts[2]);
+        edit_and_wait(
+            &engine,
+            1,
+            TextChange { objects: body.clone(), text: Some(new.join(" ")), ..Default::default() },
+        );
+        let (after, body_after) = sample_paragraph(&engine, 1);
+        let after_texts: Vec<String> =
+            body_after.iter().map(|i| after.iter().find(|o| o.index == *i).unwrap().text.trim().to_string()).collect();
+        assert_eq!(after_texts.len(), 33, "{after_texts:?}");
+        assert_eq!(after_texts[..2], texts[..2]);
+        assert_eq!(after_texts[4..], texts[3..], "later lines unchanged, one line lower");
+        assert_eq!(format!("{} {}", after_texts[2], after_texts[3]), new[2]);
+        let width = |o: &[TextObject], idx: &[usize]| {
+            idx.iter().map(|i| o.iter().find(|x| x.index == *i).unwrap().rect.right).fold(0.0, f32::max)
+        };
+        assert!(width(&after, &body_after) <= width(&objects, &body) + 5.0, "stays within the paragraph's width");
+        // The new line sits one line spacing below the wrapped one.
+        let get = |i: usize| after.iter().find(|o| o.index == body_after[i]).unwrap().rect;
+        let gap = get(1).bottom - get(2).bottom;
+        assert!(((get(2).bottom - get(3).bottom) - gap).abs() < 1.0, "even spacing");
+
+        // Shorter again: back to 32 lines.
+        engine.send(Request::Undo { doc: 1 });
+        let _ = pages_changed(&engine);
+        let (_, body) = sample_paragraph(&engine, 1);
+        assert_eq!(body.len(), 32);
+        let mut fewer = texts.clone();
+        fewer.remove(5);
+        edit_and_wait(&engine, 1, TextChange { objects: body, text: Some(fewer.join(" ")), ..Default::default() });
+        let (_, body) = sample_paragraph(&engine, 1);
+        assert_eq!(body.len(), 31);
+    }
+
+    #[test]
+    fn text_can_be_moved_resized_recoloured_and_deleted() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let objects = text_objects(&engine, 1);
+        let heading = objects.iter().find(|o| o.text == "Page 1").unwrap().clone();
+        let change = TextChange {
+            objects: vec![heading.index],
+            offset: (50.0, -20.0),
+            size: Some(heading.size * 2.0),
+            color: Some([200, 0, 0]),
+            ..Default::default()
+        };
+        edit_and_wait(&engine, 1, change);
+        let moved = text_objects(&engine, 1).into_iter().find(|o| o.text == "Page 1").unwrap();
+        assert!((moved.rect.left - (heading.rect.left + 50.0)).abs() < 1.0, "{heading:?} {moved:?}");
+        assert!((moved.rect.top - (heading.rect.top - 20.0)).abs() < 1.0, "grows from its top left corner");
+        assert!((moved.size - heading.size * 2.0).abs() < 0.1);
+        assert_eq!(moved.color, [200, 0, 0]);
+
+        edit_and_wait(&engine, 1, TextChange { objects: vec![moved.index], delete: true, ..Default::default() });
+        assert!(!text_objects(&engine, 1).iter().any(|o| o.text == "Page 1"), "deleted");
+        engine.send(Request::Undo { doc: 1 });
+        let _ = pages_changed(&engine);
+        assert!(text_objects(&engine, 1).iter().any(|o| o.text == "Page 1"), "undo brings it back");
+    }
+
+    #[test]
+    fn previews_show_the_change_without_making_it() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let objects = text_objects(&engine, 1);
+        let heading = objects.iter().find(|o| o.text == "Page 1").unwrap().clone();
+        let change = edit(heading.index, "Grüezi mitenand");
+        engine.send(Request::PreviewText {
+            doc: 1,
+            page: 0,
+            change: change.clone(),
+            width_px: 1200,
+            rotation: Rotation::R0,
+        });
+        let preview = recv_until(&engine, |r| match r {
+            Response::TextPreview { preview, change: c, .. } if c == change => Some(preview),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(preview.rgba.len(), preview.size[0] * preview.size[1] * 4);
+        assert!(preview.region.right > heading.rect.right + 20.0, "covers the longer text: {:?}", preview.region);
+        // Some dark pixels (the text) and the document unchanged.
+        assert!(preview.rgba.chunks(4).any(|p| p[0] < 80));
+        assert_eq!(text_objects(&engine, 1), objects);
+        // A change that cannot be made says why.
+        engine.send(Request::PreviewText {
+            doc: 1,
+            page: 0,
+            change: edit(heading.index, "你好"),
+            width_px: 1200,
+            rotation: Rotation::R0,
+        });
+        let error = recv_until(&engine, |r| match r {
+            Response::TextPreview { preview, .. } => Some(preview),
+            _ => None,
+        });
+        assert!(error.is_err_and(|e| e.contains("cannot be written")));
+        assert_eq!(text_objects(&engine, 1), objects);
+    }
+
+    #[test]
+    fn find_and_replace_changes_every_page_and_is_undoable() {
+        let (_serial, engine) = start();
+        let info = open(&engine, 1, sample());
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::ReplaceText { find: "lazy dog".into(), replace: "sleepy cat".into(), match_case: true },
+        });
+        let _ = pages_changed(&engine);
+        let (replaced, failed) = recv_until(&engine, |r| match r {
+            Response::Replaced { replaced, failed, .. } => Some((replaced, failed)),
+            _ => None,
+        });
+        assert!(replaced > 10 * info.page_sizes.len() && failed == 0, "{replaced} {failed}");
+        let text = object_text(&engine, 1);
+        assert!(text.contains("sleepy cat") && !text.contains("lazy dog"));
+        engine.send(Request::Undo { doc: 1 });
+        let _ = pages_changed(&engine);
+        assert!(object_text(&engine, 1).contains("lazy dog"));
+        // Nothing found: no change and no undo step.
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::ReplaceText { find: "zebra".into(), replace: "x".into(), match_case: false },
+        });
+        let r = recv_until(&engine, |r| match r {
+            Response::Replaced { replaced, failed, .. } => Some((replaced, failed)),
+            _ => None,
+        });
+        assert_eq!(r, (0, 0));
+    }
+
     fn object_text(engine: &Engine, doc: DocId) -> String {
         text_objects(engine, doc).into_iter().map(|o| o.text).collect::<Vec<_>>().join(" ")
     }
@@ -2238,7 +2417,7 @@ mod tests {
         assert!(first.size > 0.0 && first.rect.right > first.rect.left, "{first:?}");
         engine.send(Request::EditPages {
             doc: 1,
-            op: PageOp::EditText { page: 0, index: first.index, text: "Grüezi 1".into() },
+            op: PageOp::EditText { page: 0, change: edit(first.index, "Grüezi 1") },
         });
         let _ = pages_changed(&engine);
         let after = text_objects(&engine, 1);
@@ -2267,7 +2446,7 @@ mod tests {
         let before = text_objects(&engine, 1);
         engine.send(Request::EditPages {
             doc: 1,
-            op: PageOp::EditText { page: 0, index: before[0].index, text: "你好世界".into() },
+            op: PageOp::EditText { page: 0, change: edit(before[0].index, "你好世界") },
         });
         let message = recv_until(&engine, |r| match r {
             Response::Error { message, .. } => Some(message),
@@ -2285,7 +2464,7 @@ mod tests {
         let objects = text_objects(&engine, 1);
         engine.send(Request::EditPages {
             doc: 1,
-            op: PageOp::EditText { page: 0, index: objects[0].index, text: "Changed".into() },
+            op: PageOp::EditText { page: 0, change: edit(objects[0].index, "Changed") },
         });
         let _ = pages_changed(&engine);
         let path = std::env::temp_dir().join(format!("magic-pdf-signed-edit-text-{}.pdf", std::process::id()));

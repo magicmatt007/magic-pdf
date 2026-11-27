@@ -253,10 +253,20 @@ mod tests {
     fn engine_errors_are_translated() {
         const ERROR_MARKERS: &[&str] =
             &["Err(", "error(", "ok_or", "map_err", "unknown(", "Problem::Invalid(", "errors.push(", "Error {"];
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine");
+        fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine"), &mut paths);
         let mut found = Vec::new();
-        for e in std::fs::read_dir(&dir).unwrap().flatten() {
-            let p = e.path();
+        for p in paths {
             let src = std::fs::read_to_string(&p).unwrap();
             // Leave out test modules (they end at a closing brace in column 0).
             let mut in_test = false;
