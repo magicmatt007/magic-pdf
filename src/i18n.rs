@@ -132,6 +132,84 @@ mod tests {
         assert!(missing.is_empty(), "texts without German translation: {missing:#?}");
     }
 
+    /// English-looking texts in the code that bypass `t`/`tf` and have no German entry
+    /// (a text can also be translated where it is shown, e.g. `t(label)`, if it has an
+    /// entry). Catches labels passed to egui directly, which the test above cannot see.
+    #[test]
+    fn no_untranslated_ui_texts() {
+        // Literals that are not shown to users, or are the same in every language.
+        const NOT_UI: &[&str] = &["Name", "Content", "Description", "Deutsch", "Accept: application/vnd.github+json"];
+        const NOT_UI_LINES: &[&str] =
+            &["log::", "eprintln!", "println!", "expect(", "assert", "panic!", "anyhow!", "bail!", "context(", "unreachable!"];
+        fn looks_like_ui_text(s: &str) -> bool {
+            let word: String = s.chars().take_while(char::is_ascii_alphabetic).collect();
+            let mut chars = word.chars();
+            let capitalised = chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_lowercase());
+            if !capitalised || word.len() < 3 {
+                return false;
+            }
+            let rest = &s[word.len()..];
+            matches!(rest, "" | "." | "…")
+                || (rest.starts_with([' ', ',', ':']) && rest.trim_start_matches([' ', ',', ':']).starts_with(|c: char| c.is_ascii_alphabetic()))
+        }
+        fn literals(line: &str) -> Vec<(usize, String)> {
+            let (b, mut out, mut i) = (line.as_bytes(), Vec::new(), 0);
+            while i < b.len() {
+                match b[i] {
+                    // A char literal such as '"' or '\''.
+                    b'\'' if b.get(i + 2) == Some(&b'\'') => i += 3,
+                    b'\'' if b.get(i + 1) == Some(&b'\\') => i += line[i + 2..].find('\'').map_or(b.len(), |j| j + 3),
+                    b'"' => {
+                        let (start, mut j, mut escaped) = (i, i + 1, false);
+                        while j < b.len() && (b[j] != b'"' || escaped) {
+                            escaped = b[j] == b'\\' && !escaped;
+                            j += 1;
+                        }
+                        out.push((start, line[start + 1..j.min(b.len())].to_string()));
+                        i = j + 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            out
+        }
+        fn scan(dir: &std::path::Path, german: &std::collections::HashSet<&str>, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let name = p.to_string_lossy().to_string();
+                if p.is_dir() {
+                    // The engine's texts are errors, logged or wrapped in translated messages.
+                    if !name.ends_with("engine") && !name.ends_with("i18n") {
+                        scan(&p, german, out);
+                    }
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "rs") || name.ends_with("i18n.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap();
+                let code = src.split("#[cfg(test)]").next().unwrap_or_default();
+                for (n, line) in code.lines().enumerate() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") || trimmed.starts_with("#[") || NOT_UI_LINES.iter().any(|m| line.contains(m)) {
+                        continue;
+                    }
+                    for (at, text) in literals(line) {
+                        let before = line[..at].trim_end();
+                        let wrapped = before.ends_with("t(") && !before.ends_with("_t(") || before.ends_with("tf(");
+                        if !wrapped && looks_like_ui_text(&text) && !german.contains(text.as_str()) && !NOT_UI.contains(&text.as_str()) {
+                            out.push(format!("{name}:{}: {text:?}", n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let german: std::collections::HashSet<&str> = de::TEXTS.iter().map(|(en, _)| *en).collect();
+        let mut found = Vec::new();
+        scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &german, &mut found);
+        assert!(found.is_empty(), "texts shown without translation (wrap them in t() and add a German entry): {found:#?}");
+    }
+
     #[test]
     fn lookup_and_placeholders() {
         set_language("de");

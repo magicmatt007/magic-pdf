@@ -65,11 +65,11 @@ pub struct CropDialog {
 /// the dialog stays open.
 pub fn crop_dialog(ctx: &egui::Context, d: &mut CropDialog, tab: &DocTab) -> (Option<Request>, bool) {
     let mut result = (None, true);
-    window("Crop pages").show(ctx, |ui| {
+    window(t("Crop pages")).show(ctx, |ui| {
         ui.label(t("Trim the visible area of the pages (as they are shown):"));
         egui::Grid::new("crop").num_columns(4).show(ui, |ui| {
             for (i, side) in ["Top", "Right", "Bottom", "Left"].iter().enumerate() {
-                ui.label(*side);
+                ui.label(t(side));
                 ui.add(egui::DragValue::new(&mut d.mm[i]).range(0.0..=500.0).speed(0.5).suffix(" mm"));
                 if i % 2 == 1 {
                     ui.end_row();
@@ -81,7 +81,7 @@ pub fn crop_dialog(ctx: &egui::Context, d: &mut CropDialog, tab: &DocTab) -> (Op
         }
         scope_ui(ui, &mut d.scope, tab);
         ui.weak(t("Cropping hides content outside; Undo brings it back."));
-        let (ok, cancel) = buttons(ui, "Crop");
+        let (ok, cancel) = buttons(ui, t("Crop"));
         if ok && d.mm.iter().any(|&m| m > 0.0) {
             let [top, right, bottom, left] = d.mm.map(|m| m * MM);
             result = (
@@ -138,22 +138,22 @@ pub fn header_footer_dialog(
     recent: &mut Vec<Rgb>,
 ) -> (Option<Request>, bool) {
     let mut result = (None, true);
-    window("Header and footer").show(ctx, |ui| {
+    window(t("Header and footer")).show(ctx, |ui| {
         egui::Grid::new("hf").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label("");
             for h in ["Left", "Centre", "Right"] {
-                ui.strong(h);
+                ui.strong(t(h));
             }
             ui.end_row();
             for (row, name) in ["Header", "Footer"].iter().enumerate() {
-                ui.label(*name);
+                ui.label(t(name));
                 for col in 0..3 {
                     ui.add(egui::TextEdit::singleline(&mut d.texts[row * 3 + col]).desired_width(150.0));
                 }
                 ui.end_row();
             }
         });
-        ui.weak("Placeholders: {page}  {pages}  {date}  {file}");
+        ui.weak(t("Placeholders: {page}  {pages}  {date}  {file}"));
         ui.horizontal(|ui| {
             ui.label(t("Size"));
             ui.add(egui::DragValue::new(&mut d.size).range(5.0..=36.0).suffix(" pt"));
@@ -377,7 +377,7 @@ impl Default for OptimizeDialog {
 
 pub fn optimize_dialog(ctx: &egui::Context, d: &mut OptimizeDialog, tab: &DocTab) -> (Option<Request>, bool) {
     let mut result = (None, true);
-    window("Save optimized copy").show(ctx, |ui| {
+    window(t("Save optimized copy")).show(ctx, |ui| {
         ui.label(t("Writes a smaller copy; the open document stays as it is."));
         ui.label(t("• Compresses the file structure (lossless)"));
         ui.horizontal(|ui| {
@@ -385,7 +385,7 @@ pub fn optimize_dialog(ctx: &egui::Context, d: &mut OptimizeDialog, tab: &DocTab
             ui.add_enabled(d.scale_images, egui::DragValue::new(&mut d.dpi).range(72..=600).suffix(" dpi"));
         });
         ui.weak(t("150 dpi suits screens and office printers; 300 dpi keeps print quality.\nPictures become JPEG; black-and-white scans and transparent pictures stay as they are."));
-        let (ok, cancel) = buttons(ui, "Save as…");
+        let (ok, cancel) = buttons(ui, t("Save as…"));
         if ok {
             let stem = tab.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
             let mut dialog = rfd::FileDialog::new()

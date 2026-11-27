@@ -169,11 +169,11 @@ pub fn page_menu(ui: &mut Ui, n: usize, total: usize) -> Option<PageAction> {
     item(ui, true, tf("Move {pages} to the start", &[("pages", &pages)]), PageAction::MoveToStart);
     item(ui, true, tf("Move {pages} to the end", &[("pages", &pages)]), PageAction::MoveToEnd);
     ui.separator();
-    item(ui, true, "Insert blank page after".into(), PageAction::InsertBlankAfter);
-    item(ui, true, "Insert pages from file…".into(), PageAction::InsertFileAfter);
+    item(ui, true, t("Insert blank page after").into(), PageAction::InsertBlankAfter);
+    item(ui, true, t("Insert pages from file…").into(), PageAction::InsertFileAfter);
     ui.separator();
     item(ui, true, tf("Extract {pages} to new file…", &[("pages", &pages)]), PageAction::Extract);
-    item(ui, total > 1, "Split document…".into(), PageAction::Split);
+    item(ui, total > 1, t("Split document…").into(), PageAction::Split);
     ui.separator();
     item(ui, n < total, tf("Delete {pages}\tDel", &[("pages", &pages)]), PageAction::Delete);
     action

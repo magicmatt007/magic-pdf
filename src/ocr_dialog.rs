@@ -135,7 +135,7 @@ impl OcrDialog {
                 } => {
                     self.state = None;
                     let mut msg = match recognised {
-                        0 => "No text found".to_string(),
+                        0 => t("No text found").to_string(),
                         1 => tf("Recognised {words} words on 1 page", &[("words", &words)]),
                         n => tf("Recognised {words} words on {n} pages", &[("words", &words), ("n", &n)]),
                     };
@@ -146,7 +146,7 @@ impl OcrDialog {
                 }
                 OcrOutcome::Cancelled => {
                     self.state = None;
-                    Some("Text recognition cancelled".into())
+                    Some(t("Text recognition cancelled").into())
                 }
                 OcrOutcome::Failed(e) => {
                     state.progress = None;
@@ -214,7 +214,7 @@ impl OcrDialog {
             let filter = state.filter.to_lowercase();
             egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
                 for code in langs {
-                    let name = language_name(code);
+                    let name = language_name(code).map(t);
                     let label = name.map_or_else(|| code.clone(), |n| format!("{n} ({code})"));
                     if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                         continue;

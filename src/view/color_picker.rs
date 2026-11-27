@@ -175,7 +175,7 @@ fn picker(ui: &mut Ui, id: Id, current: Option<Rgb>, allow_none: bool, recent: &
     }
     ui.add_space(6.0);
     ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-    egui::CollapsingHeader::new("Custom colour")
+    egui::CollapsingHeader::new(t("Custom colour"))
         .id_salt(id.with("custom"))
         .show(ui, |ui| {
             let work_id = id.with("work");

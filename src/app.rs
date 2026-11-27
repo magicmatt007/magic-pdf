@@ -500,9 +500,9 @@ impl App {
                     }
                     UpdateUi::Ready(..) => {
                         ui.label(if cfg!(target_os = "macos") {
-                            "Ready. magic-pdf closes and opens the new version's disk image: drag magic-pdf to Applications."
+                            t("Ready. magic-pdf closes and opens the new version's disk image: drag magic-pdf to Applications.")
                         } else {
-                            "Ready. magic-pdf closes to install the update and then starts again."
+                            t("Ready. magic-pdf closes to install the update and then starts again.")
                         });
                         ui.horizontal(|ui| {
                             if ui.add(crate::theme::primary_button(t("Install now"))).clicked() {
@@ -1129,7 +1129,7 @@ impl App {
             Response::PrintReady { job, bytes, .. } => {
                 let tx = self.print_results.0.clone();
                 let ctx = self.ctx.clone();
-                self.notice("Sending to the printer…");
+                self.notice(t("Sending to the printer…"));
                 std::thread::spawn(move || {
                     let _ = tx.send(crate::print::submit(&job, &bytes));
                     ctx.request_repaint();
@@ -1591,7 +1591,7 @@ impl App {
                     ui.add(egui::DragValue::new(&mut every).range(1..=count.max(1)));
                 });
                 let files = count.div_ceil(every.max(1));
-                ui.weak(format!("Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …"));
+                ui.weak(tf("Creates {files} files named “{stem}-01.pdf”, “{stem}-02.pdf”, …", &[("files", &files), ("stem", &stem)]));
                 ui.horizontal(|ui| {
                     go = ui.button(t("Choose folder…")).clicked();
                     cancel = ui.button(t("Cancel")).clicked();
@@ -1625,13 +1625,10 @@ impl App {
             .args(["default", "magic-pdf.desktop", "application/pdf"])
             .status();
         match result {
-            Ok(s) if s.success() => self.notice("magic-pdf is now the default PDF viewer"),
+            Ok(s) if s.success() => self.notice(t("magic-pdf is now the default PDF viewer")),
             Ok(_) | Err(_) => {
-                self.error = Some(
-                    "Could not set the default PDF viewer. Install magic-pdf with \
-                     packaging/linux/install.sh first."
-                        .into(),
-                )
+                self.error =
+                    Some(t("Could not set the default PDF viewer. Install magic-pdf with packaging/linux/install.sh first.").into())
             }
         }
     }
@@ -1661,7 +1658,7 @@ impl App {
         }
         let doc = tab.id;
         match crate::print::list_printers() {
-            Ok(p) if p.names.is_empty() => self.error = Some("No printers are set up.".into()),
+            Ok(p) if p.names.is_empty() => self.error = Some(t("No printers are set up.").into()),
             Ok(p) => {
                 let printer = p.default.clone().or_else(|| p.names.first().cloned());
                 self.print_dialog = Some(PrintDialog {
@@ -1683,7 +1680,7 @@ impl App {
     fn print_dialog_ui(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.print_results.1.try_recv() {
             match result {
-                Ok(msg) if msg.is_empty() => self.notice("Sent to the printer"),
+                Ok(msg) if msg.is_empty() => self.notice(t("Sent to the printer")),
                 Ok(msg) => self.notice(&tf("Sent to the printer ({msg})", &[("msg", &msg)])),
                 Err(e) => self.error = Some(tf("Printing failed: {e}", &[("e", &e)])),
             }
@@ -2494,7 +2491,7 @@ impl App {
                     .unwrap_or((0, 0));
                 ui.add_enabled_ui(total > 0, |ui| {
                     ui.weak(if n == 1 {
-                        "Acts on the selected (or current) page".to_string()
+                        t("Acts on the selected (or current) page").to_string()
                     } else {
                         tf("Acts on {n} selected pages", &[("n", &n)])
                     });
@@ -2857,7 +2854,7 @@ impl App {
             if s.submitted.is_some() {
                 let status = match (s.current, s.hits.len()) {
                     (_, 0) if s.running => "…".to_string(),
-                    (_, 0) => "No matches".to_string(),
+                    (_, 0) => t("No matches").to_string(),
                     (Some(c), n) => format!("{}/{}{}", c + 1, n, if s.running { "+" } else { "" }),
                     (None, n) => format!("{n}"),
                 };
@@ -3335,7 +3332,7 @@ impl App {
                         ("Ctrl+D", "Document properties"),
                         ("Middle-drag", "Pan with any tool"),
                     ] {
-                        ui.strong(kb(k));
+                        ui.strong(kb(t(k)));
                         ui.label(t(v));
                         ui.end_row();
                     }
@@ -3987,7 +3984,7 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
             let pin = if pinned { pin.color(ui.visuals().selection.stroke.color) } else { pin.weak() };
             if ui
                 .add(egui::Button::new(pin).frame(false))
-                .on_hover_text(if pinned { "Unpin" } else { "Pin to the top of the list" })
+                .on_hover_text(if pinned { t("Unpin") } else { t("Pin to the top of the list") })
                 .clicked()
             {
                 action = Some(RecentAction::TogglePin(path.clone()));
@@ -4006,7 +4003,7 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
                 action = Some(RecentAction::Open(path.clone()));
             }
             response.context_menu(|ui| {
-                if ui.button(if pinned { "Unpin" } else { "Pin" }).clicked() {
+                if ui.button(if pinned { t("Unpin") } else { t("Pin") }).clicked() {
                     action = Some(RecentAction::TogglePin(path.clone()));
                     ui.close();
                 }

@@ -211,12 +211,12 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
             return;
         }
         LoadState::NeedsPassword { .. } => {
-            centered_text(ui, view, "This document is password protected.");
+            centered_text(ui, view, t("This document is password protected."));
             return;
         }
     }
     if tab.page_count() == 0 {
-        centered_text(ui, view, "The document has no pages.");
+        centered_text(ui, view, t("The document has no pages."));
         return;
     }
     tab.view_rect = view;
@@ -1053,7 +1053,7 @@ fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
     let annot = match cx.tool {
         Tool::Stamp => {
             let Some(spec) = cx.stamp else {
-                tab.error_message = Some("Choose a stamp in the tool options bar first.".into());
+                tab.error_message = Some(t("Choose a stamp in the tool options bar first.").into());
                 return;
             };
             let rect = match spec {
@@ -1090,7 +1090,7 @@ fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
                 a
             }
             _ => {
-                tab.error_message = Some("Create a signature first (tool options bar: Signatures…).".into());
+                tab.error_message = Some(t("Create a signature first (tool options bar: Signatures…).").into());
                 return;
             }
         },
@@ -2109,7 +2109,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     if toggle(ui, current.underline, icons::TEXT_UNDERLINE, &kb(t("Underline (Ctrl+U)"))) {
                         apply(re, &|s| s.underline = !current.underline);
                     }
-                    if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, "Strikethrough") {
+                    if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, t("Strikethrough")) {
                         apply(re, &|s| s.strike = !current.strike);
                     }
                     ui.separator();
@@ -2137,7 +2137,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                         (Align::Center, icons::ALIGN_CENTER, "Centre"),
                         (Align::Right, icons::ALIGN_RIGHT, "Align right"),
                     ] {
-                        if toggle(ui, re.align == align, icon, tip) {
+                        if toggle(ui, re.align == align, icon, t(tip)) {
                             re.align = align;
                         }
                     }
