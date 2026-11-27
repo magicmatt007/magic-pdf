@@ -2,14 +2,15 @@
 //! bookmark tree (outline), lossless compression and clearing out what redaction
 //! left unreferenced.
 
+use crate::i18n::{t, tf};
 use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 
 use super::commands::{EditableProperties, OutlineItem};
 
 fn load(bytes: &[u8]) -> Result<Document, String> {
-    let doc = Document::load_mem(bytes).map_err(|e| format!("could not read the PDF structure: {e}"))?;
+    let doc = Document::load_mem(bytes).map_err(|e| tf("could not read the PDF structure: {e}", &[("e", &e)]))?;
     if doc.is_encrypted() {
-        return Err("this does not work for encrypted PDFs".into());
+        return Err(t("this does not work for encrypted PDFs").into());
     }
     Ok(doc)
 }
@@ -17,7 +18,7 @@ fn load(bytes: &[u8]) -> Result<Document, String> {
 fn save(doc: &mut Document, modern: bool) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let r = if modern { doc.save_modern(&mut out) } else { doc.save_to(&mut out) };
-    r.map_err(|e| format!("could not write the PDF: {e}"))?;
+    r.map_err(|e| tf("could not write the PDF: {e}", &[("e", &e)]))?;
     Ok(out)
 }
 
@@ -90,7 +91,7 @@ pub fn write_outline(bytes: &[u8], items: &[OutlineItem]) -> Result<Vec<u8>, Str
         doc.objects.insert(root_id, Object::Dictionary(root));
         Some(root_id)
     };
-    let catalog = doc.catalog_mut().map_err(|e| format!("no document catalog: {e}"))?;
+    let catalog = doc.catalog_mut().map_err(|e| tf("no document catalog: {e}", &[("e", &e)]))?;
     match root {
         Some(id) => catalog.set("Outlines", Object::Reference(id)),
         None => {
@@ -276,8 +277,8 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
     for &i in pages {
         let Some(&page_id) = ids.get(i) else { continue };
         let content = doc.get_page_content(page_id);
-        let ops =
-            lopdf::content::Content::decode(&content).map_err(|e| format!("could not read the page content: {e}"))?;
+        let ops = lopdf::content::Content::decode(&content)
+            .map_err(|e| tf("could not read the page content: {e}", &[("e", &e)]))?;
         let used: Vec<Vec<u8>> = ops
             .operations
             .iter()
@@ -311,7 +312,7 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
         let page = doc
             .get_object_mut(page_id)
             .and_then(Object::as_dict_mut)
-            .map_err(|e| format!("could not update the page: {e}"))?;
+            .map_err(|e| tf("could not update the page: {e}", &[("e", &e)]))?;
         page.set("Resources", Object::Dictionary(resources));
     }
     doc.prune_objects();
@@ -389,7 +390,7 @@ fn increment(bytes: &[u8], before: Document, after: &Document) -> Result<Vec<u8>
     }
     inc.new_document.max_id = inc.new_document.max_id.max(after.max_id);
     let mut out = Vec::new();
-    inc.save_to(&mut out).map_err(|e| format!("could not write the PDF: {e}"))?;
+    inc.save_to(&mut out).map_err(|e| tf("could not write the PDF: {e}", &[("e", &e)]))?;
     Ok(out)
 }
 

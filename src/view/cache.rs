@@ -79,6 +79,11 @@ impl TextureCache {
         self.frame += 1;
     }
 
+    /// Number of textures and their size in bytes (for the benchmark report).
+    pub fn usage(&self) -> (usize, usize) {
+        (self.entries.len(), self.total_bytes)
+    }
+
     pub fn contains(&self, key: &RenderKey) -> bool {
         self.entries.contains_key(key)
     }

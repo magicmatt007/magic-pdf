@@ -6,6 +6,7 @@
 //! PDFium (on the worker thread), written as a greyscale PGM image, recognised to
 //! hOCR, and the words are placed back onto the page as invisible text.
 
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -88,7 +89,10 @@ fn command(exe: &Path) -> Command {
 /// Installed recognition languages (Tesseract codes like `eng`, `deu`), without the
 /// orientation-detection pseudo language `osd`.
 pub fn languages(exe: &Path) -> Result<Vec<String>, String> {
-    let out = command(exe).arg("--list-langs").output().map_err(|e| format!("Could not run {}: {e}", exe.display()))?;
+    let out = command(exe)
+        .arg("--list-langs")
+        .output()
+        .map_err(|e| tf("Could not run {file}: {e}", &[("e", &e), ("file", &exe.display())]))?;
     // Older versions print the list on stderr.
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let mut langs: Vec<String> = text
@@ -102,7 +106,7 @@ pub fn languages(exe: &Path) -> Result<Vec<String>, String> {
     langs.sort();
     langs.dedup();
     if langs.is_empty() {
-        return Err("Tesseract is installed but has no language data.".into());
+        return Err(t("Tesseract is installed but has no language data.").into());
     }
     Ok(langs)
 }
@@ -116,11 +120,11 @@ pub fn recognise(exe: &Path, image: &Path, langs: &str) -> Result<String, String
         .arg(format!("{DPI:.0}"))
         .arg("hocr")
         .output()
-        .map_err(|e| format!("Could not run Tesseract: {e}"))?;
+        .map_err(|e| tf("Could not run Tesseract: {e}", &[("e", &e)]))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let msg = err.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("unknown error");
-        return Err(format!("Tesseract failed: {msg}"));
+        return Err(tf("Tesseract failed: {msg}", &[("msg", &msg)]));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
