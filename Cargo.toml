@@ -1,6 +1,6 @@
 [package]
 name = "magic-pdf"
-version = "0.11.6"
+version = "0.12.0"
 edition = "2024"
 description = "Lightweight cross-platform PDF viewer with horizontal page layout"
 license = "AGPL-3.0-or-later"
