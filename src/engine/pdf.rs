@@ -2016,6 +2016,8 @@ impl<'d> Page<'d> {
         n.interior = info.interior;
         n.width = info.width;
         n.contents = info.contents.clone();
+        // The copy (or the annotation moved to another page) keeps its author.
+        n.author = info.author.clone();
         n.vertices = info.vertices.clone();
         n.status = info.status.clone();
         n.replies = serde_json::from_str(&self.annot_string(&a, REPLIES_KEY)).unwrap_or_default();

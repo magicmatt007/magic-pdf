@@ -1234,6 +1234,7 @@ mod tests {
         let (_serial, engine) = start();
         open(&engine, 1, sample());
         let mut tb = NewAnnot::new(AnnotKind::FreeText, pdf_box(100.0, 600.0, 300.0, 640.0), [0, 0, 0]);
+        tb.author = "Anna".into();
         let mut rich = RichText::plain("Hello world", CharStyle::default());
         rich.spans[0].style.bold = true;
         tb.rich = Some(rich.clone());
@@ -1248,6 +1249,7 @@ mod tests {
         let (orig, copy) =
             (list.iter().find(|x| x.index == t).unwrap(), list.iter().find(|x| x.index == pasted).unwrap());
         assert_eq!(copy.rich.as_ref().unwrap().text(), "Hello world");
+        assert_eq!((orig.author.as_str(), copy.author.as_str()), ("Anna", "Anna"), "the copy keeps the author");
         assert!(copy.rich.as_ref().unwrap().spans[0].style.bold);
         assert_eq!((copy.rect.left - orig.rect.left, copy.rect.top - orig.rect.top), (12.0, -12.0));
         // Undo removes the pasted copy.
