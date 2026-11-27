@@ -124,7 +124,6 @@ pub struct App {
     images_dialog: Option<crate::view::page_tools::ImagesDialog>,
     /// Width of the toolbar's buttons when they last fitted on one row, and of the
     /// search box with its buttons (they share the row when both fit).
-    toolbar_width: f32,
     search_width: f32,
     watermark_dialog: Option<crate::view::page_tools::WatermarkDialog>,
     flatten_dialog: Option<crate::view::page_tools::FlattenDialog>,
@@ -333,7 +332,6 @@ impl App {
             hf_dialog: None,
             optimize_dialog: None,
             images_dialog: None,
-            toolbar_width: 1000.0,
             search_width: 290.0,
             watermark_dialog: None,
             flatten_dialog: None,
@@ -483,10 +481,9 @@ impl App {
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
             .show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.label(format!(
-                    "magic-pdf {} is available (you have {}).",
-                    release.version(),
-                    env!("CARGO_PKG_VERSION")
+                ui.label(tf(
+                    "magic-pdf {new} is available (you have {current}).",
+                    &[("new", &release.version()), ("current", &env!("CARGO_PKG_VERSION"))],
                 ));
                 // Only the "What's new" part; the rest are installation notes.
                 if let Some(blocks) = release.body.as_deref().and_then(crate::update::whats_new) {
@@ -525,7 +522,7 @@ impl App {
                                 if ui.add(crate::theme::primary_button(t("Install"))).clicked() {
                                     action = Some("download");
                                 }
-                            } else if ui.button(t("Open download page")).clicked() {
+                            } else if ui.add(crate::theme::primary_button(t("Open download page"))).clicked() {
                                 action = Some("page");
                             }
                             if ui.button(t("Later")).clicked() {
@@ -2640,25 +2637,12 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
-        // In a narrow window the buttons wrap onto a second row and the search box gets
-        // a row of its own, so everything stays reachable.
-        let wide = ui.available_width() >= self.toolbar_width + self.search_width + ui.spacing().item_spacing.x;
-        if wide {
-            ui.horizontal(|ui| {
-                self.toolbar_buttons(ui);
-                self.search_bar(ui);
-            });
-        } else {
-            ui.horizontal_wrapped(|ui| self.toolbar_buttons(ui));
-            if !self.tabs.is_empty() {
-                ui.horizontal(|ui| self.search_bar(ui));
-            }
-        }
+        // In a narrow window the buttons wrap onto a second row, so all stay reachable.
+        ui.horizontal_wrapped(|ui| self.toolbar_buttons(ui));
     }
 
     /// The toolbar's buttons (all but search).
     fn toolbar_buttons(&mut self, ui: &mut Ui) {
-        let start = ui.cursor().min;
         {
             ui.toggle_value(&mut self.settings.show_sidebar, icons::text(icons::SIDEBAR))
                 .on_hover_text(t("Show or hide the sidebar (F9)"));
@@ -2836,11 +2820,6 @@ impl App {
                 .on_hover_text(tf("Page layout: {layout}", &[("layout", &tab.mode.label())]));
             }
 
-            // The buttons' width when they fit on one row decides where search goes.
-            let end = ui.cursor().min;
-            if (end.y - start.y).abs() < 1.0 {
-                self.toolbar_width = end.x - start.x;
-            }
         }
     }
 
@@ -3045,65 +3024,78 @@ impl App {
         let mut close = None;
         let mut move_to = None;
         let mut tab_rects = Vec::new();
-        egui::ScrollArea::horizontal().id_salt("tabbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, tab) in self.tabs.iter().enumerate() {
-                    let resp = ui
-                        .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
-                        .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag it down onto the page or out of the window to open it in its own window")));
-                    tab_rects.push(resp.rect);
-                    if resp.clicked() {
-                        self.active = i;
-                    }
-                    if resp.middle_clicked() {
-                        close = Some(tab.id);
-                    }
-                    if resp.drag_started_by(egui::PointerButton::Primary) {
-                        self.tab_drag = Some(i);
-                        self.active = i;
-                    }
-                    if resp.secondary_clicked() {
-                        // Listed once when the menu opens (asks the other windows).
-                        self.tab_menu_peers = crate::ipc::peers()
-                            .into_iter()
-                            .filter_map(|p| p.window().map(|w| (p, w.title)))
-                            .collect();
-                    }
-                    let (doc, peers) = (tab.id, &self.tab_menu_peers);
-                    let path = tab.path.clone();
-                    resp.context_menu(|ui| {
-                        if ui.button(t("Open containing folder")).clicked() {
-                            crate::reveal::show_in_folder(&path);
-                            ui.close();
+        // Search sits at the right end of the tab row (it searches the active tab);
+        // when the window is too narrow to leave room for the tabs, it gets a row of its own.
+        let gap = ui.spacing().item_spacing.x;
+        let beside = ui.available_width() - self.search_width - gap >= 240.0;
+        let tabs_width = if beside { ui.available_width() - self.search_width - gap } else { ui.available_width() };
+        ui.horizontal(|ui| {
+            egui::ScrollArea::horizontal().id_salt("tabbar").max_width(tabs_width).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let resp = ui
+                            .add(egui::Button::selectable(i == self.active, tab.title()).sense(egui::Sense::click_and_drag()))
+                            .on_hover_text(format!("{}\n{}", tab.path.display(), t("Drag it down onto the page or out of the window to open it in its own window")));
+                        tab_rects.push(resp.rect);
+                        if resp.clicked() {
+                            self.active = i;
                         }
-                        ui.separator();
-                        if ui.button(t("Move to new window")).clicked() {
-                            move_to = Some((doc, MoveTarget::NewWindow(None)));
-                            ui.close();
+                        if resp.middle_clicked() {
+                            close = Some(tab.id);
                         }
-                        ui.add_enabled_ui(!peers.is_empty(), |ui| {
-                            ui.menu_button(t("Move to window"), |ui| {
-                                for (peer, title) in peers {
-                                    if ui.button(title).clicked() {
-                                        move_to = Some((doc, MoveTarget::Peer(peer.clone())));
-                                        ui.close();
+                        if resp.drag_started_by(egui::PointerButton::Primary) {
+                            self.tab_drag = Some(i);
+                            self.active = i;
+                        }
+                        if resp.secondary_clicked() {
+                            // Listed once when the menu opens (asks the other windows).
+                            self.tab_menu_peers = crate::ipc::peers()
+                                .into_iter()
+                                .filter_map(|p| p.window().map(|w| (p, w.title)))
+                                .collect();
+                        }
+                        let (doc, peers) = (tab.id, &self.tab_menu_peers);
+                        let path = tab.path.clone();
+                        resp.context_menu(|ui| {
+                            if ui.button(t("Open containing folder")).clicked() {
+                                crate::reveal::show_in_folder(&path);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button(t("Move to new window")).clicked() {
+                                move_to = Some((doc, MoveTarget::NewWindow(None)));
+                                ui.close();
+                            }
+                            ui.add_enabled_ui(!peers.is_empty(), |ui| {
+                                ui.menu_button(t("Move to window"), |ui| {
+                                    for (peer, title) in peers {
+                                        if ui.button(title).clicked() {
+                                            move_to = Some((doc, MoveTarget::Peer(peer.clone())));
+                                            ui.close();
+                                        }
                                     }
-                                }
+                                });
                             });
+                            ui.separator();
+                            if ui.button(t("Close")).clicked() {
+                                close = Some(doc);
+                                ui.close();
+                            }
                         });
-                        ui.separator();
-                        if ui.button(t("Close")).clicked() {
-                            close = Some(doc);
-                            ui.close();
+                        if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb(t("Close (Ctrl+W)"))).clicked() {
+                            close = Some(tab.id);
                         }
-                    });
-                    if ui.small_button(icons::sized(icons::X, 12.0)).on_hover_text(kb(t("Close (Ctrl+W)"))).clicked() {
-                        close = Some(tab.id);
+                        ui.add_space(6.0);
                     }
-                    ui.add_space(6.0);
-                }
+                });
             });
+            if beside {
+                self.search_bar(ui);
+            }
         });
+        if !beside {
+            ui.horizontal(|ui| self.search_bar(ui));
+        }
         self.tab_drag_feedback(ui.ctx(), &tab_rects, &mut move_to);
         if let Some((doc, target)) = move_to {
             self.move_tab(doc, target);

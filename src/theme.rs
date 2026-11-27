@@ -9,6 +9,8 @@ use eframe::egui::{self, Color32, CornerRadius, Stroke, Theme};
 
 /// The magic-pdf accent (its icon's orange), for solid fills with white text.
 pub const ACCENT: Color32 = Color32::from_rgb(0xEA, 0x58, 0x0C);
+/// A deeper shade of the accent for small white text on it (page-number badge).
+pub const ACCENT_DEEP: Color32 = Color32::from_rgb(0xC2, 0x41, 0x0C);
 /// The sparkle yellow every magic app's icon carries.
 #[allow(dead_code)]
 pub const SPARKLE: Color32 = Color32::from_rgb(0xFA, 0xCC, 0x15);
@@ -77,7 +79,11 @@ fn palette(dark: bool) -> &'static Palette {
 /// Applies the light and dark looks; `ctx.set_theme` then switches between them.
 pub fn install(ctx: &egui::Context) {
     for theme in [Theme::Light, Theme::Dark] {
-        ctx.style_mut_of(theme, |style| apply(&mut style.visuals, palette(theme == Theme::Dark)));
+        ctx.style_mut_of(theme, |style| {
+            apply(&mut style.visuals, palette(theme == Theme::Dark));
+            // Room between a window's edge and its contents.
+            style.spacing.window_margin = egui::Margin::same(12);
+        });
     }
 }
 
@@ -155,5 +161,6 @@ mod tests {
             assert!(contrast(p.link, p.surface) >= 4.5, "links");
         }
         assert!(contrast(Color32::WHITE, ACCENT) >= 3.0, "main button (large, bold text)");
+        assert!(contrast(Color32::WHITE, ACCENT_DEEP) >= 4.5, "page-number badge");
     }
 }
