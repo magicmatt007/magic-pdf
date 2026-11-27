@@ -1,6 +1,7 @@
 //! Thin safe-ish wrapper over the raw PDFium C API (via pdfium-render's bindings).
 //! Everything here must only be used from the PDFium worker thread.
 
+use crate::i18n::{t, tf};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_ulong};
@@ -200,17 +201,6 @@ fn pdf_date(time: chrono::DateTime<chrono::FixedOffset>) -> String {
     }
     let (sign, minutes) = (if offset < 0 { '-' } else { '+' }, offset.abs() / 60);
     format!("D:{stamp}{sign}{:02}'{:02}'", minutes / 60, minutes % 60)
-}
-
-#[cfg(test)]
-mod date_tests {
-    #[test]
-    fn pdf_dates_carry_their_zone() {
-        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
-        assert_eq!(super::pdf_date(at("2026-11-27T15:04:05+01:00")), "D:20261127150405+01'00'");
-        assert_eq!(super::pdf_date(at("2026-07-01T08:00:00-05:30")), "D:20260701080000-05'30'");
-        assert_eq!(super::pdf_date(at("2026-11-27T14:04:05Z")), "D:20261127140405Z");
-    }
 }
 
 #[repr(C)]
@@ -459,7 +449,7 @@ impl Doc {
     pub fn create(lib: Lib) -> Result<Doc, String> {
         let handle = unsafe { lib.FPDF_CreateNewDocument() };
         if handle.is_null() {
-            return Err("PDFium could not create a document".into());
+            return Err(t("PDFium could not create a document").into());
         }
         let info: FPDF_FORMFILLINFO = unsafe { std::mem::zeroed() };
         Ok(Doc {
@@ -493,11 +483,11 @@ impl Doc {
                 p.sort_unstable();
                 p.dedup();
                 let ok = unsafe { lib.FPDF_MovePages(self.handle, p.as_ptr(), p.len() as c_ulong, *to as c_int) };
-                if lib.is_true(ok) { Ok(0) } else { Err("PDFium could not move the pages".into()) }
+                if lib.is_true(ok) { Ok(0) } else { Err(t("PDFium could not move the pages").into()) }
             }
             PageOp::Rotate { pages, quarter_turns } => {
                 for &i in pages {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     let current = unsafe { lib.FPDFPage_GetRotation(page.handle) };
                     unsafe { lib.FPDFPage_SetRotation(page.handle, (current + quarter_turns).rem_euclid(4)) };
                 }
@@ -508,29 +498,29 @@ impl Doc {
             PageOp::InsertBlank { at, size } => {
                 let page = unsafe { lib.FPDFPage_New(self.handle, *at as c_int, size.0 as f64, size.1 as f64) };
                 if page.is_null() {
-                    return Err("PDFium could not create a page".into());
+                    return Err(t("PDFium could not create a page").into());
                 }
                 unsafe { lib.FPDF_ClosePage(page) };
                 Ok(1)
             }
             PageOp::InsertFile { at, source, pages, .. } => {
                 let src = Doc::open_bytes(lib, source.as_ref().clone(), None).map_err(|e| match e {
-                    OpenError::Password => "password-protected files cannot be inserted".to_string(),
+                    OpenError::Password => t("password-protected files cannot be inserted").to_string(),
                     OpenError::Other(m) => m,
                 })?;
                 self.import_pages(&src, pages.as_deref(), *at)
             }
-            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Err("written by the worker".into()),
+            PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => Err(t("written by the worker").into()),
             PageOp::Watermark { pages, spec } => {
                 const FPDF_FONT_TRUETYPE: c_int = 2;
                 let ttf = crate::fonts::BOLD;
                 let font =
                     unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
-                    return Err("PDFium could not load the watermark font".into());
+                    return Err(t("PDFium could not load the watermark font").into());
                 }
                 let result = pages.iter().try_for_each(|&i| {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     page.remove_marked(WATERMARK_MARK);
                     page.add_watermark(spec, font);
                     page.generate_content()
@@ -541,7 +531,7 @@ impl Doc {
             }
             PageOp::RemoveWatermark { pages } => {
                 for &i in pages {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     if page.remove_marked(WATERMARK_MARK) > 0 {
                         page.generate_content()?;
                     }
@@ -553,9 +543,9 @@ impl Doc {
                 const FLAT_NORMALDISPLAY: c_int = 0;
                 const FLATTEN_FAIL: c_int = 0;
                 for &i in pages {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     if unsafe { lib.FPDFPage_Flatten(page.handle, FLAT_NORMALDISPLAY) } == FLATTEN_FAIL {
-                        return Err(format!("PDFium could not flatten page {}", i + 1));
+                        return Err(tf("PDFium could not flatten page {n}", &[("n", &(i + 1))]));
                     }
                 }
                 self.close_all_pages();
@@ -563,7 +553,7 @@ impl Doc {
             }
             PageOp::Redact { areas } => {
                 for (i, boxes) in areas {
-                    let page = self.page(*i).ok_or("page not found")?;
+                    let page = self.page(*i).ok_or(t("page not found"))?;
                     page.redact(boxes)?;
                 }
                 self.close_all_pages();
@@ -571,7 +561,7 @@ impl Doc {
             }
             PageOp::Crop { pages, margins } => {
                 for &i in pages {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     page.crop(*margins)?;
                 }
                 self.close_all_pages();
@@ -583,17 +573,17 @@ impl Doc {
                 let font =
                     unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
-                    return Err("PDFium could not load the header font".into());
+                    return Err(t("PDFium could not load the header font").into());
                 }
                 let count = self.page_count();
                 let result = pages.iter().try_for_each(|&i| {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     page.remove_marked(HEADER_FOOTER_MARK);
                     page.add_header_footer(spec, i, count, font);
                     if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
                         Ok(())
                     } else {
-                        Err("PDFium could not write the page content".to_string())
+                        Err(t("PDFium could not write the page content").to_string())
                     }
                 });
                 unsafe { lib.FPDFFont_Close(font) };
@@ -602,11 +592,11 @@ impl Doc {
             }
             PageOp::RemoveHeaderFooter { pages } => {
                 for &i in pages {
-                    let page = self.page(i).ok_or("page not found")?;
+                    let page = self.page(i).ok_or(t("page not found"))?;
                     if page.remove_marked(HEADER_FOOTER_MARK) > 0
                         && !lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) })
                     {
-                        return Err("PDFium could not write the page content".into());
+                        return Err(t("PDFium could not write the page content").into());
                     }
                 }
                 self.close_all_pages();
@@ -620,10 +610,10 @@ impl Doc {
                 let font =
                     unsafe { lib.FPDFText_LoadFont(self.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
                 if font.is_null() {
-                    return Err("PDFium could not load the text layer font".into());
+                    return Err(t("PDFium could not load the text layer font").into());
                 }
                 let result = pages.iter().try_for_each(|(i, words)| {
-                    let page = self.page(*i).ok_or("page not found")?;
+                    let page = self.page(*i).ok_or(t("page not found"))?;
                     if *replace {
                         page.remove_invisible_text();
                     }
@@ -631,7 +621,7 @@ impl Doc {
                     if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(page.handle) }) {
                         Ok(())
                     } else {
-                        Err("PDFium could not write the page content".to_string())
+                        Err(t("PDFium could not write the page content").to_string())
                     }
                 });
                 unsafe { lib.FPDFFont_Close(font) };
@@ -658,7 +648,7 @@ impl Doc {
                 at as c_int,
             )
         };
-        if lib.is_true(ok) { Ok(indices.len()) } else { Err("PDFium could not import the pages".into()) }
+        if lib.is_true(ok) { Ok(indices.len()) } else { Err(t("PDFium could not import the pages").into()) }
     }
 
     pub fn kill_form_focus(&self) {
@@ -783,7 +773,7 @@ impl Doc {
         let mut writer =
             VecWriter { base: FPDF_FILEWRITE { version: 1, WriteBlock: Some(write_block) }, out: Vec::new() };
         let ok = unsafe { self.lib.FPDF_SaveAsCopy(self.handle, &mut writer.base, flags) };
-        if self.lib.is_true(ok) { Ok(writer.out) } else { Err("PDFium could not write the document".into()) }
+        if self.lib.is_true(ok) { Ok(writer.out) } else { Err(t("PDFium could not write the document").into()) }
     }
 }
 
@@ -1015,7 +1005,7 @@ impl<'d> Page<'d> {
         let b = self.crop_box();
         let new = PdfBox { left: b.left + m[3], bottom: b.bottom + m[2], right: b.right - m[1], top: b.top - m[0] };
         if new.right - new.left < 36.0 || new.top - new.bottom < 36.0 {
-            return Err("The margins leave less than half an inch of the page.".into());
+            return Err(t("The margins leave less than half an inch of the page.").into());
         }
         unsafe { self.lib().FPDFPage_SetCropBox(self.handle, new.left, new.bottom, new.right, new.top) };
         Ok(())
@@ -1086,7 +1076,7 @@ impl<'d> Page<'d> {
         if self.lib().is_true(unsafe { self.lib().FPDFPage_GenerateContent(self.handle) }) {
             Ok(())
         } else {
-            Err("PDFium could not write the page content".to_string())
+            Err(t("PDFium could not write the page content").to_string())
         }
     }
 
@@ -1436,7 +1426,7 @@ impl<'d> Page<'d> {
 
         // 3. Pictures of the page where content could not be kept as it was.
         if !patches.is_empty() {
-            let (w, h, rgba) = snapshot.ok_or("could not render the page")?;
+            let (w, h, rgba) = snapshot.ok_or(t("could not render the page"))?;
             for p in &patches {
                 self.insert_patch(w, h, &rgba, &p.expand(0.5), &black)?;
             }
@@ -1469,7 +1459,7 @@ impl<'d> Page<'d> {
             unsafe {
                 let obj = lib.FPDFPageObj_CreateNewRect(b.left, b.bottom, b.right - b.left, b.top - b.bottom);
                 if obj.is_null() {
-                    return Err("PDFium could not draw the redaction".into());
+                    return Err(t("PDFium could not draw the redaction").into());
                 }
                 lib.FPDFPageObj_SetFillColor(obj, 0, 0, 0, 255);
                 lib.FPDFPath_SetDrawMode(obj, FILL_ALTERNATE, 0);
@@ -1479,7 +1469,7 @@ impl<'d> Page<'d> {
         if lib.is_true(unsafe { lib.FPDFPage_GenerateContent(self.handle) }) {
             Ok(())
         } else {
-            Err("PDFium could not write the page content".into())
+            Err(t("PDFium could not write the page content").into())
         }
     }
 
@@ -1554,13 +1544,13 @@ impl<'d> Page<'d> {
         let vy = to_page(x0, y0);
         let m = FS_MATRIX { a: ux.0 - o.0, b: ux.1 - o.1, c: vy.0 - o.0, d: vy.1 - o.1, e: o.0, f: o.1 };
         unsafe {
-            let bmp = rgba_bitmap(lib, pw, ph, &crop).ok_or("out of memory for the redaction")?;
+            let bmp = rgba_bitmap(lib, pw, ph, &crop).ok_or(t("out of memory for the redaction"))?;
             let img = lib.FPDFPageObj_NewImageObj(self.doc.handle);
             let ok = lib.is_true(lib.FPDFImageObj_SetBitmap(ptr::null_mut(), 0, img, bmp));
             lib.FPDFBitmap_Destroy(bmp);
             if !ok {
                 lib.FPDFPageObj_Destroy(img);
-                return Err("PDFium could not store the redacted picture".into());
+                return Err(t("PDFium could not store the redacted picture").into());
             }
             lib.FPDFPageObj_SetMatrix(img, &m);
             lib.FPDFPage_InsertObject(self.handle, img);
@@ -1961,12 +1951,12 @@ impl<'d> Page<'d> {
     fn append_image(&self, a: &Annot, rect: PdfBox, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
         let lib = self.lib();
         if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
-            return Err("invalid image".into());
+            return Err(t("invalid image").into());
         }
         unsafe {
             let bmp = lib.FPDFBitmap_Create(width as c_int, height as c_int, 1);
             if bmp.is_null() {
-                return Err("out of memory for the image".into());
+                return Err(t("out of memory for the image").into());
             }
             let stride = lib.FPDFBitmap_GetStride(bmp) as usize;
             let buf = lib.FPDFBitmap_GetBuffer(bmp) as *mut u8;
@@ -1985,14 +1975,14 @@ impl<'d> Page<'d> {
             lib.FPDFBitmap_Destroy(bmp);
             if !ok {
                 lib.FPDFPageObj_Destroy(img);
-                return Err("PDFium could not store the image".into());
+                return Err(t("PDFium could not store the image").into());
             }
             let (w, h) = ((rect.right - rect.left) as f64, (rect.top - rect.bottom) as f64);
             let m = FS_MATRIX { a: w as f32, b: 0.0, c: 0.0, d: h as f32, e: rect.left, f: rect.bottom };
             lib.FPDFPageObj_SetMatrix(img, &m);
             if !lib.is_true(lib.FPDFAnnot_AppendObject(a.handle, img)) {
                 lib.FPDFPageObj_Destroy(img);
-                return Err("PDFium could not add the image to the stamp".into());
+                return Err(t("PDFium could not add the image to the stamp").into());
             }
         }
         Ok(())
@@ -2015,10 +2005,10 @@ impl<'d> Page<'d> {
     /// Everything needed to recreate an annotation elsewhere (copy and paste).
     pub fn annot_clip(&self, index: usize) -> Result<NewAnnot, String> {
         let lib = self.lib();
-        let info = self.annots(|i| i != index).into_iter().next().ok_or("this annotation cannot be copied")?;
-        let a = self.annot(index).ok_or("annotation not found")?;
+        let info = self.annots(|i| i != index).into_iter().next().ok_or(t("this annotation cannot be copied"))?;
+        let a = self.annot(index).ok_or(t("annotation not found"))?;
         if matches!(info.kind, AnnotKind::Other | AnnotKind::Line) {
-            return Err(format!("{} annotations cannot be copied", info.kind.label()));
+            return Err(tf("{kind} annotations cannot be copied", &[("kind", &info.kind.label())]));
         }
         let mut n = NewAnnot::new(info.kind, info.rect, info.color.unwrap_or([0, 0, 0]));
         n.interior = info.interior;
@@ -2058,7 +2048,7 @@ impl<'d> Page<'d> {
                 let (title, subtitle) = text.split_once('\n').unwrap_or((&text, ""));
                 Some(StampSpec::Text { title: title.to_string(), subtitle: subtitle.to_string() })
             } else {
-                let (width, height, rgba) = self.stamp_image(&a).ok_or("this stamp cannot be copied")?;
+                let (width, height, rgba) = self.stamp_image(&a).ok_or(t("this stamp cannot be copied"))?;
                 Some(StampSpec::Image { width, height, rgba })
             };
         }
@@ -2093,11 +2083,11 @@ impl<'d> Page<'d> {
             AnnotKind::FreeText => SUBTYPE_FREETEXT,
             AnnotKind::Stamp => SUBTYPE_STAMP,
             k if k.shape().is_some() => SUBTYPE_INK,
-            other => return Err(format!("creating {} annotations is not supported", other.label())),
+            other => return Err(tf("creating {kind} annotations is not supported", &[("kind", &other.label())])),
         };
         let handle = unsafe { lib.FPDFPage_CreateAnnot(self.handle, subtype) };
         if handle.is_null() {
-            return Err("PDFium could not create the annotation".into());
+            return Err(t("PDFium could not create the annotation").into());
         }
         let a = Annot { lib, handle };
         let index = unsafe { lib.FPDFPage_GetAnnotIndex(self.handle, a.handle) };
@@ -2177,7 +2167,7 @@ impl<'d> Page<'d> {
             }
         }
         if index < 0 {
-            return Err("annotation index unavailable".into());
+            return Err(t("annotation index unavailable").into());
         }
         Ok(index as usize)
     }
@@ -2185,7 +2175,7 @@ impl<'d> Page<'d> {
     /// Applies `change` and returns the change that reverts it.
     pub fn update_annot(&self, index: usize, change: &AnnotChange) -> Result<AnnotChange, String> {
         let lib = self.lib();
-        let a = self.annot(index).ok_or("annotation not found")?;
+        let a = self.annot(index).ok_or(t("annotation not found"))?;
         let string = |key: &str| {
             read_utf16(|buf, len| unsafe { lib.FPDFAnnot_GetStringValue(a.handle, key, buf as *mut FPDF_WCHAR, len) })
         };
@@ -2359,12 +2349,12 @@ impl<'d> Page<'d> {
     /// shapes, text stamps) after they were created or changed.
     pub fn refresh_appearance(&self, index: usize, fonts: &dyn FontSet) -> Result<(), String> {
         let lib = self.lib();
-        let a = self.annot(index).ok_or("annotation not found")?;
+        let a = self.annot(index).ok_or(t("annotation not found"))?;
         let subtype = unsafe { lib.FPDFAnnot_GetSubtype(a.handle) };
         let set_ap = |content: &str| -> Result<(), String> {
             let content = wide(content);
             let ok = unsafe { lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, content.as_ptr()) };
-            if lib.is_true(ok) { Ok(()) } else { Err("PDFium could not set the appearance".into()) }
+            if lib.is_true(ok) { Ok(()) } else { Err(t("PDFium could not set the appearance").into()) }
         };
         match subtype {
             SUBTYPE_FREETEXT => {
@@ -2426,7 +2416,7 @@ impl<'d> Page<'d> {
     /// (the box grows or shrinks in height to fit the text).
     pub fn refresh_text_box(&self, index: usize, fonts: &dyn FontSet) -> Result<(), String> {
         let lib = self.lib();
-        let a = self.annot(index).ok_or("annotation not found")?;
+        let a = self.annot(index).ok_or(t("annotation not found"))?;
         unsafe {
             // Without an appearance PDFium lets us read the colours.
             lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ptr::null());
@@ -2444,7 +2434,7 @@ impl<'d> Page<'d> {
             lib.FPDFAnnot_SetRect(a.handle, &new);
             let content = wide(&content);
             if !lib.is_true(lib.FPDFAnnot_SetAP(a.handle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, content.as_ptr())) {
-                return Err("PDFium could not set the text box appearance".into());
+                return Err(t("PDFium could not set the text box appearance").into());
             }
         }
         Ok(())
@@ -2732,7 +2722,7 @@ impl PdfiumFont {
         let doc = Doc::create(lib)?;
         let font = unsafe { lib.FPDFText_LoadFont(doc.handle, ttf.as_ptr(), ttf.len() as _, FPDF_FONT_TRUETYPE, 1) };
         if font.is_null() {
-            return Err("PDFium could not load the text box font".into());
+            return Err(t("PDFium could not load the text box font").into());
         }
         let mut ascent = 0.8;
         unsafe { lib.FPDFFont_GetAscent(font, 1.0, &mut ascent) };
@@ -2910,5 +2900,16 @@ mod font_tests {
         }
         // Bold really is wider than regular.
         assert!(fonts.font(true, false).advance('m') > fonts.font(false, false).advance('m'));
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn pdf_dates_carry_their_zone() {
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
+        assert_eq!(super::pdf_date(at("2026-11-27T15:04:05+01:00")), "D:20261127150405+01'00'");
+        assert_eq!(super::pdf_date(at("2026-07-01T08:00:00-05:30")), "D:20260701080000-05'30'");
+        assert_eq!(super::pdf_date(at("2026-11-27T14:04:05Z")), "D:20261127140405Z");
     }
 }

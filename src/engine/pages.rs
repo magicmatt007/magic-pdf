@@ -1,5 +1,6 @@
 //! Page operations (delete, move, rotate, insert) and how they renumber pages.
 
+use crate::i18n::t;
 use std::sync::Arc;
 
 /// A structural edit of the document's pages.
@@ -188,9 +189,9 @@ impl PageOp {
     pub fn validate(&self, count: usize) -> Result<(), String> {
         let in_range = |pages: &[usize]| {
             if pages.is_empty() {
-                Err("no pages selected".to_string())
+                Err(t("no pages selected").to_string())
             } else if pages.iter().any(|&p| p >= count) {
-                Err("page does not exist".to_string())
+                Err(t("page does not exist").to_string())
             } else {
                 Ok(())
             }
@@ -199,14 +200,14 @@ impl PageOp {
             PageOp::Delete { pages } => {
                 in_range(pages)?;
                 if sorted_unique(pages).len() >= count {
-                    return Err("a document needs at least one page".into());
+                    return Err(t("a document needs at least one page").into());
                 }
                 Ok(())
             }
             PageOp::Move { pages, to } => {
                 in_range(pages)?;
                 if *to + sorted_unique(pages).len() > count {
-                    return Err("target position is out of range".into());
+                    return Err(t("target position is out of range").into());
                 }
                 Ok(())
             }
@@ -222,7 +223,7 @@ impl PageOp {
             PageOp::Redact { areas } => in_range(&areas.iter().map(|(p, _)| *p).collect::<Vec<_>>()),
             PageOp::InsertBlank { at, .. } | PageOp::InsertFile { at, .. } => {
                 if *at > count {
-                    Err("insert position is out of range".into())
+                    Err(t("insert position is out of range").into())
                 } else {
                     Ok(())
                 }

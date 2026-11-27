@@ -1,5 +1,6 @@
 //! The PDFium worker loop. Everything in here runs on the `pdfium` thread.
 
+use crate::i18n::{t, tf};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -127,7 +128,7 @@ impl OpenDoc {
         if self.deleted.is_empty() {
             return Ok(bytes);
         }
-        let copy = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not re-open saved copy")?;
+        let copy = Doc::open_bytes(lib, bytes, None).map_err(|_| t("could not re-open saved copy"))?;
         let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
         for &(p, i) in self.deleted.keys() {
             by_page.entry(p).or_default().push(i);
@@ -226,7 +227,7 @@ fn bind_pdfium() -> Result<Pdfium, String> {
     match Pdfium::bind_to_system_library() {
         Ok(bindings) => Ok(Pdfium::new(bindings)),
         Err(e) => {
-            errors.push(format!("system library: {e}"));
+            errors.push(tf("system library: {e}", &[("e", &e)]));
             Err(format!(
                 "Could not load the PDFium library. Run scripts/fetch-pdfium.sh (or .ps1 on \
                  Windows) or place the library next to the executable.\n{}",
@@ -352,7 +353,7 @@ impl Worker {
                     .docs
                     .get(&doc)
                     .and_then(|od| od.doc.page(page))
-                    .ok_or_else(|| "page not found".to_string())
+                    .ok_or_else(|| t("page not found").to_string())
                     .and_then(|p| p.annot_clip(index));
                 match clip {
                     Ok(n) => self.clip = Some((doc, page, n)),
@@ -421,7 +422,7 @@ impl Worker {
                 let Some(od) = self.docs.get(&doc) else { return };
                 match od.export(self.lib) {
                     Ok(bytes) => self.send(Response::PrintReady { job, bytes }),
-                    Err(e) => self.error(doc, format!("Preparing the print job failed: {e}")),
+                    Err(e) => self.error(doc, tf("Preparing the print job failed: {e}", &[("e", &e)])),
                 }
             }
             Request::EditPages { doc, op } => {
@@ -433,12 +434,12 @@ impl Worker {
                     let op = PageOp::InsertFile { at, source: Arc::new(bytes), name, pages: None, count: 0 };
                     self.edit_pages(doc, op);
                 }
-                Err(e) => self.error(doc, format!("Could not read {}: {e}", path.display())),
+                Err(e) => self.error(doc, tf("Could not read {file}: {e}", &[("e", &e), ("file", &path.display())])),
             },
             Request::GetAttachment { doc, index } => {
                 match self.docs.get(&doc).and_then(|od| od.doc.attachment(index)) {
                     Some((name, data)) => self.send(Response::Attachment { doc, index, name, data }),
-                    None => self.error(doc, "The attached file could not be read."),
+                    None => self.error(doc, t("The attached file could not be read.")),
                 }
             }
             Request::Compare { a, b } => {
@@ -454,19 +455,19 @@ impl Worker {
             }
             Request::SaveOptimized { doc, path, image_dpi } => match self.save_optimized(doc, &path, image_dpi) {
                 Ok(message) => self.send(Response::Exported { message }),
-                Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
+                Err(e) => self.error(doc, tf("Saving {file} failed: {e}", &[("e", &e), ("file", &path.display())])),
             },
             Request::ExportImages { doc, pages, dpi, jpeg, dir, stem } => {
                 match self.export_images(doc, &pages, dpi, jpeg, &dir, &stem) {
                     Ok(count) => self.send(Response::Exported { message: Exported::Pictures { count, dir } }),
-                    Err(e) => self.error(doc, format!("Exporting pictures failed: {e}")),
+                    Err(e) => self.error(doc, tf("Exporting pictures failed: {e}", &[("e", &e)])),
                 }
             }
             Request::ExtractPages { doc, pages, path } => {
                 let result = self.extract(doc, &[(pages, path.clone())]);
                 match result {
                     Ok(()) => self.send(Response::Exported { message: Exported::Pages { path } }),
-                    Err(e) => self.error(doc, format!("Extracting pages failed: {e}")),
+                    Err(e) => self.error(doc, tf("Extracting pages failed: {e}", &[("e", &e)])),
                 }
             }
             Request::Combine { files, out, bookmarks } => match self.combine(&files, &out, bookmarks) {
@@ -486,7 +487,7 @@ impl Worker {
                 let n = parts.len();
                 match self.extract(doc, &parts) {
                     Ok(()) => self.send(Response::Exported { message: Exported::Split { files: n, dir } }),
-                    Err(e) => self.error(doc, format!("Splitting failed: {e}")),
+                    Err(e) => self.error(doc, tf("Splitting failed: {e}", &[("e", &e)])),
                 }
             }
             Request::ExportToFile { doc, path } => {
@@ -495,7 +496,7 @@ impl Worker {
                     od.export(self.lib).and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
                 match result {
                     Ok(()) => self.send(Response::ExportedTo { doc, path }),
-                    Err(e) => self.error(doc, format!("Moving the document failed: {e}")),
+                    Err(e) => self.error(doc, tf("Moving the document failed: {e}", &[("e", &e)])),
                 }
             }
             Request::MarkDirty { doc } => {
@@ -578,7 +579,7 @@ impl Worker {
             std::env::temp_dir().join(format!("magic-pdf-ocr-{}-{}-{page_index}.pgm", std::process::id(), job.id));
         let written = page
             .render_gray(size.0, size.1)
-            .ok_or_else(|| "could not render the page".to_string())
+            .ok_or_else(|| t("could not render the page").to_string())
             .and_then(|gray| ocr::write_pgm(&image, size.0, size.1, &gray).map_err(|e| e.to_string()));
         if let Err(e) = written {
             self.end_ocr(doc, OcrOutcome::Failed(format!("Page {}: {e}", page_index + 1)));
@@ -857,7 +858,7 @@ impl Worker {
             let doc_now = match Doc::open_bytes(lib, edit.snapshot.as_ref().clone(), None) {
                 Ok(d) => d,
                 Err(_) => {
-                    self.error(doc, "could not restore the document");
+                    self.error(doc, t("could not restore the document"));
                     return;
                 }
             };
@@ -872,7 +873,7 @@ impl Worker {
         } else {
             let count = od.doc.page_count();
             if let Err(e) = apply_op(lib, od, &edit.op) {
-                self.error(doc, format!("Redo failed: {e}"));
+                self.error(doc, tf("Redo failed: {e}", &[("e", &e)]));
                 return;
             }
             let m = edit.op.mapping(count);
@@ -895,16 +896,16 @@ impl Worker {
         dir: &Path,
         stem: &str,
     ) -> Result<usize, String> {
-        let od = self.docs.get(&doc).ok_or("document not open")?;
+        let od = self.docs.get(&doc).ok_or(t("document not open"))?;
         let count = od.doc.page_count();
         let digits = count.to_string().len().max(3);
         let mut written = 0;
         for &i in pages.iter().filter(|&&i| i < count) {
-            let page = od.doc.page(i).ok_or("page not found")?;
+            let page = od.doc.page(i).ok_or(t("page not found"))?;
             let (w, h) = od.doc.page_size(i);
             let scale = (dpi.clamp(36, 1200) as f32 / 72.0).min(MAX_EXPORT_SIDE / w.max(h));
             let (pw, ph) = ((w * scale).round().max(1.0) as usize, (h * scale).round().max(1.0) as usize);
-            let rgba = page.render(pw, ph, Rotation::R0).ok_or("could not render the page")?;
+            let rgba = page.render(pw, ph, Rotation::R0).ok_or(t("could not render the page"))?;
             let ext = if jpeg { "jpg" } else { "png" };
             let path = dir.join(format!("{stem}-p{:0digits$}.{ext}", i + 1));
             let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -942,12 +943,12 @@ impl Worker {
     }
 
     fn save_optimized(&self, doc: DocId, path: &Path, image_dpi: Option<u32>) -> Result<Exported, String> {
-        let od = self.docs.get(&doc).ok_or("document not open")?;
+        let od = self.docs.get(&doc).ok_or(t("document not open"))?;
         let original = od.export(self.lib)?;
         let mut bytes = original.clone();
         let mut images = 0;
         if let Some(dpi) = image_dpi {
-            let copy = Doc::open_bytes(self.lib, bytes.clone(), None).map_err(|_| "could not prepare the copy")?;
+            let copy = Doc::open_bytes(self.lib, bytes.clone(), None).map_err(|_| t("could not prepare the copy"))?;
             for i in 0..copy.page_count() {
                 if let Some(page) = copy.page(i) {
                     images += page.downsample_images(dpi as f32);
@@ -1001,12 +1002,12 @@ impl Worker {
 
     /// Writes each (pages, path) to a new PDF, taken from the document with all edits.
     fn extract(&self, doc: DocId, parts: &[(Vec<usize>, std::path::PathBuf)]) -> Result<(), String> {
-        let od = self.docs.get(&doc).ok_or("document not open")?;
+        let od = self.docs.get(&doc).ok_or(t("document not open"))?;
         if let Some((_, p)) = parts.iter().find(|(_, p)| p.exists() && parts.len() > 1) {
-            return Err(format!("{} already exists", p.display()));
+            return Err(tf("{file} already exists", &[("file", &p.display())]));
         }
         let source =
-            Doc::open_bytes(self.lib, od.export(self.lib)?, None).map_err(|_| "could not prepare the pages")?;
+            Doc::open_bytes(self.lib, od.export(self.lib)?, None).map_err(|_| t("could not prepare the pages"))?;
         for (pages, path) in parts {
             let out = Doc::create(self.lib)?;
             out.import_pages(&source, Some(pages), 0)?;
@@ -1065,13 +1066,13 @@ impl Worker {
         let Some(od) = self.docs.get(&doc) else { return };
         match super::print_windows::print(&od.doc, title, current_page) {
             Ok(pages) => self.send(Response::Printed { pages }),
-            Err(e) => self.error(doc, format!("Printing failed: {e}")),
+            Err(e) => self.error(doc, tf("Printing failed: {e}", &[("e", &e)])),
         }
     }
 
     #[cfg(not(windows))]
     fn print_native(&mut self, doc: DocId, _title: &str, _current_page: usize) {
-        self.error(doc, "Native printing is only available on Windows");
+        self.error(doc, t("Native printing is only available on Windows"));
     }
 
     fn paste_annot(&mut self, doc: DocId, page: usize, at: Option<(f32, f32)>) {
@@ -1090,7 +1091,7 @@ impl Worker {
     /// status) is placed at `rect` there and the original is deleted.
     fn move_annot_to_page(&mut self, doc: DocId, page: usize, index: usize, to_page: usize, rect: PdfBox) {
         let Some(od) = self.docs.get_mut(&doc) else { return };
-        let clip = od.doc.page(page).ok_or_else(|| "page not found".to_string()).and_then(|p| p.annot_clip(index));
+        let clip = od.doc.page(page).ok_or_else(|| t("page not found").to_string()).and_then(|p| p.annot_clip(index));
         let mut n = match clip {
             Ok(n) => n,
             Err(e) => return self.error(doc, e),
@@ -1098,7 +1099,7 @@ impl Worker {
         let center = |r: &PdfBox| ((r.left + r.right) / 2.0, (r.bottom + r.top) / 2.0);
         let ((fx, fy), (tx, ty)) = (center(&n.rect), center(&rect));
         n.translate(tx - fx, ty - fy);
-        let added = od.doc.page(to_page).ok_or_else(|| "page not found".to_string()).and_then(|p| p.add_annot(&n));
+        let added = od.doc.page(to_page).ok_or_else(|| t("page not found").to_string()).and_then(|p| p.add_annot(&n));
         let new_index = match added {
             Ok(i) => i,
             Err(e) => return self.error(doc, e),
@@ -1185,7 +1186,7 @@ impl Worker {
         };
         let Some(od) = self.docs.get_mut(&doc) else { return };
         let result =
-            od.doc.page(page_index).ok_or_else(|| "page not found".to_string()).and_then(|p| p.add_annot(annot));
+            od.doc.page(page_index).ok_or_else(|| t("page not found").to_string()).and_then(|p| p.add_annot(annot));
         match result {
             Ok(index) => {
                 od.colors.insert((page_index, index), (Some(annot.color), annot.interior));
@@ -1203,7 +1204,7 @@ impl Worker {
         let result = od
             .doc
             .page(page_index)
-            .ok_or_else(|| "page not found".to_string())
+            .ok_or_else(|| t("page not found").to_string())
             .and_then(|p| p.update_annot(index, &change));
         match result {
             Ok(undo) => {
@@ -1228,7 +1229,7 @@ impl Worker {
                 Self::push_edit(od, Edit::Delete { page: page_index, index });
                 self.after_edit(doc, page_index);
             }
-            None => self.error(doc, "annotation not found"),
+            None => self.error(doc, t("annotation not found")),
         }
     }
 
@@ -1316,7 +1317,7 @@ impl Worker {
                 self.send(Response::Saved { doc, path: path.to_path_buf() });
                 self.send_edit_state(doc);
             }
-            Err(e) => self.error(doc, format!("Saving {} failed: {e}", path.display())),
+            Err(e) => self.error(doc, tf("Saving {file} failed: {e}", &[("e", &e), ("file", &path.display())])),
         }
     }
 }
@@ -1333,7 +1334,7 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             let base = od.base_bytes()?;
             let bytes = super::lopdf_ops::write_properties(&base, properties, &super::pdf::pdf_date_now())?;
             let bytes = od.keep_signatures(&base, bytes)?;
-            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| t("could not reopen the document"))?;
             Ok(0)
         }
         PageOp::Flatten { pages } => {
@@ -1347,8 +1348,8 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             // Without the clean-up the removed content could still be in the file, so
             // a failure fails the redaction (the worker restores the snapshot).
             let bytes = super::lopdf_ops::purge_after_redaction(&od.doc.save_to_bytes()?, &pages)
-                .map_err(|e| format!("the removed content could not be cleared out of the file: {e}"))?;
-            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+                .map_err(|e| tf("the removed content could not be cleared out of the file: {e}", &[("e", &e)]))?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| t("could not reopen the document"))?;
             Ok(0)
         }
         PageOp::SetOutline { outline } => {
@@ -1356,7 +1357,7 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             let base = od.base_bytes()?;
             let bytes = super::lopdf_ops::write_outline(&base, outline)?;
             let bytes = od.keep_signatures(&base, bytes)?;
-            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| "could not reopen the document")?;
+            od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| t("could not reopen the document"))?;
             Ok(0)
         }
         _ => od.doc.apply_page_op(op),

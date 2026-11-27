@@ -19,6 +19,7 @@ pub mod signatures;
 pub mod textbox;
 mod worker;
 
+use crate::i18n::t;
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -45,7 +46,7 @@ impl Engine {
             .name("pdfium".into())
             .spawn(move || worker::run(req_rx, resp_tx, ready_tx, Box::new(wake)))
             .map_err(|e| e.to_string())?;
-        ready_rx.recv().map_err(|_| "PDFium worker exited during start-up".to_string())??;
+        ready_rx.recv().map_err(|_| t("PDFium worker exited during start-up").to_string())??;
         Ok(Self { tx: req_tx, rx: resp_rx })
     }
 

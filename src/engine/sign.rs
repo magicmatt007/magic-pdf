@@ -6,6 +6,7 @@
 //! with the small DER writer below; the RSA and ECDSA maths come from the RustCrypto
 //! crates. A trusted timestamp (RFC 3161) can be added from a timestamp server.
 
+use crate::i18n::{t, tf};
 use std::fmt::Write as _;
 
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream, StringFormat};
@@ -231,9 +232,9 @@ pub type TimestampFn<'a> = &'a dyn Fn(&str, &[u8]) -> Result<Vec<u8>, String>;
 /// Signs the PDF `file` and returns the signed file (the original bytes plus an
 /// incremental update).
 pub fn sign(file: &[u8], req: &SignRequest, id: &SigningIdentity, timestamp: TimestampFn) -> Result<Vec<u8>, String> {
-    let doc = Document::load_mem(file).map_err(|e| format!("could not read the PDF structure: {e}"))?;
+    let doc = Document::load_mem(file).map_err(|e| tf("could not read the PDF structure: {e}", &[("e", &e)]))?;
     if doc.is_encrypted() || doc.trailer.has(b"Encrypt") {
-        return Err("encrypted PDFs cannot be signed".into());
+        return Err(t("encrypted PDFs cannot be signed").into());
     }
     let chain_len: usize = id.chain.iter().map(Vec::len).sum();
     // Room for the CMS structure; doubled if it turns out too small.
@@ -245,7 +246,7 @@ pub fn sign(file: &[u8], req: &SignRequest, id: &SigningIdentity, timestamp: Tim
         let ranges = [0, contents_at, after, out.len() - after];
         let mut range_text = format!("[{} {} {} {}]", ranges[0], ranges[1], ranges[2], ranges[3]);
         if range_text.len() > RANGE_PLACEHOLDER.len() {
-            return Err("the file is too large to sign".into());
+            return Err(t("the file is too large to sign").into());
         }
         while range_text.len() < RANGE_PLACEHOLDER.len() {
             range_text.push(' ');
@@ -266,7 +267,7 @@ pub fn sign(file: &[u8], req: &SignRequest, id: &SigningIdentity, timestamp: Tim
         out[contents_at + 1..contents_at + 1 + hex.len()].copy_from_slice(hex.as_bytes());
         return Ok(out);
     }
-    Err("the signature does not fit".into())
+    Err(t("the signature does not fit").into())
 }
 
 const RANGE_PLACEHOLDER: &str = "[0 1111111111 2222222222 3333333333]";
@@ -275,7 +276,7 @@ const RANGE_PLACEHOLDER: &str = "[0 1111111111 2222222222 3333333333]";
 /// of the `<` that starts /Contents and the offset of the /ByteRange array.
 fn prepare(file: &[u8], doc: Document, req: &SignRequest, space: usize) -> Result<(Vec<u8>, usize, usize), String> {
     let pages = doc.get_pages();
-    let page_id = *pages.get(&(req.page as u32 + 1)).ok_or("the page does not exist")?;
+    let page_id = *pages.get(&(req.page as u32 + 1)).ok_or(t("the page does not exist"))?;
     let rotation = doc
         .get_object(page_id)
         .and_then(Object::as_dict)
@@ -284,7 +285,7 @@ fn prepare(file: &[u8], doc: Document, req: &SignRequest, space: usize) -> Resul
         .and_then(|r| r.as_i64().ok())
         .unwrap_or(0)
         .rem_euclid(360);
-    let root_id = doc.trailer.get(b"Root").and_then(Object::as_reference).map_err(|_| "the PDF has no catalog")?;
+    let root_id = doc.trailer.get(b"Root").and_then(Object::as_reference).map_err(|_| t("the PDF has no catalog"))?;
     let field_name = unique_field_name(&doc);
     let mut inc = IncrementalDocument::create_from(file.to_vec(), doc);
 
@@ -307,8 +308,8 @@ fn prepare(file: &[u8], doc: Document, req: &SignRequest, space: usize) -> Resul
     let sig_id = inc.new_document.add_object(sig);
 
     // The field and its widget (one dictionary), with the visible appearance.
-    let [l, b, r, t] = req.rect;
-    let appearance = appearance(&mut inc.new_document, r - l, t - b, rotation, req);
+    let [l, b, r, top] = req.rect;
+    let appearance = appearance(&mut inc.new_document, r - l, top - b, rotation, req);
     let mut widget = Dictionary::new();
     widget.set("Type", Object::Name(b"Annot".to_vec()));
     widget.set("Subtype", Object::Name(b"Widget".to_vec()));
@@ -381,14 +382,15 @@ fn prepare(file: &[u8], doc: Document, req: &SignRequest, space: usize) -> Resul
     }
 
     let mut out = Vec::new();
-    inc.save_to(&mut out).map_err(|e| format!("could not write the PDF: {e}"))?;
+    inc.save_to(&mut out).map_err(|e| tf("could not write the PDF: {e}", &[("e", &e)]))?;
 
     let update_start = file.len();
     let find =
         |needle: &[u8]| out[update_start..].windows(needle.len()).position(|w| w == needle).map(|p| p + update_start);
-    let range_at = find(RANGE_PLACEHOLDER.as_bytes()).ok_or("the signature dictionary was not written as expected")?;
+    let range_at =
+        find(RANGE_PLACEHOLDER.as_bytes()).ok_or(t("the signature dictionary was not written as expected"))?;
     let contents_at = find(&[b"<".as_slice(), &vec![b'0'; space * 2], b">"].concat())
-        .ok_or("the signature dictionary was not written as expected")?;
+        .ok_or(t("the signature dictionary was not written as expected"))?;
     Ok((out, contents_at, range_at))
 }
 
@@ -606,8 +608,8 @@ fn cms(id: &SigningIdentity, digest: &[u8], req: &SignRequest, timestamp: Timest
     let signed_attrs = set_of(attrs);
     let signature = id.sign(&signed_attrs)?;
 
-    let (tlv, _) = Tlv::read(&id.chain[0]).ok_or("the certificate cannot be read")?;
-    let cert = Certificate::parse(&tlv).ok_or("the certificate cannot be read")?;
+    let (tlv, _) = Tlv::read(&id.chain[0]).ok_or(t("the certificate cannot be read"))?;
+    let cert = Certificate::parse(&tlv).ok_or(t("the certificate cannot be read"))?;
     let sid = seq(&[cert.issuer_raw.to_vec(), der(INTEGER, cert.serial)]);
     let mut signer_info =
         vec![der(INTEGER, &[1]), sid, digest_alg.clone(), implicit(0, &signed_attrs), id.signature_algorithm()];
@@ -643,17 +645,17 @@ fn timestamp_token(url: &str, signature: &[u8], fetch: TimestampFn) -> Result<Ve
     ]);
     let response = fetch(url, &request)?;
     // TimeStampResp { status PKIStatusInfo { status INTEGER, ... }, timeStampToken }
-    let (resp, _) = Tlv::read(&response).ok_or("the timestamp server sent an unreadable answer")?;
+    let (resp, _) = Tlv::read(&response).ok_or(t("the timestamp server sent an unreadable answer"))?;
     let mut parts = resp.children();
     let status =
-        parts.next().and_then(|s| s.children().next()).ok_or("the timestamp server sent an unreadable answer")?;
+        parts.next().and_then(|s| s.children().next()).ok_or(t("the timestamp server sent an unreadable answer"))?;
     if !matches!(status.value, [0] | [1]) {
-        return Err("the timestamp server refused the request".into());
+        return Err(t("the timestamp server refused the request").into());
     }
-    let token = parts.next().ok_or("the timestamp server sent no timestamp")?;
+    let token = parts.next().ok_or(t("the timestamp server sent no timestamp"))?;
     // The token must be over this request: compare the nonce.
     if !contains(token.raw, &der(INTEGER, &nonce)) {
-        return Err("the timestamp does not match the request".into());
+        return Err(t("the timestamp does not match the request").into());
     }
     Ok(token.raw.to_vec())
 }

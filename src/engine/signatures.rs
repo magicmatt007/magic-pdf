@@ -7,6 +7,7 @@
 //! The CMS structures are read with a small DER reader below; only the RSA and ECDSA
 //! maths come from the RustCrypto crates.
 
+use crate::i18n::t;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -68,7 +69,7 @@ fn verify(
     out: &mut SignatureCheck,
 ) -> Result<SigStatus, Problem> {
     if !matches!(subfilter, "adbe.pkcs7.detached" | "ETSI.CAdES.detached") {
-        return Err(unknown("this signature format is not supported"));
+        return Err(unknown(t("this signature format is not supported")));
     }
     // The signed bytes.
     let mut data = Vec::new();
@@ -76,7 +77,7 @@ fn verify(
         let part = start
             .checked_add(len)
             .and_then(|end| file.get(start..end))
-            .ok_or(Problem::Invalid("the signed range lies outside the file"))?;
+            .ok_or(Problem::Invalid(t("the signed range lies outside the file")))?;
         data.extend_from_slice(part);
     }
     let end = ranges.iter().map(|&(s, l)| s + l).max().unwrap_or(0);
@@ -84,14 +85,14 @@ fn verify(
         ranges.first().is_some_and(|r| r.0 == 0) && file[end.min(file.len())..].iter().all(u8::is_ascii_whitespace);
 
     // ContentInfo { contentType signedData, [0] SignedData }
-    let (content_info, _) = Tlv::read(contents).ok_or(unknown("the signature data cannot be read"))?;
+    let (content_info, _) = Tlv::read(contents).ok_or(unknown(t("the signature data cannot be read")))?;
     let mut ci = content_info.children();
-    let oid = ci.next().filter(|t| t.tag == OID).ok_or(unknown("not a CMS signature"))?;
+    let oid = ci.next().filter(|t| t.tag == OID).ok_or(unknown(t("not a CMS signature")))?;
     if oid.value != OID_SIGNED_DATA {
-        return Err(unknown("not a CMS signature"));
+        return Err(unknown(t("not a CMS signature")));
     }
-    let explicit = ci.next().filter(|t| t.tag == 0xA0).ok_or(unknown("CMS signature without content"))?;
-    let signed_data = explicit.children().next().ok_or(unknown("CMS signature without content"))?;
+    let explicit = ci.next().filter(|t| t.tag == 0xA0).ok_or(unknown(t("CMS signature without content")))?;
+    let signed_data = explicit.children().next().ok_or(unknown(t("CMS signature without content")))?;
     // SignedData { version, digestAlgorithms, encapContentInfo, [0] certificates, [1] crls, signerInfos }
     let mut certs: Vec<Tlv> = Vec::new();
     let mut signer_infos = None;
@@ -102,24 +103,25 @@ fn verify(
             _ => {}
         }
     }
-    let signer_info = signer_infos.and_then(|s| s.children().next()).ok_or(unknown("the signature has no signer"))?;
+    let signer_info =
+        signer_infos.and_then(|s| s.children().next()).ok_or(unknown(t("the signature has no signer")))?;
     // SignerInfo { version, sid, digestAlgorithm, [0] signedAttrs, signatureAlgorithm, signature, ... }
     let parts: Vec<Tlv> = signer_info.children().collect();
-    let sid = parts.get(1).ok_or(unknown("the signer is not named"))?;
-    let digest_oid = parts.get(2).and_then(|a| a.children().next()).ok_or(unknown("no digest algorithm"))?;
-    let hash = HashAlg::from_oid(digest_oid.value).ok_or(unknown("the digest algorithm is not supported"))?;
+    let sid = parts.get(1).ok_or(unknown(t("the signer is not named")))?;
+    let digest_oid = parts.get(2).and_then(|a| a.children().next()).ok_or(unknown(t("no digest algorithm")))?;
+    let hash = HashAlg::from_oid(digest_oid.value).ok_or(unknown(t("the digest algorithm is not supported")))?;
     let signed_attrs = parts.iter().find(|p| p.tag == 0xA0);
     let after_attrs = parts.iter().skip(3).filter(|p| p.tag != 0xA0);
     let mut rest = after_attrs;
-    let sig_alg = rest.next().and_then(|a| a.children().next()).ok_or(unknown("no signature algorithm"))?;
-    let signature = rest.next().filter(|s| s.tag == OCTET_STRING).ok_or(unknown("no signature value"))?;
+    let sig_alg = rest.next().and_then(|a| a.children().next()).ok_or(unknown(t("no signature algorithm")))?;
+    let signature = rest.next().filter(|s| s.tag == OCTET_STRING).ok_or(unknown(t("no signature value")))?;
 
     // The signer's certificate: matched by issuer and serial number, or by key identifier.
     let cert = certs
         .iter()
         .filter_map(Certificate::parse)
         .find(|c| c.matches(sid))
-        .ok_or(unknown("the signer's certificate is not included"))?;
+        .ok_or(unknown(t("the signer's certificate is not included")))?;
     out.signer = cert.subject_name.clone();
     out.issuer = cert.issuer_name.clone();
     out.self_signed = cert.subject_raw == cert.issuer_raw;
@@ -135,9 +137,9 @@ fn verify(
                     let mut a = attr.children();
                     (a.next()?.value == OID_MESSAGE_DIGEST).then(|| a.next()?.children().next().map(|v| v.value))?
                 })
-                .ok_or(unknown("the signature does not record the document's digest"))?;
+                .ok_or(unknown(t("the signature does not record the document's digest")))?;
             if message_digest != digest.as_slice() {
-                return Err(Problem::Invalid("the document was changed after it was signed"));
+                return Err(Problem::Invalid(t("the document was changed after it was signed")));
             }
             // Signed as a SET OF (tag 0x31), not with its [0] tag.
             let mut encoded = attrs.raw.to_vec();
@@ -154,11 +156,11 @@ fn verify(
         (Key::Ec { curve, point }, oid) if oid.starts_with(OID_ECDSA_PREFIX) || oid == OID_EC_PUBLIC_KEY => {
             verify_ecdsa(*curve, point, &message_hash, signature.value)?
         }
-        (_, oid) if oid == OID_RSA_PSS => return Err(unknown("RSA-PSS signatures are not supported")),
-        _ => return Err(unknown("the signature algorithm is not supported")),
+        (_, oid) if oid == OID_RSA_PSS => return Err(unknown(t("RSA-PSS signatures are not supported"))),
+        _ => return Err(unknown(t("the signature algorithm is not supported"))),
     };
     if !ok {
-        return Err(Problem::Invalid("the signature does not match the signer's certificate"));
+        return Err(Problem::Invalid(t("the signature does not match the signer's certificate")));
     }
     Ok(if covers_whole { SigStatus::Valid } else { SigStatus::ChangedAfter })
 }
@@ -166,7 +168,7 @@ fn verify(
 fn verify_rsa(n: &[u8], e: &[u8], hash: HashAlg, hashed: &[u8], sig: &[u8]) -> Result<bool, Problem> {
     use rsa::{BoxedUint, Pkcs1v15Sign, PublicKey};
     let key = PublicKey::new(BoxedUint::from_be_slice_vartime(n), BoxedUint::from_be_slice_vartime(e))
-        .map_err(|_| unknown("the RSA key is not usable"))?;
+        .map_err(|_| unknown(t("the RSA key is not usable")))?;
     let scheme = match hash {
         HashAlg::Sha1 => Pkcs1v15Sign::new::<Sha1>(),
         HashAlg::Sha256 => Pkcs1v15Sign::new::<Sha256>(),
@@ -182,7 +184,7 @@ fn verify_ecdsa(curve: Curve, point: &[u8], hashed: &[u8], sig: &[u8]) -> Result
         Curve::P256 => 32,
         Curve::P384 => 48,
     };
-    let (seq, _) = Tlv::read(sig).ok_or(Problem::Invalid("the signature value cannot be read"))?;
+    let (seq, _) = Tlv::read(sig).ok_or(Problem::Invalid(t("the signature value cannot be read")))?;
     let mut rs = Vec::with_capacity(size * 2);
     for int in seq.children().take(2) {
         let v = int.value.strip_prefix(&[0]).unwrap_or(int.value);
@@ -198,12 +200,12 @@ fn verify_ecdsa(curve: Curve, point: &[u8], hashed: &[u8], sig: &[u8]) -> Result
     Ok(match curve {
         Curve::P256 => {
             use p256::ecdsa::{Signature, VerifyingKey, signature::hazmat::PrehashVerifier};
-            let key = VerifyingKey::from_sec1_bytes(point).map_err(|_| unknown("the EC key is not usable"))?;
+            let key = VerifyingKey::from_sec1_bytes(point).map_err(|_| unknown(t("the EC key is not usable")))?;
             Signature::from_slice(&rs).is_ok_and(|s| key.verify_prehash(hashed, &s).is_ok())
         }
         Curve::P384 => {
             use p384::ecdsa::{Signature, VerifyingKey, signature::hazmat::PrehashVerifier};
-            let key = VerifyingKey::from_sec1_bytes(point).map_err(|_| unknown("the EC key is not usable"))?;
+            let key = VerifyingKey::from_sec1_bytes(point).map_err(|_| unknown(t("the EC key is not usable")))?;
             Signature::from_slice(&rs).is_ok_and(|s| key.verify_prehash(hashed, &s).is_ok())
         }
     })

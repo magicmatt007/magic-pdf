@@ -2,6 +2,7 @@
 //! "Personal" store, as Acrobat uses it), including keys on smart cards: Windows
 //! does the signing and asks for a PIN itself when the key needs one.
 
+use crate::i18n::{t, tf};
 use std::ptr::{null, null_mut};
 
 use sha1::{Digest, Sha1};
@@ -34,7 +35,7 @@ impl Store {
                 name.as_ptr().cast(),
             )
         };
-        if h.is_null() { Err("the Windows certificate store could not be opened".into()) } else { Ok(Store(h)) }
+        if h.is_null() { Err(t("the Windows certificate store could not be opened").into()) } else { Ok(Store(h)) }
     }
 
     /// Calls `f` with each certificate (its context and DER bytes).
@@ -97,13 +98,13 @@ pub fn identity(thumb: &str) -> Result<SigningIdentity, String> {
         }
         true
     });
-    let ctx = found.ok_or("the certificate is no longer in the Windows certificate store")?;
+    let ctx = found.ok_or(t("the certificate is no longer in the Windows certificate store"))?;
     let key = StoreKey(ctx);
     let der = key.der().to_vec();
-    let kind = certificate_key_kind(&der).ok_or("this kind of key is not supported")?;
+    let kind = certificate_key_kind(&der).ok_or(t("this kind of key is not supported"))?;
     let chain = chain(ctx).unwrap_or_else(|| vec![der]);
     SigningIdentity::from_external(chain, Box::new(StoreKeyWithKind { key, kind }))
-        .ok_or_else(|| "the certificate cannot be read".to_string())
+        .ok_or_else(|| t("the certificate cannot be read").to_string())
 }
 
 /// The certificate chain as Windows builds it (signer first).
@@ -175,7 +176,7 @@ impl ExternalKey for StoreKeyWithKind {
             )
         };
         if ok == 0 || spec != CERT_NCRYPT_KEY_SPEC {
-            return Err("Windows did not give access to the certificate's private key".into());
+            return Err(t("Windows did not give access to the certificate's private key").into());
         }
         let padding = BCRYPT_PKCS1_PADDING_INFO {
             pszAlgId: if self.kind == KeyKind::P384 { BCRYPT_SHA384_ALGORITHM } else { BCRYPT_SHA256_ALGORITHM },
@@ -198,7 +199,7 @@ impl ExternalKey for StoreKeyWithKind {
             unsafe { NCryptFreeObject(handle) };
         }
         if result != 0 {
-            return Err(format!("Windows could not sign (error 0x{:08X})", result as u32));
+            return Err(tf("Windows could not sign (error {code})", &[("code", &format!("0x{:08X}", result as u32))]));
         }
         Ok(sig)
     }

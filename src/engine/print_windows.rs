@@ -1,6 +1,7 @@
 //! Native printing on Windows: the system print dialog, then each page is rendered by
 //! PDFium at printer resolution and sent to the printer with GDI.
 
+use crate::i18n::{t, tf};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::GlobalFree;
@@ -38,7 +39,7 @@ pub fn print(doc: &Doc, title: &str, current_page: usize) -> Result<Option<usize
     let hdc = pd.hDC;
     let result = (|| {
         if hdc.is_null() {
-            return Err("the printer could not be opened".to_string());
+            return Err(t("the printer could not be opened").to_string());
         }
         let pages: Vec<usize> = if pd.Flags & PD_PAGENUMS != 0 {
             let from = (pd.nFromPage as usize).max(1) - 1;
@@ -82,7 +83,7 @@ fn print_pages(
     };
     unsafe {
         if StartDocW(hdc, &info) <= 0 {
-            return Err("the print job could not be started".into());
+            return Err(t("the print job could not be started").into());
         }
         // Printable area in device pixels.
         let area_w = GetDeviceCaps(hdc, HORZRES as i32).max(1) as f32;
@@ -96,11 +97,11 @@ fn print_pages(
             let Some(page) = doc.page(index) else { continue };
             let Some(bgra) = page.render_for_print(w, h, false) else {
                 AbortDoc(hdc);
-                return Err(format!("page {} could not be rendered", index + 1));
+                return Err(tf("page {page} could not be rendered", &[("page", &(index + 1))]));
             };
             if StartPage(hdc) <= 0 {
                 AbortDoc(hdc);
-                return Err("the printer rejected a page".into());
+                return Err(t("the printer rejected a page").into());
             }
             let mut bmi: BITMAPINFO = std::mem::zeroed();
             bmi.bmiHeader = BITMAPINFOHEADER {
@@ -131,11 +132,11 @@ fn print_pages(
             );
             if EndPage(hdc) <= 0 {
                 AbortDoc(hdc);
-                return Err("the printer rejected a page".into());
+                return Err(t("the printer rejected a page").into());
             }
         }
         if EndDoc(hdc) <= 0 {
-            return Err("the print job could not be finished".into());
+            return Err(t("the print job could not be finished").into());
         }
     }
     Ok(())

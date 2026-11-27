@@ -47,7 +47,11 @@ fn german() -> &'static HashMap<&'static str, &'static str> {
 
 /// The text in the current language (the English text if there is no translation).
 pub fn t(s: &'static str) -> &'static str {
-    match language() {
+    translate(language(), s)
+}
+
+fn translate(lang: Lang, s: &'static str) -> &'static str {
+    match lang {
         Lang::En => s,
         Lang::De => german().get(s).copied().unwrap_or(s),
     }
@@ -55,7 +59,11 @@ pub fn t(s: &'static str) -> &'static str {
 
 /// Translates `s` and fills in `{name}` placeholders.
 pub fn tf(s: &'static str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
-    let mut out = t(s).to_string();
+    fill(t(s), args)
+}
+
+fn fill(s: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
+    let mut out = s.to_string();
     for (name, value) in args {
         out = out.replace(&format!("{{{name}}}"), &value.to_string());
     }
@@ -239,13 +247,73 @@ mod tests {
         );
     }
 
+    /// The engine's error messages reach users: texts on lines that make an error
+    /// go through `t`/`tf` too.
+    #[test]
+    fn engine_errors_are_translated() {
+        const ERROR_MARKERS: &[&str] =
+            &["Err(", "error(", "ok_or", "map_err", "unknown(", "Problem::Invalid(", "errors.push(", "Error {"];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine");
+        let mut found = Vec::new();
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            let src = std::fs::read_to_string(&p).unwrap();
+            // Leave out test modules (they end at a closing brace in column 0).
+            let mut in_test = false;
+            let lines: Vec<&str> = src
+                .lines()
+                .map(|l| {
+                    if l.starts_with("#[cfg(") && l.contains("test") {
+                        in_test = true;
+                    } else if in_test && l == "}" {
+                        in_test = false;
+                        return "";
+                    }
+                    if in_test { "" } else { l }
+                })
+                .collect();
+            for (n, line) in lines.iter().enumerate() {
+                let near = |l: &str| ERROR_MARKERS.iter().any(|m| l.contains(m)) && !l.contains("log::");
+                let logged = |l: &str| l.contains("log::");
+                if !(near(line) || n > 0 && near(lines[n - 1]))
+                    || line.trim_start().starts_with("//")
+                    || logged(line)
+                    || n > 0 && logged(lines[n - 1])
+                {
+                    continue;
+                }
+                let mut rest = *line;
+                while let Some(start) = rest.find('"') {
+                    let before = rest[..start].trim_end();
+                    let after = &rest[start + 1..];
+                    let Some(end) = after.find('"') else { break };
+                    let text = &after[..end];
+                    rest = &after[end + 1..];
+                    let words =
+                        text.split_whitespace().filter(|w| w.chars().filter(char::is_ascii_alphabetic).count() >= 3);
+                    let wrapped = before.ends_with("t(") || before.ends_with("tf(");
+                    let prev_wrapped = n > 0 && before.is_empty() && {
+                        let p = lines[n - 1].trim_end();
+                        p.ends_with("t(") || p.ends_with("tf(")
+                    };
+                    if words.count() >= 2 && !wrapped && !prev_wrapped {
+                        found.push(format!("{}:{}: {text:?}", p.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "engine messages not translated: {found:#?}");
+    }
+
     #[test]
     fn lookup_and_placeholders() {
-        set_language("de");
-        assert_eq!(t("Open…\tCtrl+O"), "Öffnen…\tCtrl+O");
-        assert_eq!(t("not translated"), "not translated");
-        assert_eq!(tf("Page {page} of {pages}", &[("page", &3), ("pages", &10)]), "Seite 3 von 10");
-        set_language("en");
-        assert_eq!(tf("Page {page} of {pages}", &[("page", &3), ("pages", &10)]), "Page 3 of 10");
+        // Without switching the language: other tests run at the same time and read
+        // English texts.
+        assert_eq!(translate(Lang::De, "Open…\tCtrl+O"), "Öffnen…\tCtrl+O");
+        assert_eq!(translate(Lang::De, "not translated"), "not translated");
+        let page = "Page {page} of {pages}";
+        let args: &[(&str, &dyn std::fmt::Display)] = &[("page", &3), ("pages", &10)];
+        assert_eq!(fill(translate(Lang::De, page), args), "Seite 3 von 10");
+        assert_eq!(fill(translate(Lang::En, page), args), "Page 3 of 10");
     }
 }
