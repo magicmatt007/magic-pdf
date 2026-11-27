@@ -173,7 +173,7 @@ impl Default for Settings {
             last_update_check: 0,
             skipped_version: None,
             recent_colors: Vec::new(),
-            restore_session: true,
+            restore_session: false,
             session: Vec::new(),
             session_active: 0,
             pinned: Vec::new(),
@@ -412,7 +412,7 @@ mod tests {
     fn old_settings_files_get_the_new_defaults() {
         let s: Settings = toml::from_str("show_sidebar = false\n").unwrap();
         assert!(!s.show_sidebar);
-        assert!(s.restore_session);
+        assert!(!s.restore_session);
         assert!(s.session.is_empty() && s.pinned.is_empty());
     }
 }
