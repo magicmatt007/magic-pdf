@@ -1,6 +1,8 @@
 //! PDFium engine: a dedicated worker thread that owns the PDFium library and all open
 //! documents. PDFium is not thread-safe, so the UI only talks to it through channels.
 
+#[cfg(windows)]
+pub mod cert_store;
 pub mod commands;
 pub mod compare;
 mod lopdf_ops;

@@ -23,12 +23,33 @@ pub struct SigningIdentity {
     pub issuer: String,
     /// The certificate was issued by the signer itself.
     pub self_signed: bool,
+    /// Last day the certificate is valid (YYYY-MM-DD).
+    pub expires: String,
 }
 
 enum Key {
     Rsa(Box<rsa::pkcs1v15::SigningKey<Sha256>>),
     P256(p256::ecdsa::SigningKey),
     P384(p384::ecdsa::SigningKey),
+    /// A key kept elsewhere (the Windows certificate store, a smart card).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    External(Box<dyn ExternalKey>),
+}
+
+/// The kind of key, which decides the digest and the signature format.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KeyKind {
+    Rsa,
+    P256,
+    P384,
+}
+
+/// A private key that signs digests itself (e.g. in the Windows certificate store).
+pub trait ExternalKey: Send + Sync {
+    fn kind(&self) -> KeyKind;
+    /// Signs a digest (SHA-256, or SHA-384 for P-384): for RSA a PKCS #1 v1.5
+    /// signature, for ECDSA the raw r and s values one after the other.
+    fn sign_digest(&self, digest: &[u8]) -> Result<Vec<u8>, String>;
 }
 
 impl std::fmt::Debug for SigningIdentity {
@@ -63,41 +84,57 @@ impl SigningIdentity {
         SigningIdentity::new(key, certs).ok_or(IdentityError::NoKey)
     }
 
+    /// A certificate chain (signer first) whose key signs by itself.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn from_external(chain: Vec<Vec<u8>>, key: Box<dyn ExternalKey>) -> Option<SigningIdentity> {
+        SigningIdentity::new(Key::External(key), chain)
+    }
+
+    fn kind(&self) -> KeyKind {
+        match &self.key {
+            Key::Rsa(_) => KeyKind::Rsa,
+            Key::P256(_) => KeyKind::P256,
+            Key::P384(_) => KeyKind::P384,
+            Key::External(k) => k.kind(),
+        }
+    }
+
     fn new(key: Key, chain: Vec<Vec<u8>>) -> Option<SigningIdentity> {
         let (tlv, _) = Tlv::read(chain.first()?)?;
         let cert = Certificate::parse(&tlv)?;
         let (name, issuer, self_signed) =
             (cert.subject_name.clone(), cert.issuer_name.clone(), cert.subject_raw == cert.issuer_raw);
-        Some(SigningIdentity { key, chain, name, issuer, self_signed })
+        let expires = cert.not_after.clone();
+        Some(SigningIdentity { key, chain, name, issuer, self_signed, expires })
     }
 
     fn digest_oid(&self) -> &'static [u8] {
-        match self.key {
-            Key::P384(_) => OID_SHA384,
+        match self.kind() {
+            KeyKind::P384 => OID_SHA384,
             _ => OID_SHA256,
         }
     }
 
     fn digest(&self, data: &[u8]) -> Vec<u8> {
-        match self.key {
-            Key::P384(_) => Sha384::digest(data).to_vec(),
+        match self.kind() {
+            KeyKind::P384 => Sha384::digest(data).to_vec(),
             _ => Sha256::digest(data).to_vec(),
         }
     }
 
     /// AlgorithmIdentifier of the signature.
     fn signature_algorithm(&self) -> Vec<u8> {
-        match self.key {
-            Key::Rsa(_) => seq(&[oid(OID_RSA), NULL.to_vec()]),
-            Key::P256(_) => seq(&[oid(OID_ECDSA_SHA256)]),
-            Key::P384(_) => seq(&[oid(OID_ECDSA_SHA384)]),
+        match self.kind() {
+            KeyKind::Rsa => seq(&[oid(OID_RSA), NULL.to_vec()]),
+            KeyKind::P256 => seq(&[oid(OID_ECDSA_SHA256)]),
+            KeyKind::P384 => seq(&[oid(OID_ECDSA_SHA384)]),
         }
     }
 
     /// Signs `data` (hashing it with the key's digest).
-    fn sign(&self, data: &[u8]) -> Vec<u8> {
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, String> {
         use rsa::signature::{SignatureEncoding, Signer};
-        match &self.key {
+        Ok(match &self.key {
             Key::Rsa(k) => k.sign(data).to_vec(),
             Key::P256(k) => {
                 let s: p256::ecdsa::Signature = k.sign(data);
@@ -107,7 +144,39 @@ impl SigningIdentity {
                 let s: p384::ecdsa::Signature = k.sign(data);
                 s.to_der().as_bytes().to_vec()
             }
-        }
+            Key::External(k) => {
+                let raw = k.sign_digest(&self.digest(data))?;
+                match k.kind() {
+                    KeyKind::Rsa => raw,
+                    // CMS wants ECDSA signatures as SEQUENCE { r INTEGER, s INTEGER }.
+                    _ => {
+                        let (r, s) = raw.split_at(raw.len() / 2);
+                        seq(&[der(INTEGER, &unsigned_integer(r)), der(INTEGER, &unsigned_integer(s))])
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// Name, issuer and expiry date (YYYY-MM-DD) of a certificate (DER).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn certificate_summary(der: &[u8]) -> Option<(String, String, String)> {
+    let (tlv, _) = Tlv::read(der)?;
+    let c = Certificate::parse(&tlv)?;
+    Some((c.subject_name.clone(), c.issuer_name.clone(), c.not_after.clone()))
+}
+
+/// The kind of key a certificate (DER) holds, if magic-pdf can sign with it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn certificate_key_kind(der: &[u8]) -> Option<KeyKind> {
+    use super::signatures::{Curve, Key as PublicKey};
+    let (tlv, _) = Tlv::read(der)?;
+    match Certificate::parse(&tlv)?.key {
+        PublicKey::Rsa { .. } => Some(KeyKind::Rsa),
+        PublicKey::Ec { curve: Curve::P256, .. } => Some(KeyKind::P256),
+        PublicKey::Ec { curve: Curve::P384, .. } => Some(KeyKind::P384),
+        PublicKey::Other => None,
     }
 }
 
@@ -535,7 +604,7 @@ fn cms(id: &SigningIdentity, digest: &[u8], req: &SignRequest, timestamp: Timest
         attribute(OID_SIGNING_CERT_V2, &seq(&[seq(&[seq(&[octets(&cert_hash)])])])),
     ];
     let signed_attrs = set_of(attrs);
-    let signature = id.sign(&signed_attrs);
+    let signature = id.sign(&signed_attrs)?;
 
     let (tlv, _) = Tlv::read(&id.chain[0]).ok_or("the certificate cannot be read")?;
     let cert = Certificate::parse(&tlv).ok_or("the certificate cannot be read")?;
@@ -609,6 +678,20 @@ fn der(tag: u8, content: &[u8]) -> Vec<u8> {
         out.extend(bytes);
     }
     out.extend_from_slice(content);
+    out
+}
+
+/// The contents of a DER INTEGER for an unsigned big-endian number.
+fn unsigned_integer(n: &[u8]) -> Vec<u8> {
+    let trimmed = match n.iter().position(|&b| b != 0) {
+        Some(i) => &n[i..],
+        None => &[0][..],
+    };
+    let mut out = Vec::with_capacity(trimmed.len() + 1);
+    if trimmed[0] & 0x80 != 0 {
+        out.push(0);
+    }
+    out.extend_from_slice(trimmed);
     out
 }
 
@@ -737,6 +820,40 @@ mod tests {
             .filter_map(|o| o.as_dict().ok()?.get(b"T").ok()?.as_str().ok().map(<[u8]>::to_vec))
             .collect();
         assert!(names.contains(&b"Signature2".to_vec()), "{names:?}");
+    }
+
+    /// An external key (as the Windows store provides) returning raw ECDSA r‖s and
+    /// RSA signatures over digests.
+    #[test]
+    fn external_keys_sign_digests() {
+        struct Ec(p256::ecdsa::SigningKey);
+        impl ExternalKey for Ec {
+            fn kind(&self) -> KeyKind {
+                KeyKind::P256
+            }
+            fn sign_digest(&self, digest: &[u8]) -> Result<Vec<u8>, String> {
+                use p256::ecdsa::signature::hazmat::PrehashSigner;
+                let s: p256::ecdsa::Signature = self.0.sign_prehash(digest).map_err(|e| e.to_string())?;
+                Ok(s.to_bytes().to_vec())
+            }
+        }
+        let p12 = p12_keystore::KeyStore::from_pkcs12(
+            &fixture("signer-ec.p12"),
+            "magic",
+            p12_keystore::Pkcs12ImportPolicy::Strict,
+        )
+        .unwrap();
+        let (_, chain) = p12.private_key_chain().unwrap();
+        use rsa::pkcs8::DecodePrivateKey;
+        let key = p256::ecdsa::SigningKey::from_pkcs8_der(chain.key().as_der()).unwrap();
+        let certs = chain.certs().iter().map(|c| c.as_der().to_vec()).collect();
+        let id = SigningIdentity::from_external(certs, Box::new(Ec(key))).unwrap();
+        assert_eq!(id.name, "Test Signer EC");
+        assert_eq!(id.expires.len(), 10, "{}", id.expires);
+        let signed = sign(&fixture("sample.pdf"), &request(0), &id, &|_, _| Err("offline".into())).unwrap();
+        assert_eq!(verify_all(&signed), vec![("Test Signer EC".to_string(), SigStatus::Valid)]);
+        assert_eq!(unsigned_integer(&[0, 0, 0x80, 1]), vec![0, 0x80, 1]);
+        assert_eq!(unsigned_integer(&[0, 0x7F]), vec![0x7F]);
     }
 
     #[test]

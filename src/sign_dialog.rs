@@ -21,6 +21,9 @@ pub struct SignDialog {
     /// Why the certificate could not be opened.
     problem: Option<String>,
     focus_password: bool,
+    /// Windows: the certificates in the Windows certificate store (listed once).
+    #[cfg(windows)]
+    store: Option<Result<Vec<crate::engine::cert_store::StoreCertificate>, String>>,
 }
 
 /// What the dialog asks the app to do.
@@ -37,7 +40,16 @@ pub enum SignAction {
 
 impl SignDialog {
     pub fn new(doc: DocId, page: usize, rect: PdfBox) -> SignDialog {
-        SignDialog { doc, page, rect, password: String::new(), problem: None, focus_password: true }
+        SignDialog {
+            doc,
+            page,
+            rect,
+            password: String::new(),
+            problem: None,
+            focus_password: true,
+            #[cfg(windows)]
+            store: None,
+        }
     }
 
     /// Shows the dialog. `identities` keeps opened certificates for this session, so
@@ -124,6 +136,16 @@ impl SignDialog {
         settings: &mut Settings,
         identities: &mut HashMap<PathBuf, Arc<SigningIdentity>>,
     ) -> Option<Arc<SigningIdentity>> {
+        #[cfg(windows)]
+        {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut settings.sign_from_store, true, t("Windows certificate store"));
+                ui.radio_value(&mut settings.sign_from_store, false, t("Certificate file"));
+            });
+            if settings.sign_from_store {
+                return self.store_ui(ui, settings, identities);
+            }
+        }
         ui.horizontal(|ui| {
             ui.label(t("Certificate"));
             match &settings.sign_certificate {
@@ -190,6 +212,65 @@ impl SignDialog {
         identities.get(&path).cloned()
     }
 
+    /// Windows: choosing a certificate from the Windows certificate store.
+    #[cfg(windows)]
+    fn store_ui(
+        &mut self,
+        ui: &mut Ui,
+        settings: &mut Settings,
+        identities: &mut HashMap<PathBuf, Arc<SigningIdentity>>,
+    ) -> Option<Arc<SigningIdentity>> {
+        use crate::engine::cert_store;
+        let list = match self.store.get_or_insert_with(cert_store::list) {
+            Ok(list) => list.clone(),
+            Err(e) => {
+                ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                return None;
+            }
+        };
+        if list.is_empty() {
+            ui.weak(t("There is no certificate with a private key in your Windows certificate store."));
+            return None;
+        }
+        let label = |c: &cert_store::StoreCertificate| {
+            tf(
+                "{name} (issued by {issuer}, valid until {date})",
+                &[("name", &c.name), ("issuer", &c.issuer), ("date", &c.expires)],
+            )
+        };
+        let chosen = settings
+            .sign_store_certificate
+            .as_ref()
+            .and_then(|t| list.iter().find(|c| &c.thumbprint == t))
+            .unwrap_or(&list[0])
+            .clone();
+        egui::ComboBox::from_id_salt("store_certificate").width(400.0).selected_text(label(&chosen)).show_ui(
+            ui,
+            |ui| {
+                for c in &list {
+                    if ui.selectable_label(c.thumbprint == chosen.thumbprint, label(c)).clicked() {
+                        settings.sign_store_certificate = Some(c.thumbprint.clone());
+                    }
+                }
+            },
+        );
+        let key = PathBuf::from(format!("windows-store:{}", chosen.thumbprint));
+        if !identities.contains_key(&key) {
+            match cert_store::identity(&chosen.thumbprint) {
+                Ok(id) => {
+                    identities.insert(key.clone(), Arc::new(id));
+                }
+                Err(e) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                    return None;
+                }
+            }
+        }
+        let id = identities.get(&key)?;
+        signer_ui(ui, id);
+        Some(id.clone())
+    }
+
     fn request(&self, settings: &Settings, id: &SigningIdentity) -> SignRequest {
         let date = pdf_date_now();
         let mut lines = vec![
@@ -220,6 +301,9 @@ impl SignDialog {
 /// Who the certificate names, and a warning for a self-made one.
 fn signer_ui(ui: &mut Ui, id: &SigningIdentity) {
     ui.label(tf("Signer: {name}", &[("name", &id.name)]));
+    if !id.expires.is_empty() {
+        ui.weak(tf("Valid until {date}", &[("date", &id.expires)]));
+    }
     if id.self_signed {
         ui.weak(t("A self-made certificate: others can check that the document is unchanged, but not who signed it."));
     } else {

@@ -65,7 +65,8 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
   afterwards; details list signer, time, reason and certification (whether the
   certificate is trusted or revoked is not checked)
 - Digital signing (File → Sign with certificate, or from the Signature tool): drag a box,
-  choose a certificate file (.p12/.pfx; RSA or ECDSA), and the box shows your signature
+  choose a certificate file (.p12/.pfx; RSA or ECDSA) or, on Windows, a certificate from
+  the Windows certificate store (smart cards included), and the box shows your signature
   picture, name and date. PAdES signatures (`ETSI.CAdES.detached`), optionally with a
   trusted timestamp (RFC 3161, DigiCert by default; `timestamp_server` in the settings
   file). Signed files are saved as incremental updates afterwards, so adding comments

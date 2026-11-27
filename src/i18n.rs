@@ -99,8 +99,9 @@ mod tests {
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.to_string_lossy().contains("i18n") {
                     let src = std::fs::read_to_string(&p).unwrap();
                     let b = src.as_bytes();
-                    for (i, _) in src.match_indices("(\"") {
-                        // `t("…")` or `tf("…")`, not some other function.
+                    for (i, _) in src.match_indices('(') {
+                        // `t("…")` or `tf("…")`, not some other function; the text may
+                        // start on the next line (as rustfmt puts long ones).
                         let start = match (i >= 2 && &b[i - 2..i] == b"tf", i >= 1 && b[i - 1] == b't') {
                             (true, _) => i - 2,
                             (false, true) => i - 1,
@@ -109,7 +110,12 @@ mod tests {
                         if start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
                             continue;
                         }
-                        let rest = &src[i + 2..];
+                        let after = &src[i + 1..];
+                        let skipped = after.len() - after.trim_start().len();
+                        if !after[skipped..].starts_with('"') {
+                            continue;
+                        }
+                        let rest = &src[i + 1 + skipped + 1..];
                         let mut end = 0;
                         let mut escaped = false;
                         for (j, c) in rest.char_indices() {

@@ -251,12 +251,12 @@ impl HashAlg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Curve {
+pub(super) enum Curve {
     P256,
     P384,
 }
 
-enum Key<'a> {
+pub(super) enum Key<'a> {
     Rsa { n: &'a [u8], e: &'a [u8] },
     Ec { curve: Curve, point: &'a [u8] },
     Other,
@@ -268,9 +268,11 @@ pub(super) struct Certificate<'a> {
     pub(super) subject_raw: &'a [u8],
     pub(super) issuer_name: String,
     pub(super) subject_name: String,
+    /// End of validity as YYYY-MM-DD (empty if unreadable).
+    pub(super) not_after: String,
     /// Subject key identifier extension, if any.
     key_id: Option<&'a [u8]>,
-    key: Key<'a>,
+    pub(super) key: Key<'a>,
 }
 
 impl<'a> Certificate<'a> {
@@ -282,7 +284,8 @@ impl<'a> Certificate<'a> {
         if f.first()?.tag == 0xA0 {
             f.remove(0);
         }
-        let (serial, issuer, subject, spki) = (f.first()?, f.get(2)?, f.get(4)?, f.get(5)?);
+        let (serial, issuer, validity, subject, spki) = (f.first()?, f.get(2)?, f.get(3)?, f.get(4)?, f.get(5)?);
+        let not_after = validity.children().nth(1).map(|t| asn1_date(t.tag, t.value)).unwrap_or_default();
         let mut spki_parts = spki.children();
         let alg = spki_parts.next()?;
         let bits = spki_parts.next()?.value.get(1..)?; // BIT STRING: skip the unused-bits byte
@@ -317,6 +320,7 @@ impl<'a> Certificate<'a> {
             subject_raw: subject.raw,
             issuer_name: name(issuer),
             subject_name: name(subject),
+            not_after,
             key_id,
             key,
         })
@@ -344,6 +348,20 @@ fn name(n: &Tlv) -> String {
         })
     };
     attr(OID_CN).or_else(|| attr(OID_O)).unwrap_or_default()
+}
+
+/// A UTCTime (YYMMDD…, tag 0x17) or GeneralizedTime (YYYYMMDD…) as YYYY-MM-DD.
+fn asn1_date(tag: u8, v: &[u8]) -> String {
+    let s = String::from_utf8_lossy(v);
+    let (year, rest) = match tag {
+        0x17 if s.len() >= 6 => {
+            let yy: u32 = s[..2].parse().unwrap_or(0);
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, &s[2..])
+        }
+        0x18 if s.len() >= 8 => (s[..4].parse().unwrap_or(0), &s[4..]),
+        _ => return String::new(),
+    };
+    format!("{year:04}-{}-{}", &rest[..2], &rest[2..4])
 }
 
 fn decode_string(tag: u8, v: &[u8]) -> String {

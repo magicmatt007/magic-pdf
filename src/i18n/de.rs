@@ -838,4 +838,12 @@ pub static TEXTS: &[(&str, &str)] = &[
         "the timestamp server {server} could not be reached: {e}",
         "der Zeitstempel-Server {server} war nicht erreichbar: {e}",
     ),
+    ("Certificate file", "Zertifikatsdatei"),
+    (
+        "There is no certificate with a private key in your Windows certificate store.",
+        "In Ihrem Windows-Zertifikatspeicher gibt es kein Zertifikat mit privatem Schlüssel.",
+    ),
+    ("Valid until {date}", "Gültig bis {date}"),
+    ("Windows certificate store", "Windows-Zertifikatspeicher"),
+    ("{name} (issued by {issuer}, valid until {date})", "{name} (ausgestellt von {issuer}, gültig bis {date})"),
 ];

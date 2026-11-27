@@ -150,6 +150,10 @@ pub struct Settings {
     pub signatures: Vec<Signature>,
     /// Digital signatures: the certificate file last used (never its password).
     pub sign_certificate: Option<PathBuf>,
+    /// Windows: sign with a certificate from the Windows certificate store (its
+    /// thumbprint in `sign_store_certificate`) instead of a certificate file.
+    pub sign_from_store: bool,
+    pub sign_store_certificate: Option<String>,
     /// Add a trusted timestamp from `timestamp_server` when signing.
     pub sign_timestamp: bool,
     pub sign_reason: String,
@@ -189,6 +193,8 @@ impl Default for Settings {
             pinned: Vec::new(),
             signatures: Vec::new(),
             sign_certificate: None,
+            sign_from_store: cfg!(windows),
+            sign_store_certificate: None,
             sign_timestamp: true,
             sign_reason: String::new(),
             sign_location: String::new(),
