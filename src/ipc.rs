@@ -200,10 +200,7 @@ fn format_window(info: &WindowInfo) -> String {
 fn parse_window(line: &str) -> WindowInfo {
     let (rect, title) = line.trim_end().split_once('\t').unwrap_or((line.trim_end(), ""));
     let nums: Vec<f32> = rect.split(' ').filter_map(|n| n.parse().ok()).collect();
-    WindowInfo {
-        rect: (nums.len() == 4).then(|| [nums[0], nums[1], nums[2], nums[3]]),
-        title: unescape(title),
-    }
+    WindowInfo { rect: (nums.len() == 4).then(|| [nums[0], nums[1], nums[2], nums[3]]), title: unescape(title) }
 }
 
 /// This instance's listener and registry entry (removed on drop).
@@ -228,22 +225,14 @@ impl Server {
         let window = Arc::new(Mutex::new(WindowInfo::default()));
         let (tx, rx) = std::sync::mpsc::channel();
         let (t, w) = (token.clone(), window.clone());
-        std::thread::Builder::new()
-            .name("ipc".into())
-            .spawn(move || serve(listener, t, w, tx, wake))?;
+        std::thread::Builder::new().name("ipc".into()).spawn(move || serve(listener, t, w, tx, wake))?;
         let registry_file = dir.and_then(|dir| {
             std::fs::create_dir_all(&dir).ok()?;
             let file = dir.join(std::process::id().to_string());
             write_private(&file, &format!("{port} {token}\n")).ok()?;
             Some(file)
         });
-        Ok(Server {
-            messages: rx,
-            window,
-            registry_file,
-            port,
-            token,
-        })
+        Ok(Server { messages: rx, window, registry_file, port, token })
     }
 
     /// Marks this window as the most recently used one (it then receives files
@@ -350,11 +339,7 @@ fn peers_in(dir: Option<PathBuf>) -> Vec<Peer> {
         let (Some(port), Some(token)) = (parts.next().and_then(|p| p.parse().ok()), parts.next()) else {
             continue;
         };
-        let peer = Peer {
-            pid,
-            port,
-            token: token.to_string(),
-        };
+        let peer = Peer { pid, port, token: token.to_string() };
         // Alive if it answers; stale entries (crashed instances) are cleaned up.
         if peer.window().is_none() {
             let _ = std::fs::remove_file(e.path());
@@ -383,15 +368,9 @@ mod tests {
         let (token, command, back) = decode(&encode("secret", cmd, &args));
         assert_eq!(token, "secret");
         assert_eq!(parse_message(&command, &back), Some(Message::Take(t)));
-        let info = WindowInfo {
-            rect: Some([10.0, 20.0, 800.0, 600.0]),
-            title: "a\tb — magic-pdf".into(),
-        };
+        let info = WindowInfo { rect: Some([10.0, 20.0, 800.0, 600.0]), title: "a\tb — magic-pdf".into() };
         assert_eq!(parse_window(&format_window(&info)), info);
-        let none = WindowInfo {
-            rect: None,
-            title: String::new(),
-        };
+        let none = WindowInfo { rect: None, title: String::new() };
         assert_eq!(parse_window(&format_window(&none)), none);
     }
 
@@ -400,30 +379,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("magic-pdf-ipc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let server = Server::start_in(Some(dir.clone()), || {}).unwrap();
-        *server.window.lock().unwrap() = WindowInfo {
-            rect: Some([1.0, 2.0, 3.0, 4.0]),
-            title: "doc.pdf — magic-pdf".into(),
-        };
+        *server.window.lock().unwrap() =
+            WindowInfo { rect: Some([1.0, 2.0, 3.0, 4.0]), title: "doc.pdf — magic-pdf".into() };
         // Pretend to be another process: the registry entry carries our own pid,
         // so read it directly instead of through `peers_in` (which skips itself).
         let text = std::fs::read_to_string(dir.join(std::process::id().to_string())).unwrap();
         let mut parts = text.split_whitespace();
-        let peer = Peer {
-            pid: 0,
-            port: parts.next().unwrap().parse().unwrap(),
-            token: parts.next().unwrap().to_string(),
-        };
+        let peer =
+            Peer { pid: 0, port: parts.next().unwrap().parse().unwrap(), token: parts.next().unwrap().to_string() };
         assert_eq!(peer.window().unwrap().title, "doc.pdf — magic-pdf");
         assert!(peer.send(&Message::Open(PathBuf::from("/x/y.pdf"))));
-        assert_eq!(
-            server.messages.recv_timeout(TIMEOUT).unwrap(),
-            Message::Open(PathBuf::from("/x/y.pdf"))
-        );
+        assert_eq!(server.messages.recv_timeout(TIMEOUT).unwrap(), Message::Open(PathBuf::from("/x/y.pdf")));
         // A wrong token is ignored.
-        let intruder = Peer {
-            token: "guess".into(),
-            ..peer.clone()
-        };
+        let intruder = Peer { token: "guess".into(), ..peer.clone() };
         assert!(!intruder.send(&Message::Open(PathBuf::from("/evil.pdf"))));
         assert!(server.messages.recv_timeout(Duration::from_millis(300)).is_err());
         // The start-up lock: taken once, released only by its holder.

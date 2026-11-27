@@ -1,8 +1,8 @@
 //! Colour picker: a swatch button opening a palette of 70 colours, recent colours,
 //! a custom colour (colour square plus hex input) and optionally "No fill".
 
-use std::hash::Hash;
 use crate::i18n::t;
+use std::hash::Hash;
 
 use eframe::egui::{self, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Ui, vec2};
 
@@ -175,41 +175,35 @@ fn picker(ui: &mut Ui, id: Id, current: Option<Rgb>, allow_none: bool, recent: &
     }
     ui.add_space(6.0);
     ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-    egui::CollapsingHeader::new("Custom colour")
-        .id_salt(id.with("custom"))
-        .show(ui, |ui| {
-            let work_id = id.with("work");
-            let hex_id = id.with("hex");
-            let mut work: Color32 = ui
-                .ctx()
-                .data(|d| d.get_temp(work_id))
-                .unwrap_or_else(|| rgb(current.unwrap_or([0, 0, 0])));
-            if egui::color_picker::color_picker_color32(ui, &mut work, egui::color_picker::Alpha::Opaque) {
-                ui.ctx().data_mut(|d| {
-                    d.insert_temp(work_id, work);
-                    d.insert_temp(hex_id, to_hex([work.r(), work.g(), work.b()]));
-                });
-            }
-            ui.horizontal(|ui| {
-                let mut hex: String = ui
-                    .ctx()
-                    .data(|d| d.get_temp(hex_id))
-                    .unwrap_or_else(|| to_hex([work.r(), work.g(), work.b()]));
-                let edit = ui.add(egui::TextEdit::singleline(&mut hex).desired_width(80.0));
-                if edit.changed()
-                    && let Some(c) = from_hex(&hex)
-                {
-                    work = rgb(c);
-                    ui.ctx().data_mut(|d| d.insert_temp(work_id, work));
-                }
-                ui.ctx().data_mut(|d| d.insert_temp(hex_id, hex));
-                let (r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
-                ui.painter().rect_filled(r, CornerRadius::same(3), work);
-                if ui.button(t("Use")).clicked() {
-                    picked = Some(Some([work.r(), work.g(), work.b()]));
-                }
+    egui::CollapsingHeader::new(t("Custom colour")).id_salt(id.with("custom")).show(ui, |ui| {
+        let work_id = id.with("work");
+        let hex_id = id.with("hex");
+        let mut work: Color32 =
+            ui.ctx().data(|d| d.get_temp(work_id)).unwrap_or_else(|| rgb(current.unwrap_or([0, 0, 0])));
+        if egui::color_picker::color_picker_color32(ui, &mut work, egui::color_picker::Alpha::Opaque) {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(work_id, work);
+                d.insert_temp(hex_id, to_hex([work.r(), work.g(), work.b()]));
             });
+        }
+        ui.horizontal(|ui| {
+            let mut hex: String =
+                ui.ctx().data(|d| d.get_temp(hex_id)).unwrap_or_else(|| to_hex([work.r(), work.g(), work.b()]));
+            let edit = ui.add(egui::TextEdit::singleline(&mut hex).desired_width(80.0));
+            if edit.changed()
+                && let Some(c) = from_hex(&hex)
+            {
+                work = rgb(c);
+                ui.ctx().data_mut(|d| d.insert_temp(work_id, work));
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(hex_id, hex));
+            let (r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::same(3), work);
+            if ui.button(t("Use")).clicked() {
+                picked = Some(Some([work.r(), work.g(), work.b()]));
+            }
         });
+    });
     picked
 }
 
@@ -280,9 +274,8 @@ mod tests {
         let swatch: Rect = ctx.data(|d| d.get_temp(Id::unique("test_color_button"))).unwrap();
         frame(click(swatch.center()));
         frame(Vec::new());
-        let cell_rect: Rect = ctx
-            .data(|d| d.get_temp(Id::unique(("test_palette_cell", 3usize, 7usize))))
-            .expect("picker open");
+        let cell_rect: Rect =
+            ctx.data(|d| d.get_temp(Id::unique(("test_palette_cell", 3usize, 7usize)))).expect("picker open");
         frame(click(cell_rect.center()));
         let expected = palette()[3][7];
         assert_eq!(result, Some(Some(expected)));

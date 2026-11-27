@@ -22,12 +22,7 @@ pub fn words(text: &PageText) -> Vec<Word> {
                     w.text.push(c.ch);
                     w.rect = w.rect.union(r);
                 }
-                None => {
-                    current = Some(Word {
-                        text: c.ch.to_string(),
-                        rect: r,
-                    })
-                }
+                None => current = Some(Word { text: c.ch.to_string(), rect: r }),
             },
             _ => out.extend(current.take()),
         }
@@ -55,21 +50,14 @@ impl PageDiff {
 
 fn joined(words: &[Word]) -> String {
     let s = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-    if s.chars().count() > 60 {
-        format!("{}…", s.chars().take(60).collect::<String>())
-    } else {
-        s
-    }
+    if s.chars().count() > 60 { format!("{}…", s.chars().take(60).collect::<String>()) } else { s }
 }
 
 /// Word differences between page `page` of two documents.
 pub fn diff_page(page: usize, a: &[Word], b: &[Word]) -> PageDiff {
     let ta: Vec<&str> = a.iter().map(|w| w.text.as_str()).collect();
     let tb: Vec<&str> = b.iter().map(|w| w.text.as_str()).collect();
-    let mut d = PageDiff {
-        page,
-        ..Default::default()
-    };
+    let mut d = PageDiff { page, ..Default::default() };
     for op in capture_diff_slices(Algorithm::Myers, &ta, &tb) {
         let (tag, ra, rb) = op.as_tag_tuple();
         if tag == DiffTag::Equal {
@@ -99,12 +87,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, ch)| TextChar {
                     ch,
-                    rect: Some(PdfBox {
-                        left: i as f32 * 10.0,
-                        bottom: 0.0,
-                        right: i as f32 * 10.0 + 8.0,
-                        top: 10.0,
-                    }),
+                    rect: Some(PdfBox { left: i as f32 * 10.0, bottom: 0.0, right: i as f32 * 10.0 + 8.0, top: 10.0 }),
                 })
                 .collect(),
             links: Vec::new(),

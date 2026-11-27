@@ -38,6 +38,7 @@ A test build without publishing: Actions → Release → Run workflow (publish u
 scripts/fetch-pdfium.sh            # once: downloads libpdfium into third_party/
 cargo test
 cargo clippy --all-targets         # must be clean
+cargo fmt                          # style from rustfmt.toml; CI checks it
 ```
 
 - Every user-visible text goes through `t()`/`tf()` (`src/i18n.rs`) and needs a German

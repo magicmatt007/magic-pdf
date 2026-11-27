@@ -63,22 +63,10 @@ fn finish_line(chars: &[(char, CharStyle)], fonts: &dyn FontSet, empty_style: Ch
             width = x;
         }
     }
-    let styles: Vec<CharStyle> = if chars.is_empty() {
-        vec![empty_style]
-    } else {
-        chars.iter().map(|c| c.1).collect()
-    };
+    let styles: Vec<CharStyle> = if chars.is_empty() { vec![empty_style] } else { chars.iter().map(|c| c.1).collect() };
     let size = styles.iter().map(|s| s.size).fold(0.0, f32::max);
-    let ascent = styles
-        .iter()
-        .map(|s| fonts.font(s.bold, s.italic).ascent() * s.size)
-        .fold(0.0, f32::max);
-    Line {
-        glyphs,
-        width,
-        height: size * LINE_HEIGHT,
-        ascent,
-    }
+    let ascent = styles.iter().map(|s| fonts.font(s.bold, s.italic).ascent() * s.size).fold(0.0, f32::max);
+    Line { glyphs, width, height: size * LINE_HEIGHT, ascent }
 }
 
 /// Breaks rich text into lines no wider than `max_width`. Paragraphs (newlines) are
@@ -111,11 +99,7 @@ pub fn layout(rich: &RichText, max_width: f32, fonts: &dyn FontSet) -> Vec<Line>
         let mut line: Vec<(char, CharStyle)> = Vec::new();
         let mut line_w = 0.0;
         for word in words {
-            let ink: f32 = word
-                .iter()
-                .filter(|(c, _)| !c.is_whitespace())
-                .map(|(c, s)| advance(fonts, *c, s))
-                .sum();
+            let ink: f32 = word.iter().filter(|(c, _)| !c.is_whitespace()).map(|(c, s)| advance(fonts, *c, s)).sum();
             let full: f32 = word.iter().map(|(c, s)| advance(fonts, *c, s)).sum();
             if line_w + ink <= max_width || line.is_empty() && ink <= max_width {
                 line.extend(word);
@@ -150,12 +134,7 @@ pub fn box_height(lines: &[Line]) -> f32 {
 }
 
 fn rgb(c: Rgb) -> String {
-    format!(
-        "{:.3} {:.3} {:.3}",
-        c[0] as f32 / 255.0,
-        c[1] as f32 / 255.0,
-        c[2] as f32 / 255.0
-    )
+    format!("{:.3} {:.3} {:.3}", c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0)
 }
 
 /// Lays out `rich` in a box at `rect`. The box keeps its top edge, width and height,
@@ -164,10 +143,7 @@ fn rgb(c: Rgb) -> String {
 pub fn appearance(rect: PdfBox, rich: &RichText, style: &BoxStyle, fonts: &dyn FontSet) -> (PdfBox, String) {
     let inner_w = (rect.right - rect.left - 2.0 * PADDING).max(1.0);
     let lines = layout(rich, inner_w, fonts);
-    let r = PdfBox {
-        bottom: rect.top - box_height(&lines).max(rect.top - rect.bottom),
-        ..rect
-    };
+    let r = PdfBox { bottom: rect.top - box_height(&lines).max(rect.top - rect.bottom), ..rect };
     let (w, h) = (r.right - r.left, r.top - r.bottom);
     let mut s = String::from("q\n");
     if let Some(fill) = style.fill {
@@ -333,7 +309,10 @@ mod tests {
     #[test]
     fn a_box_background_is_the_colour_its_rectangle_is_filled_with() {
         // PDF-XChange: filled and stroked in one go.
-        assert_eq!(rectangle_fill("1 1 0 rg 1 0 0 RG 1 w 79 671 78 49 re B BT 0 0 0 rg (Box 1) Tj ET"), Some([255, 255, 0]));
+        assert_eq!(
+            rectangle_fill("1 1 0 rg 1 0 0 RG 1 w 79 671 78 49 re B BT 0 0 0 rg (Box 1) Tj ET"),
+            Some([255, 255, 0])
+        );
         // magic-pdf: fill, then border.
         assert_eq!(rectangle_fill("0 1 0 rg 300 600 100 60 re f 0 0 1 RG 300 600 100 60 re S"), Some([0, 255, 0]));
         // Only a stroked rectangle and red text: no background.
@@ -370,13 +349,7 @@ mod tests {
     }
 
     fn plain(text: &str, size: f32) -> RichText {
-        RichText::plain(
-            text,
-            CharStyle {
-                size,
-                ..Default::default()
-            },
-        )
+        RichText::plain(text, CharStyle { size, ..Default::default() })
     }
 
     fn line_texts(lines: &[Line]) -> Vec<String> {
@@ -396,22 +369,9 @@ mod tests {
     #[test]
     fn mixed_styles_measure_and_size_lines() {
         let normal = CharStyle::default();
-        let big_bold = CharStyle {
-            bold: true,
-            size: 20.0,
-            ..Default::default()
-        };
+        let big_bold = CharStyle { bold: true, size: 20.0, ..Default::default() };
         let rich = RichText {
-            spans: vec![
-                Span {
-                    text: "ab ".into(),
-                    style: normal,
-                },
-                Span {
-                    text: "CD".into(),
-                    style: big_bold,
-                },
-            ],
+            spans: vec![Span { text: "ab ".into(), style: normal }, Span { text: "CD".into(), style: big_bold }],
             align: Align::Left,
         };
         let lines = layout(&rich, 1000.0, &fonts());
@@ -424,17 +384,9 @@ mod tests {
 
     #[test]
     fn appearance_fits_height_aligns_and_decorates() {
-        let style = BoxStyle {
-            border: ([255, 0, 0], 1.0),
-            fill: Some([255, 255, 255]),
-        };
+        let style = BoxStyle { border: ([255, 0, 0], 1.0), fill: Some([255, 255, 255]) };
         // A box only 1 pt tall grows to fit the text.
-        let rect = PdfBox {
-            left: 100.0,
-            bottom: 499.0,
-            right: 148.0,
-            top: 500.0,
-        };
+        let rect = PdfBox { left: 100.0, bottom: 499.0, right: 148.0, top: 500.0 };
         let (r, s) = appearance(rect, &plain("hello world", 10.0), &style, &fonts());
         // Two lines: 2 * 4 padding + 2 * 12.5 line height.
         assert_eq!(r.top, 500.0);
@@ -462,16 +414,8 @@ mod tests {
 
     #[test]
     fn a_box_taller_than_its_text_keeps_its_height() {
-        let style = BoxStyle {
-            border: ([0, 0, 0], 1.0),
-            fill: None,
-        };
-        let rect = PdfBox {
-            left: 100.0,
-            bottom: 300.0,
-            right: 300.0,
-            top: 500.0,
-        };
+        let style = BoxStyle { border: ([0, 0, 0], 1.0), fill: None };
+        let rect = PdfBox { left: 100.0, bottom: 300.0, right: 300.0, top: 500.0 };
         let (r, _) = appearance(rect, &plain("short", 10.0), &style, &fonts());
         assert_eq!(r, rect);
     }
@@ -481,18 +425,8 @@ mod tests {
         let red = [220, 30, 30];
         let mut rich = RichText {
             spans: vec![
-                Span {
-                    text: "normal ".into(),
-                    style: CharStyle::default(),
-                },
-                Span {
-                    text: "big red".into(),
-                    style: CharStyle {
-                        size: 18.0,
-                        color: red,
-                        ..Default::default()
-                    },
-                },
+                Span { text: "normal ".into(), style: CharStyle::default() },
+                Span { text: "big red".into(), style: CharStyle { size: 18.0, color: red, ..Default::default() } },
             ],
             align: Align::Left,
         };

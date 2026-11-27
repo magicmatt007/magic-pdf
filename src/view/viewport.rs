@@ -37,11 +37,7 @@ pub struct Viewport {
 
 impl Default for Viewport {
     fn default() -> Self {
-        Self {
-            zoom: 1.0,
-            offset: Vec2::ZERO,
-            fit: FitMode::Height,
-        }
+        Self { zoom: 1.0, offset: Vec2::ZERO, fit: FitMode::Height }
     }
 }
 
@@ -135,11 +131,7 @@ mod tests {
 
     #[test]
     fn screen_doc_roundtrip() {
-        let vp = Viewport {
-            zoom: 2.0,
-            offset: vec2(30.0, 40.0),
-            fit: FitMode::None,
-        };
+        let vp = Viewport { zoom: 2.0, offset: vec2(30.0, 40.0), fit: FitMode::None };
         let p = pos2(123.0, 456.0);
         let back = vp.to_doc(vp.to_screen(p, view()), view());
         assert!((back - p).length() < 1e-4);
@@ -169,11 +161,7 @@ mod tests {
 
     #[test]
     fn clamp_centres_small_content_and_bounds_large() {
-        let mut vp = Viewport {
-            zoom: 1.0,
-            offset: vec2(-500.0, 5000.0),
-            fit: FitMode::None,
-        };
+        let mut vp = Viewport { zoom: 1.0, offset: vec2(-500.0, 5000.0), fit: FitMode::None };
         vp.clamp(vec2(400.0, 2000.0), vec2(800.0, 600.0));
         assert_eq!(vp.offset.x, -200.0);
         assert_eq!(vp.offset.y, 1400.0);
@@ -181,11 +169,7 @@ mod tests {
 
     #[test]
     fn reveal_offscreen_rect() {
-        let mut vp = Viewport {
-            zoom: 1.0,
-            offset: Vec2::ZERO,
-            fit: FitMode::None,
-        };
+        let mut vp = Viewport { zoom: 1.0, offset: Vec2::ZERO, fit: FitMode::None };
         let target = Rect::from_min_size(pos2(2000.0, 100.0), vec2(50.0, 20.0));
         vp.reveal(target, view());
         assert!(vp.visible_doc_rect(view()).contains_rect(target));

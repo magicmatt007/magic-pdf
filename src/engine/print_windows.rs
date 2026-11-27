@@ -5,8 +5,8 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::GlobalFree;
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, GetDeviceCaps, HORZRES, SRCCOPY,
-    StretchDIBits, VERTRES,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, GetDeviceCaps, HORZRES, SRCCOPY, StretchDIBits,
+    VERTRES,
 };
 use windows_sys::Win32::Storage::Xps::{AbortDoc, DOCINFOW, EndDoc, EndPage, StartDocW, StartPage};
 use windows_sys::Win32::UI::Controls::Dialogs::{

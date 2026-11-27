@@ -25,21 +25,15 @@ pub fn family(bold: bool, italic: bool) -> egui::FontFamily {
 /// Makes the four faces available to egui.
 pub fn install(ctx: &egui::Context) {
     use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
-    for (bold, italic, bytes) in [
-        (false, false, REGULAR),
-        (true, false, BOLD),
-        (false, true, ITALIC),
-        (true, true, BOLD_ITALIC),
-    ] {
+    for (bold, italic, bytes) in
+        [(false, false, REGULAR), (true, false, BOLD), (false, true, ITALIC), (true, true, BOLD_ITALIC)]
+    {
         let family = family(bold, italic);
         let egui::FontFamily::Name(name) = &family else { continue };
         ctx.add_font(FontInsert::new(
             name,
             egui::FontData::from_static(bytes),
-            vec![InsertFontFamily {
-                family: family.clone(),
-                priority: FontPriority::Highest,
-            }],
+            vec![InsertFontFamily { family: family.clone(), priority: FontPriority::Highest }],
         ));
     }
 }
@@ -58,10 +52,7 @@ pub fn install_ui(ctx: &egui::Context) {
     ctx.add_font(FontInsert::new(
         "noto-sans-ui",
         data,
-        vec![InsertFontFamily {
-            family: egui::FontFamily::Proportional,
-            priority: FontPriority::Highest,
-        }],
+        vec![InsertFontFamily { family: egui::FontFamily::Proportional, priority: FontPriority::Highest }],
     ));
     ctx.all_styles_mut(|style| style.visuals.text_options.subpixel_binning = false);
 }

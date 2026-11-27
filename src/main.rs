@@ -2,18 +2,18 @@
 
 mod app;
 mod document;
+mod einvoice;
 mod engine;
 mod fonts;
-mod einvoice;
 mod i18n;
 mod icons;
 mod ipc;
 mod keys;
+#[cfg(target_os = "macos")]
+mod macos;
 mod ocr_dialog;
 #[cfg(target_os = "linux")]
 mod pinch;
-#[cfg(target_os = "macos")]
-mod macos;
 mod print;
 mod reveal;
 mod settings;
@@ -66,13 +66,8 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
 
 /// Hands the files to an already running magic-pdf. Returns true if it took them.
 fn hand_to_running_instance(files: &[PathBuf]) -> bool {
-    let files: Vec<PathBuf> = files
-        .iter()
-        .map(|f| std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()))
-        .collect();
-    ipc::peers()
-        .into_iter()
-        .any(|peer| files.iter().all(|f| peer.send(&ipc::Message::Open(f.clone()))))
+    let files: Vec<PathBuf> = files.iter().map(|f| std::fs::canonicalize(f).unwrap_or_else(|_| f.clone())).collect();
+    ipc::peers().into_iter().any(|peer| files.iter().all(|f| peer.send(&ipc::Message::Open(f.clone()))))
 }
 
 fn main() -> eframe::Result {
@@ -125,15 +120,8 @@ fn main() -> eframe::Result {
         // A tab dropped outside its window: open the new window there.
         viewport = viewport.with_position([x - 120.0, y - 60.0]).with_inner_size([1200.0, 800.0]);
     }
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "magic-pdf",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))),
-    )
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    eframe::run_native("magic-pdf", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))))
 }
 
 #[cfg(test)]
@@ -154,12 +142,7 @@ mod tests {
         assert!(a.new_window);
         assert_eq!(
             a.take,
-            Some(ipc::TabTransfer {
-                file: "/tmp/x.pdf".into(),
-                original: "/home/y.pdf".into(),
-                page: 3,
-                dirty: true,
-            })
+            Some(ipc::TabTransfer { file: "/tmp/x.pdf".into(), original: "/home/y.pdf".into(), page: 3, dirty: true })
         );
         assert!(a.files.is_empty());
     }

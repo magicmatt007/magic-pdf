@@ -1,7 +1,7 @@
 //! The "Recognise text (OCR)" dialog: choose pages and languages, show progress.
 
-use std::path::PathBuf;
 use crate::i18n::{t, tf};
+use std::path::PathBuf;
 
 use eframe::egui;
 
@@ -67,9 +67,8 @@ fn language_name(code: &str) -> Option<&'static str> {
 
 /// The Tesseract code for the user's locale language, if it is a common one.
 fn locale_language() -> Option<&'static str> {
-    let lang = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))?;
+    let lang =
+        ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))?;
     Some(match lang.get(..2)? {
         "de" => "deu",
         "fr" => "fra",
@@ -128,14 +127,10 @@ impl OcrDialog {
                 None
             }
             Response::OcrFinished { doc, result } if *doc == state.doc => match result {
-                OcrOutcome::Done {
-                    recognised,
-                    skipped,
-                    words,
-                } => {
+                OcrOutcome::Done { recognised, skipped, words } => {
                     self.state = None;
                     let mut msg = match recognised {
-                        0 => "No text found".to_string(),
+                        0 => t("No text found").to_string(),
                         1 => tf("Recognised {words} words on 1 page", &[("words", &words)]),
                         n => tf("Recognised {words} words on {n} pages", &[("words", &words), ("n", &n)]),
                     };
@@ -146,7 +141,7 @@ impl OcrDialog {
                 }
                 OcrOutcome::Cancelled => {
                     self.state = None;
-                    Some("Text recognition cancelled".into())
+                    Some(t("Text recognition cancelled").into())
                 }
                 OcrOutcome::Failed(e) => {
                     state.progress = None;
@@ -214,7 +209,7 @@ impl OcrDialog {
             let filter = state.filter.to_lowercase();
             egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
                 for code in langs {
-                    let name = language_name(code);
+                    let name = language_name(code).map(t);
                     let label = name.map_or_else(|| code.clone(), |n| format!("{n} ({code})"));
                     if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                         continue;

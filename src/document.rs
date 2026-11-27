@@ -17,8 +17,8 @@ use crate::view::viewport::{FitMode, Viewport};
 pub const ACTUAL_SIZE: f32 = 96.0 / 72.0;
 
 pub const ZOOM_PRESETS: [f32; 18] = [
-    10.0, 25.0, 33.0, 50.0, 67.0, 75.0, 100.0, 125.0, 150.0, 200.0, 300.0, 400.0, 600.0, 800.0,
-    1200.0, 1600.0, 2400.0, 3200.0,
+    10.0, 25.0, 33.0, 50.0, 67.0, 75.0, 100.0, 125.0, 150.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1200.0, 1600.0, 2400.0,
+    3200.0,
 ];
 
 // One per open tab, so the size of the Ready variant does not matter.
@@ -108,10 +108,21 @@ pub fn has_comment(a: &AnnotInfo) -> bool {
 
 #[derive(Clone, Debug)]
 pub enum Draft {
-    Ink { page: usize, points: Vec<Pos2> },
-    Shape { page: usize, start: Pos2, end: Pos2 },
+    Ink {
+        page: usize,
+        points: Vec<Pos2>,
+    },
+    Shape {
+        page: usize,
+        start: Pos2,
+        end: Pos2,
+    },
     /// A polygon or cloud being clicked together; `hover` is where the next corner would go.
-    Poly { page: usize, points: Vec<Pos2>, hover: Option<Pos2> },
+    Poly {
+        page: usize,
+        points: Vec<Pos2>,
+        hover: Option<Pos2>,
+    },
 }
 
 /// Which part of an annotation is being dragged.
@@ -181,10 +192,8 @@ impl RichEdit {
     }
 
     pub fn to_rich(&self, text: &str) -> RichText {
-        let chars: Vec<(char, CharStyle)> = text
-            .chars()
-            .zip(self.styles.iter().copied().chain(std::iter::repeat(self.typing)))
-            .collect();
+        let chars: Vec<(char, CharStyle)> =
+            text.chars().zip(self.styles.iter().copied().chain(std::iter::repeat(self.typing))).collect();
         RichText::from_chars(&chars, self.align)
     }
 }
@@ -195,13 +204,7 @@ pub fn sync_styles(old: &str, new: &str, styles: &[CharStyle], typing: CharStyle
     let (a, b): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
     let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     let max_suffix = a.len().min(b.len()) - prefix;
-    let suffix = a
-        .iter()
-        .rev()
-        .zip(b.iter().rev())
-        .take(max_suffix)
-        .take_while(|(x, y)| x == y)
-        .count();
+    let suffix = a.iter().rev().zip(b.iter().rev()).take(max_suffix).take_while(|(x, y)| x == y).count();
     let style = |i: usize| styles.get(i).copied().unwrap_or(typing);
     let mut out: Vec<CharStyle> = (0..prefix).map(style).collect();
     out.extend(std::iter::repeat_n(typing, b.len() - prefix - suffix));
@@ -307,10 +310,8 @@ pub struct DocTab {
 
 impl DocTab {
     pub fn new(id: DocId, path: PathBuf, default_mode: LayoutMode, saved: Option<&FileState>) -> Self {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        let name =
+            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
         let mut tab = Self {
             id,
             path,
@@ -319,10 +320,7 @@ impl DocTab {
             mode: default_mode,
             mode_before_grid: reading_mode(default_mode),
             rotation: Rotation::R0,
-            viewport: Viewport {
-                fit: default_fit(default_mode),
-                ..Default::default()
-            },
+            viewport: Viewport { fit: default_fit(default_mode), ..Default::default() },
             layout: Layout::default(),
             layout_params: None,
             current_page: 0,
@@ -431,10 +429,9 @@ impl DocTab {
                 edit.committed = rich.clone();
                 crate::engine::AnnotChange { rich: Some(rich), ..Default::default() }
             }
-            None if sel.contents != sel.committed => crate::engine::AnnotChange {
-                contents: Some(sel.contents.clone()),
-                ..Default::default()
-            },
+            None if sel.contents != sel.committed => {
+                crate::engine::AnnotChange { contents: Some(sel.contents.clone()), ..Default::default() }
+            }
             None => return false,
         };
         sel.committed = sel.contents.clone();
@@ -444,11 +441,7 @@ impl DocTab {
     }
 
     pub fn select_annot(&mut self, page: usize, index: usize) {
-        if self
-            .selected_annot
-            .as_ref()
-            .is_some_and(|s| s.page == page && s.index == index)
-        {
+        if self.selected_annot.as_ref().is_some_and(|s| s.page == page && s.index == index) {
             return;
         }
         self.deselect_annot();
@@ -559,10 +552,8 @@ impl DocTab {
             *self.page_versions.entry(*p).or_insert(0) += 1;
         }
         self.page_selection = self.page_selection.iter().filter_map(|p| map(*p)).collect();
-        self.redactions = std::mem::take(&mut self.redactions)
-            .into_iter()
-            .filter_map(|(p, b)| map(p).map(|n| (n, b)))
-            .collect();
+        self.redactions =
+            std::mem::take(&mut self.redactions).into_iter().filter_map(|(p, b)| map(p).map(|n| (n, b))).collect();
         self.redact_drag = None;
         self.page_anchor = self.page_anchor.and_then(map);
         let count = info.page_sizes.len();
@@ -586,11 +577,7 @@ impl DocTab {
 
     /// Display name with an unsaved-changes marker.
     pub fn title(&self) -> String {
-        if self.dirty {
-            format!("● {}", self.name)
-        } else {
-            self.name.clone()
-        }
+        if self.dirty { format!("● {}", self.name) } else { self.name.clone() }
     }
 
     pub fn file_state(&self) -> FileState {
@@ -662,11 +649,7 @@ impl DocTab {
     }
 
     pub fn rotate(&mut self, clockwise: bool) {
-        self.rotation = if clockwise {
-            self.rotation.cw()
-        } else {
-            self.rotation.ccw()
-        };
+        self.rotation = if clockwise { self.rotation.cw() } else { self.rotation.ccw() };
         self.goto_page(self.current_page);
     }
 
@@ -692,24 +675,11 @@ impl DocTab {
     /// Moves by whole rows (so facing mode steps two pages at a time).
     pub fn step_page(&mut self, forward: bool) {
         let rows = &self.layout.rows;
-        let page = if matches!(self.mode, LayoutMode::SinglePage | LayoutMode::Horizontal)
-            || rows.is_empty()
-        {
-            if forward {
-                self.current_page + 1
-            } else {
-                self.current_page.saturating_sub(1)
-            }
+        let page = if matches!(self.mode, LayoutMode::SinglePage | LayoutMode::Horizontal) || rows.is_empty() {
+            if forward { self.current_page + 1 } else { self.current_page.saturating_sub(1) }
         } else {
-            let row = rows
-                .iter()
-                .position(|r| r.contains(&self.current_page))
-                .unwrap_or(0);
-            let target = if forward {
-                (row + 1).min(rows.len() - 1)
-            } else {
-                row.saturating_sub(1)
-            };
+            let row = rows.iter().position(|r| r.contains(&self.current_page)).unwrap_or(0);
+            let target = if forward { (row + 1).min(rows.len() - 1) } else { row.saturating_sub(1) };
             rows[target][0]
         };
         self.goto_page(page.min(self.page_count().saturating_sub(1)));
@@ -745,7 +715,12 @@ impl DocTab {
         let sel = self.selection?;
         let text = self.texts.get(&sel.page)?.as_ref()?;
         let range = sel.range();
-        let s: String = text.chars.get(range.start.min(text.chars.len())..range.end.min(text.chars.len()))?.iter().map(|c| c.ch).collect();
+        let s: String = text
+            .chars
+            .get(range.start.min(text.chars.len())..range.end.min(text.chars.len()))?
+            .iter()
+            .map(|c| c.ch)
+            .collect();
         (!s.is_empty()).then(|| s.replace("\r\n", "\n").replace('\r', "\n"))
     }
 
@@ -770,11 +745,7 @@ impl DocTab {
         if let Some(Some(text)) = self.texts.get(&page)
             && !text.chars.is_empty()
         {
-            self.selection = Some(Selection {
-                page,
-                anchor: 0,
-                head: text.chars.len(),
-            });
+            self.selection = Some(Selection { page, anchor: 0, head: text.chars.len() });
         }
     }
 
@@ -840,10 +811,7 @@ mod tests {
     use super::*;
 
     fn st(bold: bool) -> CharStyle {
-        CharStyle {
-            bold,
-            ..Default::default()
-        }
+        CharStyle { bold, ..Default::default() }
     }
 
     #[test]
@@ -872,12 +840,7 @@ mod tests {
         let note = |author: &str, text: &str, status: &str| AnnotInfo {
             index: 0,
             kind: AnnotKind::Note,
-            rect: PdfBox {
-                left: 0.0,
-                bottom: 0.0,
-                right: 1.0,
-                top: 1.0,
-            },
+            rect: PdfBox { left: 0.0, bottom: 0.0, right: 1.0, top: 1.0 },
             color: None,
             interior: None,
             width: 1.0,
@@ -986,10 +949,7 @@ mod tests {
         // Arrow keys in the grid: by page, by row (same column, clamped), Enter opens.
         let mut tab = DocTab::new(3, PathBuf::from("z.pdf"), LayoutMode::Grid, None);
         tab.layout.rows = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7]];
-        tab.state = LoadState::Ready(DocInfo {
-            page_sizes: vec![(595.0, 842.0); 8],
-            ..Default::default()
-        });
+        tab.state = LoadState::Ready(DocInfo { page_sizes: vec![(595.0, 842.0); 8], ..Default::default() });
         tab.grid_move(1, 0);
         assert_eq!(tab.grid_focus, Some(1));
         tab.grid_move(0, 1);

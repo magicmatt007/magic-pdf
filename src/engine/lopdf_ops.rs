@@ -39,7 +39,13 @@ fn text_string(s: &str) -> Object {
 fn old_outline(doc: &Document) -> Vec<Dictionary> {
     const MAX_ITEMS: usize = 20_000;
     const MAX_DEPTH: usize = 64;
-    fn walk(doc: &Document, first: Option<ObjectId>, depth: usize, out: &mut Vec<Dictionary>, seen: &mut std::collections::HashSet<ObjectId>) {
+    fn walk(
+        doc: &Document,
+        first: Option<ObjectId>,
+        depth: usize,
+        out: &mut Vec<Dictionary>,
+        seen: &mut std::collections::HashSet<ObjectId>,
+    ) {
         let mut next = first;
         while let Some(id) = next {
             if out.len() >= MAX_ITEMS || !seen.insert(id) {
@@ -98,7 +104,13 @@ pub fn write_outline(bytes: &[u8], items: &[OutlineItem]) -> Result<Vec<u8>, Str
 
 /// Adds `items` as children of `parent`; returns the first and last child and the
 /// number of visible descendants.
-fn add_items(doc: &mut Document, pages: &[ObjectId], old: &[Dictionary], items: &[OutlineItem], parent: ObjectId) -> (ObjectId, ObjectId, i64) {
+fn add_items(
+    doc: &mut Document,
+    pages: &[ObjectId],
+    old: &[Dictionary],
+    items: &[OutlineItem],
+    parent: ObjectId,
+) -> (ObjectId, ObjectId, i64) {
     let ids: Vec<ObjectId> = items.iter().map(|_| doc.new_object_id()).collect();
     let mut visible = 0;
     for (i, item) in items.iter().enumerate() {
@@ -226,7 +238,8 @@ pub fn write_properties(bytes: &[u8], p: &EditableProperties, now: &str) -> Resu
         Ok(Object::Dictionary(d)) => d.clone(),
         _ => Dictionary::new(),
     };
-    for (key, value) in [("Title", &p.title), ("Author", &p.author), ("Subject", &p.subject), ("Keywords", &p.keywords)] {
+    for (key, value) in [("Title", &p.title), ("Author", &p.author), ("Subject", &p.subject), ("Keywords", &p.keywords)]
+    {
         if value.is_empty() {
             info.remove(key.as_bytes());
         } else {
@@ -263,7 +276,8 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
     for &i in pages {
         let Some(&page_id) = ids.get(i) else { continue };
         let content = doc.get_page_content(page_id);
-        let ops = lopdf::content::Content::decode(&content).map_err(|e| format!("could not read the page content: {e}"))?;
+        let ops =
+            lopdf::content::Content::decode(&content).map_err(|e| format!("could not read the page content: {e}"))?;
         let used: Vec<Vec<u8>> = ops
             .operations
             .iter()
@@ -304,7 +318,6 @@ pub fn purge_after_redaction(bytes: &[u8], pages: &[usize]) -> Result<Vec<u8>, S
     save(&mut doc, false)
 }
 
-
 /// Private key holding magic-pdf's replies (JSON), as written by PDFium.
 pub const REPLIES_KEY: &str = "MagicPdfReplies";
 /// Marks the standard reply annotations magic-pdf writes from those.
@@ -331,7 +344,9 @@ pub fn write_standard_replies(bytes: &[u8]) -> Result<Vec<u8>, String> {
         };
         // The /Annots array may be in the page or an object of its own.
         let (array_id, refs) = match &annots_obj {
-            Object::Reference(id) => (Some(*id), doc.get_object(*id).and_then(Object::as_array).cloned().unwrap_or_default()),
+            Object::Reference(id) => {
+                (Some(*id), doc.get_object(*id).and_then(Object::as_array).cloned().unwrap_or_default())
+            }
             Object::Array(a) => (None, a.clone()),
             _ => continue,
         };

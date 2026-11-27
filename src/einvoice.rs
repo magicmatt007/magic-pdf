@@ -128,10 +128,7 @@ fn date(n: Node, path: &[&str]) -> String {
 
 fn party(n: Option<Node>) -> Party {
     let Some(n) = n else { return Party::default() };
-    let mut p = Party {
-        name: txt(n, &["Name"]),
-        ..Default::default()
-    };
+    let mut p = Party { name: txt(n, &["Name"]), ..Default::default() };
     if let Some(a) = child(n, "PostalTradeAddress") {
         for l in ["LineOne", "LineTwo", "LineThree"] {
             let v = txt(a, &[l]);
@@ -220,7 +217,9 @@ pub fn parse(xml: &[u8]) -> Result<Invoice, String> {
             vat_rate: settle.and_then(|s| num(s, &["ApplicableTradeTax", "RateApplicablePercent"])),
             vat_category: settle.map(|s| txt(s, &["ApplicableTradeTax", "CategoryCode"])).unwrap_or_default(),
             total: settle.and_then(|s| num(s, &["SpecifiedTradeSettlementLineMonetarySummation", "LineTotalAmount"])),
-            delivery_date: delivery.map(|d| date(d, &["ActualDeliverySupplyChainEvent", "OccurrenceDateTime"])).unwrap_or_default(),
+            delivery_date: delivery
+                .map(|d| date(d, &["ActualDeliverySupplyChainEvent", "OccurrenceDateTime"]))
+                .unwrap_or_default(),
         });
     }
     if let Some(a) = child(tx, "ApplicableHeaderTradeAgreement") {
@@ -403,7 +402,9 @@ pub fn missing_required(inv: &Invoice) -> Vec<&'static str> {
         need(!inv.lines.is_empty(), "Invoice lines (BG-25)");
         need(!inv.taxes.is_empty(), "VAT breakdown (BG-23)");
         need(
-            !inv.seller.vat_id.is_empty() || !inv.seller.tax_number.is_empty() || inv.taxes.iter().all(|t| t.category == "O"),
+            !inv.seller.vat_id.is_empty()
+                || !inv.seller.tax_number.is_empty()
+                || inv.taxes.iter().all(|t| t.category == "O"),
             "Seller VAT ID or tax number (BT-31/BT-32)",
         );
     }
@@ -419,7 +420,10 @@ pub fn checks(inv: &Invoice) -> Vec<Check> {
     if let (Some(sum), Some(total)) = (line_sum, t.lines)
         && !inv.lines.is_empty()
     {
-        add(close(sum, total, inv.lines.len()), tf("Sum of the lines {sum} = line total {total}", &[("sum", &money(sum)), ("total", &money(total))]));
+        add(
+            close(sum, total, inv.lines.len()),
+            tf("Sum of the lines {sum} = line total {total}", &[("sum", &money(sum)), ("total", &money(total))]),
+        );
     }
     for l in &inv.lines {
         if let (Some(q), Some(p), Some(total)) = (l.quantity, l.net_price, l.total) {
@@ -429,7 +433,13 @@ pub fn checks(inv: &Invoice) -> Vec<Check> {
                     false,
                     tf(
                         "Line {line}: {quantity} × {price} = {calc}, not {total}",
-                        &[("line", &l.id), ("quantity", &q), ("price", &money(p)), ("calc", &money(calc)), ("total", &money(total))],
+                        &[
+                            ("line", &l.id),
+                            ("quantity", &q),
+                            ("price", &money(p)),
+                            ("calc", &money(calc)),
+                            ("total", &money(total)),
+                        ],
                     ),
                 );
             }
@@ -437,18 +447,30 @@ pub fn checks(inv: &Invoice) -> Vec<Check> {
     }
     if let (Some(lines), Some(basis)) = (t.lines, t.tax_basis) {
         let calc = lines - t.allowances.unwrap_or(0.0) + t.charges.unwrap_or(0.0);
-        add(close(calc, basis, 2), tf("Taxable amount {amount} matches the lines, charges and allowances", &[("amount", &money(basis))]));
+        add(
+            close(calc, basis, 2),
+            tf("Taxable amount {amount} matches the lines, charges and allowances", &[("amount", &money(basis))]),
+        );
     }
     for tax in &inv.taxes {
         if let (Some(b), Some(r), Some(a)) = (tax.basis, tax.rate, tax.amount) {
-            add(close(b * r / 100.0, a, 1), tf("VAT {rate}% of {basis} = {amount}", &[("rate", &number(r)), ("basis", &money(b)), ("amount", &money(a))]));
+            add(
+                close(b * r / 100.0, a, 1),
+                tf(
+                    "VAT {rate}% of {basis} = {amount}",
+                    &[("rate", &number(r)), ("basis", &money(b)), ("amount", &money(a))],
+                ),
+            );
         }
     }
     let tax_sum: Option<f64> = inv.taxes.iter().map(|x| x.amount).sum();
     if let (Some(sum), Some(total)) = (tax_sum, t.tax)
         && !inv.taxes.is_empty()
     {
-        add(close(sum, total, inv.taxes.len()), tf("VAT amounts add up to the VAT total {amount}", &[("amount", &money(total))]));
+        add(
+            close(sum, total, inv.taxes.len()),
+            tf("VAT amounts add up to the VAT total {amount}", &[("amount", &money(total))]),
+        );
     }
     if let (Some(basis), Some(tax), Some(grand)) = (t.tax_basis, t.tax, t.grand) {
         add(close(basis + tax, grand, 2), tf("Taxable amount + VAT = total {amount}", &[("amount", &money(grand))]));

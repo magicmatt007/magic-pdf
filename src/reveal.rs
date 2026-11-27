@@ -74,6 +74,9 @@ mod tests {
 
     #[test]
     fn file_uris_are_percent_encoded() {
-        assert_eq!(file_uri(Path::new("/home/me/a b,c/Bericht ä.pdf")), "file:///home/me/a%20b%2Cc/Bericht%20%C3%A4.pdf");
+        assert_eq!(
+            file_uri(Path::new("/home/me/a b,c/Bericht ä.pdf")),
+            "file:///home/me/a%20b%2Cc/Bericht%20%C3%A4.pdf"
+        );
     }
 }

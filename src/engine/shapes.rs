@@ -46,10 +46,7 @@ impl Scale {
             "ft" => 304.8,
             _ => 1.0,
         };
-        Scale {
-            per_point: 25.4 / 72.0 * ratio / mm_per_unit,
-            unit: unit.to_string(),
-        }
+        Scale { per_point: 25.4 / 72.0 * ratio / mm_per_unit, unit: unit.to_string() }
     }
 
     pub fn encode(&self) -> String {
@@ -58,10 +55,7 @@ impl Scale {
 
     pub fn decode(s: &str) -> Option<Scale> {
         let (n, unit) = s.split_once(' ')?;
-        Some(Scale {
-            per_point: n.parse().ok()?,
-            unit: unit.to_string(),
-        })
+        Some(Scale { per_point: n.parse().ok()?, unit: unit.to_string() })
     }
 }
 
@@ -105,10 +99,7 @@ fn label(fonts: &dyn FontSet, text: &str, size: f32, at: (f32, f32), dir: (f32, 
     let dir = if dir.0 < -1e-3 || (dir.0.abs() <= 1e-3 && dir.1 < 0.0) { (-dir.0, -dir.1) } else { dir };
     let up = (-dir.1, dir.0);
     let origin = (at.0 - dir.0 * w / 2.0 + up.0 * lift, at.1 - dir.1 * w / 2.0 + up.1 * lift);
-    let mut s = format!(
-        "q {:.4} {:.4} {:.4} {:.4} {:.2} {:.2} cm\n",
-        dir.0, dir.1, up.0, up.1, origin.0, origin.1
-    );
+    let mut s = format!("q {:.4} {:.4} {:.4} {:.4} {:.2} {:.2} cm\n", dir.0, dir.1, up.0, up.1, origin.0, origin.1);
     let mut x = 0.0;
     for c in text.chars() {
         if !c.is_whitespace() {
@@ -175,12 +166,7 @@ pub fn measure_appearance(
         _ => {}
     }
     s += "Q\n";
-    let rect = bounds(extent).unwrap_or(PdfBox {
-        left: 0.0,
-        bottom: 0.0,
-        right: 1.0,
-        top: 1.0,
-    });
+    let rect = bounds(extent).unwrap_or(PdfBox { left: 0.0, bottom: 0.0, right: 1.0, top: 1.0 });
     (rect.expand(width / 2.0 + 1.0), s)
 }
 
@@ -276,14 +262,7 @@ fn cloud_segments(pts: &[(f32, f32)], width: f32) -> Vec<[(f32, f32); 4]> {
 
 /// Bounding box of points.
 fn bounds(pts: impl IntoIterator<Item = (f32, f32)>) -> Option<PdfBox> {
-    pts.into_iter()
-        .map(|(x, y)| PdfBox {
-            left: x,
-            bottom: y,
-            right: x,
-            top: y,
-        })
-        .reduce(PdfBox::union)
+    pts.into_iter().map(|(x, y)| PdfBox { left: x, bottom: y, right: x, top: y }).reduce(PdfBox::union)
 }
 
 /// The annotation rectangle and appearance stream of a shape.
@@ -329,12 +308,7 @@ pub fn appearance(shape: Shape, pts: &[(f32, f32)], color: Rgb, width: f32, fill
         _ => {}
     }
     s += "Q\n";
-    let rect = bounds(extent).unwrap_or(PdfBox {
-        left: 0.0,
-        bottom: 0.0,
-        right: 1.0,
-        top: 1.0,
-    });
+    let rect = bounds(extent).unwrap_or(PdfBox { left: 0.0, bottom: 0.0, right: 1.0, top: 1.0 });
     (rect.expand(width / 2.0 + 1.0), s)
 }
 
@@ -455,15 +429,40 @@ pub fn stamp_appearance(rect: PdfBox, title: &str, subtitle: &str, color: Rgb, f
         *s += &format!(
             "{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c {:.2} {:.2} l {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c \
              {:.2} {:.2} l {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c {:.2} {:.2} l {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c h S\n",
-            l + rad, b,
-            r - rad, b,
-            r - k, b, r, b + k, r, b + rad,
-            r, t - rad,
-            r, t - k, r - k, t, r - rad, t,
-            l + rad, t,
-            l + k, t, l, t - k, l, t - rad,
-            l, b + rad,
-            l, b + k, l + k, b, l + rad, b,
+            l + rad,
+            b,
+            r - rad,
+            b,
+            r - k,
+            b,
+            r,
+            b + k,
+            r,
+            b + rad,
+            r,
+            t - rad,
+            r,
+            t - k,
+            r - k,
+            t,
+            r - rad,
+            t,
+            l + rad,
+            t,
+            l + k,
+            t,
+            l,
+            t - k,
+            l,
+            t - rad,
+            l,
+            b + rad,
+            l,
+            b + k,
+            l + k,
+            b,
+            l + rad,
+            b,
         );
     };
     rr(&mut s, rect.left + bw, rect.bottom + bw, rect.right - bw, rect.top - bw, radius);

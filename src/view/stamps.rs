@@ -1,8 +1,8 @@
 //! Stamp and signature tools: choosing what they place, image loading, and the
 //! signature manager (draw a signature with the mouse or use a picture).
 
-use std::collections::HashMap;
 use crate::i18n::{t, tf};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -16,18 +16,11 @@ const MAX_IMAGE: u32 = 1600;
 
 /// Loads a PNG or JPEG file as RGBA pixels for a stamp.
 pub fn load_image(path: &Path) -> Result<StampSpec, String> {
-    let img = image::open(path).map_err(|e| tf("Could not read {file}: {e}", &[("file", &path.display()), ("e", &e)]))?;
-    let img = if img.width().max(img.height()) > MAX_IMAGE {
-        img.thumbnail(MAX_IMAGE, MAX_IMAGE)
-    } else {
-        img
-    };
+    let img =
+        image::open(path).map_err(|e| tf("Could not read {file}: {e}", &[("file", &path.display()), ("e", &e)]))?;
+    let img = if img.width().max(img.height()) > MAX_IMAGE { img.thumbnail(MAX_IMAGE, MAX_IMAGE) } else { img };
     let rgba = img.to_rgba8();
-    Ok(StampSpec::Image {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
-    })
+    Ok(StampSpec::Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
 }
 
 #[derive(Default)]
@@ -65,10 +58,7 @@ impl StampState {
                 } else {
                     String::new()
                 };
-                self.text = Some(StampSpec::Text {
-                    title: style.stamp_text.clone(),
-                    subtitle,
-                });
+                self.text = Some(StampSpec::Text { title: style.stamp_text.clone(), subtitle });
             }
             None => {}
         }
@@ -117,62 +107,59 @@ pub fn stamp_options(ui: &mut Ui, state: &mut StampState, settings: &mut Setting
         Some(p) => file_name(p),
         None => style.stamp_text.clone(),
     };
-    egui::ComboBox::from_id_salt("stamp_choice")
-        .selected_text(current)
-        .width(170.0)
-        .show_ui(ui, |ui| {
-            for (text, color) in STAMPS {
-                if ui.selectable_label(style.stamp_image.is_none() && style.stamp_text == text, text).clicked() {
+    egui::ComboBox::from_id_salt("stamp_choice").selected_text(current).width(170.0).show_ui(ui, |ui| {
+        for (text, color) in STAMPS {
+            if ui.selectable_label(style.stamp_image.is_none() && style.stamp_text == text, text).clicked() {
+                style.stamp_image = None;
+                style.stamp_text = text.to_string();
+                style.stamp_color = color;
+                changed = true;
+            }
+        }
+        let mut remove = None;
+        if !style.custom_stamps.is_empty() || !style.image_stamps.is_empty() {
+            ui.separator();
+        }
+        for (i, text) in style.custom_stamps.iter().enumerate() {
+            let r = ui.selectable_label(style.stamp_image.is_none() && style.stamp_text == *text, text);
+            if r.clicked() {
+                style.stamp_image = None;
+                style.stamp_text = text.clone();
+                changed = true;
+            }
+            r.context_menu(|ui| {
+                if ui.button(t("Remove")).clicked() {
+                    remove = Some((false, i));
+                }
+            });
+        }
+        for (i, path) in style.image_stamps.iter().enumerate() {
+            let r = ui.selectable_label(style.stamp_image.as_ref() == Some(path), format!("🖼 {}", file_name(path)));
+            if r.clicked() {
+                style.stamp_image = Some(path.clone());
+                changed = true;
+            }
+            r.context_menu(|ui| {
+                if ui.button(t("Remove")).clicked() {
+                    remove = Some((true, i));
+                }
+            });
+        }
+        match remove {
+            Some((false, i)) => {
+                style.custom_stamps.remove(i);
+                changed = true;
+            }
+            Some((true, i)) => {
+                let p = style.image_stamps.remove(i);
+                if style.stamp_image.as_ref() == Some(&p) {
                     style.stamp_image = None;
-                    style.stamp_text = text.to_string();
-                    style.stamp_color = color;
-                    changed = true;
                 }
+                changed = true;
             }
-            let mut remove = None;
-            if !style.custom_stamps.is_empty() || !style.image_stamps.is_empty() {
-                ui.separator();
-            }
-            for (i, text) in style.custom_stamps.iter().enumerate() {
-                let r = ui.selectable_label(style.stamp_image.is_none() && style.stamp_text == *text, text);
-                if r.clicked() {
-                    style.stamp_image = None;
-                    style.stamp_text = text.clone();
-                    changed = true;
-                }
-                r.context_menu(|ui| {
-                    if ui.button(t("Remove")).clicked() {
-                        remove = Some((false, i));
-                    }
-                });
-            }
-            for (i, path) in style.image_stamps.iter().enumerate() {
-                let r = ui.selectable_label(style.stamp_image.as_ref() == Some(path), format!("🖼 {}", file_name(path)));
-                if r.clicked() {
-                    style.stamp_image = Some(path.clone());
-                    changed = true;
-                }
-                r.context_menu(|ui| {
-                    if ui.button(t("Remove")).clicked() {
-                        remove = Some((true, i));
-                    }
-                });
-            }
-            match remove {
-                Some((false, i)) => {
-                    style.custom_stamps.remove(i);
-                    changed = true;
-                }
-                Some((true, i)) => {
-                    let p = style.image_stamps.remove(i);
-                    if style.stamp_image.as_ref() == Some(&p) {
-                        style.stamp_image = None;
-                    }
-                    changed = true;
-                }
-                None => {}
-            }
-        });
+            None => {}
+        }
+    });
     ui.add(egui::TextEdit::singleline(&mut state.new_text).hint_text(t("Own text")).desired_width(110.0));
     let text = state.new_text.trim().to_uppercase();
     if ui.add_enabled(!text.is_empty(), egui::Button::new(t("Add"))).clicked() {
@@ -211,16 +198,17 @@ pub fn signature_options(ui: &mut Ui, state: &mut StampState, settings: &mut Set
         ui.weak(t("No signature yet"));
     } else {
         let sel = settings.annot_style.signature.min(settings.signatures.len() - 1);
-        egui::ComboBox::from_id_salt("signature_choice")
-            .selected_text(label(sel, &settings.signatures[sel]))
-            .show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("signature_choice").selected_text(label(sel, &settings.signatures[sel])).show_ui(
+            ui,
+            |ui| {
                 for (i, s) in settings.signatures.iter().enumerate() {
                     if ui.selectable_label(i == sel, label(i, s)).clicked() {
                         settings.annot_style.signature = i;
                         changed = true;
                     }
                 }
-            });
+            },
+        );
     }
     if ui.button(t("Signatures…")).clicked() {
         state.show_signatures = true;
@@ -249,10 +237,7 @@ fn normalize(strokes: &[Vec<[f32; 2]>]) -> Vec<Vec<[f32; 2]>> {
         y1 = y1.max(p[1]);
     }
     let scale = 1.0 / (x1 - x0).max(y1 - y0).max(1e-3);
-    strokes
-        .iter()
-        .map(|s| s.iter().map(|p| [(p[0] - x0) * scale, (p[1] - y0) * scale]).collect())
-        .collect()
+    strokes.iter().map(|s| s.iter().map(|p| [(p[0] - x0) * scale, (p[1] - y0) * scale]).collect()).collect()
 }
 
 /// The signature manager. Returns true if settings changed.

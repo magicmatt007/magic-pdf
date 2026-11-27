@@ -56,9 +56,8 @@ pub fn find_tesseract() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let exe = if cfg!(windows) { "tesseract.exe" } else { "tesseract" };
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> =
+        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     if cfg!(windows) {
         for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
             if let Some(base) = std::env::var_os(var) {
@@ -89,10 +88,7 @@ fn command(exe: &Path) -> Command {
 /// Installed recognition languages (Tesseract codes like `eng`, `deu`), without the
 /// orientation-detection pseudo language `osd`.
 pub fn languages(exe: &Path) -> Result<Vec<String>, String> {
-    let out = command(exe)
-        .arg("--list-langs")
-        .output()
-        .map_err(|e| format!("Could not run {}: {e}", exe.display()))?;
+    let out = command(exe).arg("--list-langs").output().map_err(|e| format!("Could not run {}: {e}", exe.display()))?;
     // Older versions print the list on stderr.
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let mut langs: Vec<String> = text
@@ -240,12 +236,7 @@ pub fn parse_hocr(hocr: &str) -> Vec<HocrWord> {
                 }
                 None => (bbox[3] - height * 0.2, height),
             };
-            words.push(HocrWord {
-                text,
-                bbox,
-                baseline,
-                size: size.max(1.0),
-            });
+            words.push(HocrWord { text, bbox, baseline, size: size.max(1.0) });
         } else if matches!(class, "ocr_line" | "ocr_header" | "ocr_caption" | "ocr_textfloat") {
             let (slope, offset) = match title_values(title, "baseline").as_deref() {
                 Some([s, o]) => (*s, *o),

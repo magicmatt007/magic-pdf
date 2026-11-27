@@ -1,16 +1,18 @@
 //! Left sidebar: page thumbnails, document outline and search results.
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use crate::i18n::{t, tf};
+use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::document::{DocTab, SearchHit};
-use crate::engine::{AnnotChange, AnnotInfo, AnnotKind, OutlineItem, RenderKey, Reply, Request, STATUSES, pdf_date_now};
-use crate::icons;
 #[cfg(test)]
 use crate::engine::PageOp;
-use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
+use crate::engine::{
+    AnnotChange, AnnotInfo, AnnotKind, OutlineItem, RenderKey, Reply, Request, STATUSES, pdf_date_now,
+};
+use crate::icons;
 use crate::keys::kb;
 use crate::view::cache::{TextureCache, exact_width, snap_to_pixels};
+use crate::view::document_view::{focus_annot, format_pdf_date, rgb};
 use crate::view::layout::rotated_size;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -88,10 +90,12 @@ pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
         ui.spacing_mut().item_spacing.x = 2.0;
         let font = egui::TextStyle::Button.resolve(ui.style());
         let pad = 2.0 * ui.spacing().button_padding.x;
-        let width_of = |ui: &Ui, text: String| ui.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), Color32::WHITE)).size().x;
+        let width_of =
+            |ui: &Ui, text: String| ui.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), Color32::WHITE)).size().x;
         let labels: f32 = tabs.iter().map(|(_, _, label)| width_of(ui, label.clone())).sum();
         let gaps = pad * tabs.len() as f32 + ui.spacing().item_spacing.x * (tabs.len() - 1) as f32;
-        let open_label = tabs.iter().find(|(v, _, _)| v == sidebar).map_or(0.0, |(_, _, l)| width_of(ui, format!(" {l}")));
+        let open_label =
+            tabs.iter().find(|(v, _, _)| v == sidebar).map_or(0.0, |(_, _, l)| width_of(ui, format!(" {l}")));
         // Too narrow (longer labels, counts, a slim sidebar): icons, with the label
         // only on the open tab and in the others' tooltips; slimmer still, icons only.
         let compact = labels + gaps > ui.available_width();
@@ -104,7 +108,12 @@ pub fn tab_row(ui: &mut Ui, tab: &DocTab, sidebar: &mut SidebarTab) {
                 let mut job = egui::text::LayoutJob::default();
                 let (style, align) = (ui.style(), egui::Align::Center);
                 icons::sized(icon, 15.0).append_to(&mut job, style, egui::FontSelection::Default, align);
-                egui::RichText::new(format!(" {label}")).append_to(&mut job, style, egui::FontSelection::Default, align);
+                egui::RichText::new(format!(" {label}")).append_to(
+                    &mut job,
+                    style,
+                    egui::FontSelection::Default,
+                    align,
+                );
                 job.into()
             } else {
                 icons::sized(icon, 15.0).into()
@@ -144,11 +153,17 @@ pub enum PageAction {
     MoveToStart,
     MoveToEnd,
     /// Move the target pages so they sit before original page `gap` (0..=count).
-    MoveTo { pages: Vec<usize>, gap: usize },
+    MoveTo {
+        pages: Vec<usize>,
+        gap: usize,
+    },
     InsertBlankAfter,
     InsertFileAfter,
     /// Insert dropped files before original page `gap`.
-    InsertFiles { gap: usize, paths: Vec<std::path::PathBuf> },
+    InsertFiles {
+        gap: usize,
+        paths: Vec<std::path::PathBuf>,
+    },
     Extract,
     Split,
 }
@@ -169,11 +184,11 @@ pub fn page_menu(ui: &mut Ui, n: usize, total: usize) -> Option<PageAction> {
     item(ui, true, tf("Move {pages} to the start", &[("pages", &pages)]), PageAction::MoveToStart);
     item(ui, true, tf("Move {pages} to the end", &[("pages", &pages)]), PageAction::MoveToEnd);
     ui.separator();
-    item(ui, true, "Insert blank page after".into(), PageAction::InsertBlankAfter);
-    item(ui, true, "Insert pages from file…".into(), PageAction::InsertFileAfter);
+    item(ui, true, t("Insert blank page after").into(), PageAction::InsertBlankAfter);
+    item(ui, true, t("Insert pages from file…").into(), PageAction::InsertFileAfter);
     ui.separator();
     item(ui, true, tf("Extract {pages} to new file…", &[("pages", &pages)]), PageAction::Extract);
-    item(ui, total > 1, "Split document…".into(), PageAction::Split);
+    item(ui, total > 1, t("Split document…").into(), PageAction::Split);
     ui.separator();
     item(ui, n < total, tf("Delete {pages}\tDel", &[("pages", &pages)]), PageAction::Delete);
     action
@@ -238,11 +253,7 @@ fn thumbnails(
 ) {
     let Some(info) = tab.info() else { return };
     let count = info.page_sizes.len();
-    let sizes: Vec<_> = info
-        .page_sizes
-        .iter()
-        .map(|&s| rotated_size(s, tab.rotation))
-        .collect();
+    let sizes: Vec<_> = info.page_sizes.iter().map(|&s| rotated_size(s, tab.rotation)).collect();
 
     // Thumbnail size: slider, or Ctrl+wheel / pinch over the thumbnails.
     ui.horizontal(|ui| {
@@ -266,18 +277,10 @@ fn thumbnails(
     let ppp = ui.ctx().pixels_per_point();
     let drag_id = egui::Id::unique(("thumb_drag", tab.id));
     let mut drag: Option<ThumbDrag> = ui.ctx().data(|d| d.get_temp(drag_id));
-    let (pointer, primary_down, mods, files_hovering) = ui.input(|i| {
-        (
-            i.pointer.latest_pos(),
-            i.pointer.primary_down(),
-            i.modifiers,
-            !i.raw.hovered_files.is_empty(),
-        )
-    });
+    let (pointer, primary_down, mods, files_hovering) =
+        ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down(), i.modifiers, !i.raw.hovered_files.is_empty()));
 
-    let mut area = egui::ScrollArea::vertical()
-        .id_salt(("thumbs", tab.id))
-        .auto_shrink([false, false]);
+    let mut area = egui::ScrollArea::vertical().id_salt(("thumbs", tab.id)).auto_shrink([false, false]);
     if let Some(page) = tab.thumbs_follow_page.take()
         && page < count
     {
@@ -309,10 +312,8 @@ fn thumbnails(
             cells.push((page, rect));
             let row_box_h = rect.height() - 2.0 * CELL_MARGIN - LABEL_H;
             let thumb_size = Grid::fit(s, box_w);
-            let thumb = Rect::from_center_size(
-                pos2(rect.center().x, rect.top() + CELL_MARGIN + row_box_h / 2.0),
-                thumb_size,
-            );
+            let thumb =
+                Rect::from_center_size(pos2(rect.center().x, rect.top() + CELL_MARGIN + row_box_h / 2.0), thumb_size);
             let current = page == tab.current_page;
             let selected = tab.page_selection.contains(&page);
             let painter = ui.painter();
@@ -325,22 +326,10 @@ fn thumbnails(
             painter.rect_filled(thumb, CornerRadius::ZERO, Color32::WHITE);
             let want = exact_width(thumb.width() * ppp, s.y / s.x.max(1.0));
             let version = tab.page_version(page);
-            let key = RenderKey {
-                doc: tab.id,
-                page,
-                width_px: want,
-                rotation: tab.rotation,
-                version,
-                tile: 0,
-            };
+            let key = RenderKey { doc: tab.id, page, width_px: want, rotation: tab.rotation, version, tile: 0 };
             tab.wanted.push((key, 10.0 + (page as f32 - tab.current_page as f32).abs() / 1000.0));
             if let Some((tex, _)) = cache.best(tab.id, page, tab.rotation, want, version) {
-                painter.image(
-                    tex.id(),
-                    thumb,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                painter.image(tex.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             let stroke = if current {
                 Stroke::new(2.0, frame)
@@ -381,9 +370,7 @@ fn thumbnails(
                 if !tab.page_selection.contains(&page) {
                     select_page(tab, page, egui::Modifiers::NONE);
                 }
-                drag = Some(ThumbDrag {
-                    pages: tab.page_selection.iter().copied().collect(),
-                });
+                drag = Some(ThumbDrag { pages: tab.page_selection.iter().copied().collect() });
             }
             let n = tab.target_pages().len();
             response.context_menu(|ui| {
@@ -407,17 +394,13 @@ fn thumbnails(
             ui.ctx().request_repaint();
         }
     });
-    ui.ctx().data_mut(|d| {
-        d.insert_temp(egui::Id::unique(("thumb_top", tab.id)), output.state.clamped_offset().y)
-    });
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(("thumb_top", tab.id)), output.state.clamped_offset().y));
     #[cfg(test)]
     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test_thumb_rows"), cells.clone()));
 
     // Where a drop (dragged pages or files from outside) would land.
     let cols = grid.cols;
-    let gap = pointer
-        .filter(|p| clip.contains(*p))
-        .and_then(|p| drop_gap(&cells, p, cols, count));
+    let gap = pointer.filter(|p| clip.contains(*p)).and_then(|p| drop_gap(&cells, p, cols, count));
     let show_gap = |ui: &Ui, gap: usize| {
         let stroke = Stroke::new(3.0, ui.visuals().selection.stroke.color);
         let painter = ui.painter().with_clip_rect(clip);
@@ -450,10 +433,7 @@ fn thumbnails(
             if let Some(g) = gap
                 && crate::engine::move_target(&d.pages, g, count).is_some()
             {
-                actions.push(PageAction::MoveTo {
-                    pages: d.pages.clone(),
-                    gap: g,
-                });
+                actions.push(PageAction::MoveTo { pages: d.pages.clone(), gap: g });
             }
             drag = None;
         }
@@ -475,11 +455,7 @@ fn thumbnails(
 fn drop_gap(cells: &[(usize, Rect)], p: egui::Pos2, cols: usize, count: usize) -> Option<usize> {
     let (last, _) = cells.last()?;
     let before = |r: &Rect| {
-        if cols == 1 {
-            p.y < r.center().y
-        } else {
-            p.y < r.top() || (p.y <= r.bottom() && p.x < r.center().x)
-        }
+        if cols == 1 { p.y < r.center().y } else { p.y < r.top() || (p.y <= r.bottom() && p.x < r.center().x) }
     };
     if let Some((page, _)) = cells.iter().find(|(_, r)| before(r)) {
         return Some(*page);
@@ -540,14 +516,11 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
         ui.weak(t("This document has no bookmarks."));
     }
     let mut commit_rename = None;
-    egui::ScrollArea::both()
-        .id_salt(("outline", tab.id))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (i, item) in items.iter().enumerate() {
-                outline_item(ui, tab, item, vec![i], &mut action, &mut commit_rename);
-            }
-        });
+    egui::ScrollArea::both().id_salt(("outline", tab.id)).auto_shrink([false, false]).show(ui, |ui| {
+        for (i, item) in items.iter().enumerate() {
+            outline_item(ui, tab, item, vec![i], &mut action, &mut commit_rename);
+        }
+    });
 
     let current = tab.current_page;
     let mut outline = items.clone();
@@ -584,11 +557,7 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
                 .filter(|t| !t.is_empty())
                 .map(|t| t.chars().take(80).collect())
                 .unwrap_or_else(|| tf("Page {page}", &[("page", &(current + 1))]));
-            let item = OutlineItem {
-                title: title.clone(),
-                page: Some(current),
-                ..Default::default()
-            };
+            let item = OutlineItem { title: title.clone(), page: Some(current), ..Default::default() };
             let path = oe::insert_after(&mut outline, after.as_deref(), item);
             // Name it right away.
             tab.outline_rename = Some((path, title));
@@ -597,10 +566,7 @@ fn outline(ui: &mut Ui, tab: &mut DocTab) {
         None => {}
     }
     if changed {
-        tab.outbox.push(Request::EditPages {
-            doc: tab.id,
-            op: crate::engine::PageOp::SetOutline { outline },
-        });
+        tab.outbox.push(Request::EditPages { doc: tab.id, op: crate::engine::PageOp::SetOutline { outline } });
     }
 }
 
@@ -787,138 +753,121 @@ fn comments(ui: &mut Ui, tab: &mut DocTab, author: &str) {
     let mut update: Option<(usize, usize, AnnotChange)> = None;
     let selected = tab.selected_annot.as_ref().map(|s| (s.page, s.index));
     let mut shown = 0;
-    egui::ScrollArea::vertical()
-        .id_salt(("comments", tab.id))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for page in pages {
-                let list: Vec<&AnnotInfo> = tab.annots[&page]
-                    .iter()
-                    .filter(|a| a.in_reply_to.is_none() && filter.matches(a))
-                    .collect();
-                if list.is_empty() {
-                    continue;
+    egui::ScrollArea::vertical().id_salt(("comments", tab.id)).auto_shrink([false, false]).show(ui, |ui| {
+        for page in pages {
+            let list: Vec<&AnnotInfo> =
+                tab.annots[&page].iter().filter(|a| a.in_reply_to.is_none() && filter.matches(a)).collect();
+            if list.is_empty() {
+                continue;
+            }
+            ui.add_space(4.0);
+            ui.weak(tf("Page {page}", &[("page", &(page + 1))]));
+            for a in list {
+                shown += 1;
+                let is_selected = selected == Some((page, a.index));
+                let frame = egui::Frame::group(ui.style()).fill(if is_selected {
+                    ui.visuals().selection.bg_fill.gamma_multiply(0.4)
+                } else {
+                    Color32::TRANSPARENT
+                });
+                let resp = frame
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                r,
+                                CornerRadius::same(2),
+                                a.color.map(rgb).unwrap_or(Color32::GRAY),
+                            );
+                            ui.strong(a.kind.label());
+                            ui.weak(format_pdf_date(&a.modified));
+                            if !a.status.is_empty() && a.status != "None" {
+                                let chip = egui::RichText::new(status_name(&a.status)).small().color(Color32::WHITE);
+                                egui::Frame::new()
+                                    .fill(status_color(&a.status))
+                                    .corner_radius(CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(5, 1))
+                                    .show(ui, |ui| ui.label(chip));
+                            }
+                        });
+                        if !a.author.is_empty() {
+                            ui.weak(&a.author);
+                        }
+                        // Long texts are cut to a short preview; the selected
+                        // comment shows them in full.
+                        if !a.contents.is_empty() {
+                            comment_text(ui, &a.contents, (!is_selected).then_some(4));
+                        }
+                        for r in a.other_replies.iter().chain(&a.replies) {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(10.0);
+                                ui.weak("↳");
+                                ui.strong(if r.author.is_empty() { "?" } else { r.author.as_str() });
+                                ui.weak(format_pdf_date(&r.date));
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(22.0);
+                                comment_text(ui, &r.text, (!is_selected).then_some(2));
+                            });
+                        }
+                    })
+                    .response
+                    .interact(Sense::click());
+                if resp.clicked() {
+                    clicked = Some((page, a.index));
                 }
-                ui.add_space(4.0);
-                ui.weak(tf("Page {page}", &[("page", &(page + 1))]));
-                for a in list {
-                    shown += 1;
-                    let is_selected = selected == Some((page, a.index));
-                    let frame = egui::Frame::group(ui.style()).fill(if is_selected {
-                        ui.visuals().selection.bg_fill.gamma_multiply(0.4)
-                    } else {
-                        Color32::TRANSPARENT
-                    });
-                    let resp = frame
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                                ui.painter().rect_filled(
-                                    r,
-                                    CornerRadius::same(2),
-                                    a.color.map(rgb).unwrap_or(Color32::GRAY),
-                                );
-                                ui.strong(a.kind.label());
-                                ui.weak(format_pdf_date(&a.modified));
-                                if !a.status.is_empty() && a.status != "None" {
-                                    let chip = egui::RichText::new(status_name(&a.status)).small().color(Color32::WHITE);
-                                    egui::Frame::new()
-                                        .fill(status_color(&a.status))
-                                        .corner_radius(CornerRadius::same(6))
-                                        .inner_margin(egui::Margin::symmetric(5, 1))
-                                        .show(ui, |ui| ui.label(chip));
+                if is_selected {
+                    // Reply and status for the selected comment.
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        let status = if a.status.is_empty() { "None" } else { a.status.as_str() };
+                        egui::ComboBox::from_id_salt(("status", tab.id))
+                            .selected_text(tf("Status: {status}", &[("status", &status_name(status))]))
+                            .show_ui(ui, |ui| {
+                                for s in STATUSES {
+                                    if ui.selectable_label(status == s, status_name(s)).clicked() && status != s {
+                                        let change = AnnotChange {
+                                            status: Some(if s == "None" { String::new() } else { s.to_string() }),
+                                            ..Default::default()
+                                        };
+                                        update = Some((page, a.index, change));
+                                    }
                                 }
                             });
-                            if !a.author.is_empty() {
-                                ui.weak(&a.author);
-                            }
-                            // Long texts are cut to a short preview; the selected
-                            // comment shows them in full.
-                            if !a.contents.is_empty() {
-                                comment_text(ui, &a.contents, (!is_selected).then_some(4));
-                            }
-                            for r in a.other_replies.iter().chain(&a.replies) {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add_space(10.0);
-                                    ui.weak("↳");
-                                    ui.strong(if r.author.is_empty() { "?" } else { r.author.as_str() });
-                                    ui.weak(format_pdf_date(&r.date));
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add_space(22.0);
-                                    comment_text(ui, &r.text, (!is_selected).then_some(2));
-                                });
-                            }
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if resp.clicked() {
-                        clicked = Some((page, a.index));
-                    }
-                    if is_selected {
-                        // Reply and status for the selected comment.
-                        ui.horizontal(|ui| {
-                            ui.add_space(10.0);
-                            let status = if a.status.is_empty() { "None" } else { a.status.as_str() };
-                            egui::ComboBox::from_id_salt(("status", tab.id))
-                                .selected_text(tf("Status: {status}", &[("status", &status_name(status))]))
-                                .show_ui(ui, |ui| {
-                                    for s in STATUSES {
-                                        if ui.selectable_label(status == s, status_name(s)).clicked() && status != s {
-                                            let change = AnnotChange {
-                                                status: Some(if s == "None" { String::new() } else { s.to_string() }),
-                                                ..Default::default()
-                                            };
-                                            update = Some((page, a.index, change));
-                                        }
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(10.0);
-                            let edit = ui.add(
-                                egui::TextEdit::multiline(&mut tab.reply_draft)
-                                    .hint_text(t("Reply…"))
-                                    .desired_rows(1)
-                                    .desired_width(ui.available_width() - 60.0),
-                            );
-                            let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-                            let text = tab.reply_draft.trim().to_string();
-                            if (ui.add_enabled(!text.is_empty(), egui::Button::new(t("Reply"))).clicked() || enter) && !text.is_empty() {
-                                let mut replies = a.replies.clone();
-                                replies.push(Reply {
-                                    author: author.to_string(),
-                                    date: pdf_date_now(),
-                                    text,
-                                });
-                                update = Some((
-                                    page,
-                                    a.index,
-                                    AnnotChange {
-                                        replies: Some(replies),
-                                        ..Default::default()
-                                    },
-                                ));
-                            }
-                        });
-                    }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        let edit = ui.add(
+                            egui::TextEdit::multiline(&mut tab.reply_draft)
+                                .hint_text(t("Reply…"))
+                                .desired_rows(1)
+                                .desired_width(ui.available_width() - 60.0),
+                        );
+                        let enter =
+                            edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+                        let text = tab.reply_draft.trim().to_string();
+                        if (ui.add_enabled(!text.is_empty(), egui::Button::new(t("Reply"))).clicked() || enter)
+                            && !text.is_empty()
+                        {
+                            let mut replies = a.replies.clone();
+                            replies.push(Reply { author: author.to_string(), date: pdf_date_now(), text });
+                            update =
+                                Some((page, a.index, AnnotChange { replies: Some(replies), ..Default::default() }));
+                        }
+                    });
                 }
             }
-            if shown == 0 {
-                ui.weak(t("No comments match the filter."));
-            }
-        });
+        }
+        if shown == 0 {
+            ui.weak(t("No comments match the filter."));
+        }
+    });
     if let Some((page, index, change)) = update {
         if change.replies.is_some() {
             tab.reply_draft.clear();
         }
-        tab.outbox.push(Request::UpdateAnnot {
-            doc: tab.id,
-            page,
-            index,
-            change,
-        });
+        tab.outbox.push(Request::UpdateAnnot { doc: tab.id, page, index, change });
     }
     if let Some((page, index)) = clicked {
         if selected != Some((page, index)) {
@@ -959,7 +908,10 @@ fn hit_row(ui: &mut Ui, hit: &SearchHit, selected: bool) -> bool {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.add_sized([34.0, 14.0], egui::Label::new(egui::RichText::new(format!("p.{}", hit.page + 1)).small().weak()));
+                ui.add_sized(
+                    [34.0, 14.0],
+                    egui::Label::new(egui::RichText::new(format!("p.{}", hit.page + 1)).small().weak()),
+                );
                 ui.add(egui::Label::new(hit_text(ui, hit)).wrap());
             });
         })
@@ -995,16 +947,13 @@ fn search_results(ui: &mut Ui, tab: &mut DocTab) {
     }
     ui.separator();
     let mut clicked = None;
-    egui::ScrollArea::vertical()
-        .id_salt(("search", tab.id))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (i, hit) in tab.search.hits.iter().enumerate() {
-                if hit_row(ui, hit, tab.search.current == Some(i)) {
-                    clicked = Some(i);
-                }
+    egui::ScrollArea::vertical().id_salt(("search", tab.id)).auto_shrink([false, false]).show(ui, |ui| {
+        for (i, hit) in tab.search.hits.iter().enumerate() {
+            if hit_row(ui, hit, tab.search.current == Some(i)) {
+                clicked = Some(i);
             }
-        });
+        }
+    });
     if let Some(i) = clicked {
         tab.show_search_hit(i);
     }
@@ -1023,33 +972,33 @@ pub fn search_all_results(ui: &mut Ui, tabs: &mut [DocTab], active: &mut usize) 
             ui.spinner();
         }
         let files = tabs.iter().filter(|t| !t.search.hits.is_empty()).count();
-        ui.label(tf("{total} results for “{query}” in {files} of {count} files", &[("total", &total), ("query", &query), ("files", &files), ("count", &tabs.len())]));
+        ui.label(tf(
+            "{total} results for “{query}” in {files} of {count} files",
+            &[("total", &total), ("query", &query), ("files", &files), ("count", &tabs.len())],
+        ));
     });
     ui.separator();
     let mut clicked = None;
-    egui::ScrollArea::vertical()
-        .id_salt("search_all")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (ti, tab) in tabs.iter().enumerate() {
-                if tab.search.hits.is_empty() {
-                    continue;
-                }
-                let id = ui.make_persistent_id(("search_doc", tab.id));
-                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
-                    .show_header(ui, |ui| {
-                        ui.strong(tab.title());
-                        ui.weak(format!("({})", tab.search.hits.len()));
-                    })
-                    .body(|ui| {
-                        for (i, hit) in tab.search.hits.iter().enumerate() {
-                            if hit_row(ui, hit, ti == *active && tab.search.current == Some(i)) {
-                                clicked = Some((ti, i));
-                            }
-                        }
-                    });
+    egui::ScrollArea::vertical().id_salt("search_all").auto_shrink([false, false]).show(ui, |ui| {
+        for (ti, tab) in tabs.iter().enumerate() {
+            if tab.search.hits.is_empty() {
+                continue;
             }
-        });
+            let id = ui.make_persistent_id(("search_doc", tab.id));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                .show_header(ui, |ui| {
+                    ui.strong(tab.title());
+                    ui.weak(format!("({})", tab.search.hits.len()));
+                })
+                .body(|ui| {
+                    for (i, hit) in tab.search.hits.iter().enumerate() {
+                        if hit_row(ui, hit, ti == *active && tab.search.current == Some(i)) {
+                            clicked = Some((ti, i));
+                        }
+                    }
+                });
+        }
+    });
     if let Some((ti, i)) = clicked {
         *active = ti;
         tabs[ti].show_search_hit(i);
@@ -1075,7 +1024,12 @@ mod tests {
         tab
     }
 
-    fn frame(ctx: &egui::Context, tab: &mut DocTab, events: Vec<egui::Event>, mods: egui::Modifiers) -> Vec<PageAction> {
+    fn frame(
+        ctx: &egui::Context,
+        tab: &mut DocTab,
+        events: Vec<egui::Event>,
+        mods: egui::Modifiers,
+    ) -> Vec<PageAction> {
         frame_with(ctx, tab, events, mods, &mut 150.0)
     }
 
@@ -1097,7 +1051,8 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions, thumb_width, "Tester"));
+            egui::CentralPanel::default()
+                .show(ui, |ui| show(ui, tab, &mut side, &mut cache, &mut actions, thumb_width, "Tester"));
         });
         out.textures_delta.clear();
         actions
@@ -1108,12 +1063,7 @@ mod tests {
     }
 
     fn press(pos: egui::Pos2, pressed: bool, mods: egui::Modifiers) -> egui::Event {
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: mods,
-        }
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: mods }
     }
 
     fn click(ctx: &egui::Context, tab: &mut DocTab, at: egui::Pos2, mods: egui::Modifiers) {
@@ -1232,12 +1182,8 @@ mod tests {
         tab.page_selection = [1, 4].into_iter().collect();
         tab.page_versions.insert(4, 2);
         let m = PageOp::Delete { pages: vec![1] }.mapping(5);
-        let info = DocInfo {
-            page_sizes: vec![(595.0, 842.0); 4],
-            outline: Vec::new(),
-            title: None,
-            ..Default::default()
-        };
+        let info =
+            DocInfo { page_sizes: vec![(595.0, 842.0); 4], outline: Vec::new(), title: None, ..Default::default() };
         tab.apply_page_mapping(info, &m);
         assert_eq!(tab.current_page, 2, "stays on the same page, now numbered 3");
         assert_eq!(tab.page_selection.iter().copied().collect::<Vec<_>>(), vec![3]);

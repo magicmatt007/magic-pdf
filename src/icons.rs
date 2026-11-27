@@ -72,10 +72,7 @@ pub fn install(ctx: &egui::Context) {
     ctx.add_font(FontInsert::new(
         "phosphor",
         egui::FontData::from_static(include_bytes!("../assets/fonts/phosphor/Phosphor-Regular.ttf")),
-        vec![InsertFontFamily {
-            family: family(),
-            priority: FontPriority::Highest,
-        }],
+        vec![InsertFontFamily { family: family(), priority: FontPriority::Highest }],
     ));
 }
 

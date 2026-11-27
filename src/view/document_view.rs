@@ -2,20 +2,20 @@
 //! selection, links and annotation tools.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Shadow, Shape, Stroke, StrokeKind,
-    Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Shadow, Shape, Stroke, StrokeKind, Ui,
+    Vec2, pos2, vec2,
 };
 
+use crate::document::{AnnotDrag, AnnotSelection, DocTab, Draft, DragMode, LoadState, Selection, quad};
+use crate::engine::StampSpec;
+use crate::engine::{
+    Align, AnnotChange, AnnotInfo, AnnotKind, CharStyle, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request,
+    Resize, Rgb, form_mods,
+};
 use crate::i18n::{t, tf};
 use crate::icons;
-use crate::document::{AnnotDrag, AnnotSelection, DocTab, DragMode, Draft, LoadState, Selection, quad};
-use crate::engine::{
-    Align, AnnotChange, CharStyle, AnnotInfo, AnnotKind, FormMouse, LinkTarget, NewAnnot, PdfBox, RenderKey, Request, Resize, Rgb,
-    form_mods,
-};
-use crate::engine::StampSpec;
-use crate::settings::{AnnotStyle, Signature};
 use crate::keys::kb;
+use crate::settings::{AnnotStyle, Signature};
 use crate::view::cache::{TextureCache, exact_width, snap_to_pixels, width_bucket};
 use crate::view::color_picker;
 use crate::view::layout::{GAP, LayoutMode, geom_box_to_local, geom_local_to_pdf, geom_pdf_to_local};
@@ -148,9 +148,14 @@ impl Tool {
             Tool::StrikeOut => Some(&mut style.strikeout),
             Tool::Note => Some(&mut style.note),
             Tool::Ink => Some(&mut style.ink),
-            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Polygon | Tool::Cloud | Tool::Distance | Tool::Area => {
-                Some(&mut style.shape)
-            }
+            Tool::Rect
+            | Tool::Ellipse
+            | Tool::Line
+            | Tool::Arrow
+            | Tool::Polygon
+            | Tool::Cloud
+            | Tool::Distance
+            | Tool::Area => Some(&mut style.shape),
             Tool::TextBox => Some(&mut style.textbox_border),
             Tool::Stamp if style.stamp_image.is_none() => Some(&mut style.stamp_color),
             Tool::Signature => Some(&mut style.signature_color),
@@ -211,12 +216,12 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
             return;
         }
         LoadState::NeedsPassword { .. } => {
-            centered_text(ui, view, "This document is password protected.");
+            centered_text(ui, view, t("This document is password protected."));
             return;
         }
     }
     if tab.page_count() == 0 {
-        centered_text(ui, view, "The document has no pages.");
+        centered_text(ui, view, t("The document has no pages."));
         return;
     }
     tab.view_rect = view;
@@ -237,7 +242,12 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
         && let Some(rect) = tab.grid_focus.and_then(|p| tab.layout.page_rect(p))
     {
         let s = tab.viewport.rect_to_screen(rect, view).expand(4.0);
-        ui.painter_at(view).rect_stroke(s, CornerRadius::same(3), Stroke::new(3.0, Color32::from_rgb(30, 120, 255)), StrokeKind::Outside);
+        ui.painter_at(view).rect_stroke(
+            s,
+            CornerRadius::same(3),
+            Stroke::new(3.0, Color32::from_rgb(30, 120, 255)),
+            StrokeKind::Outside,
+        );
     }
     selection_toolbar(ui, tab, view, &cx);
     annotation_popup(ui, tab, view, cx.recent_colors, cx.author);
@@ -259,11 +269,7 @@ fn apply_fit(tab: &mut DocTab, view: Rect) {
         return;
     }
     let page = tab.current_page;
-    let target = if tab.mode == LayoutMode::Facing {
-        tab.layout.row_rect(page)
-    } else {
-        tab.layout.page_rect(page)
-    };
+    let target = if tab.mode == LayoutMode::Facing { tab.layout.row_rect(page) } else { tab.layout.page_rect(page) };
     let Some(target) = target else { return };
     if let Some(z) = Viewport::fit_zoom(tab.viewport.fit, target.size(), view.size(), GAP * tab.viewport.zoom.min(1.0))
         && (z - tab.viewport.zoom).abs() > 1e-4
@@ -344,12 +350,7 @@ fn redact_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
         }
     } else if response.drag_stopped() {
         if let Some((page, a, b)) = tab.redact_drag.take() {
-            let r = PdfBox {
-                left: a.x.min(b.x),
-                bottom: a.y.min(b.y),
-                right: a.x.max(b.x),
-                top: a.y.max(b.y),
-            };
+            let r = PdfBox { left: a.x.min(b.x), bottom: a.y.min(b.y), right: a.x.max(b.x), top: a.y.max(b.y) };
             tab.mark_redaction(page, r);
         }
     } else if response.clicked()
@@ -386,14 +387,8 @@ fn word_at(tab: &DocTab, page: usize, p: Pos2) -> Option<PdfBox> {
 }
 
 fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, cx: &mut ViewContext<'_>) {
-    let (scroll, zoom_delta, shift, pointer) = ui.input(|i| {
-        (
-            i.smooth_scroll_delta,
-            i.zoom_delta(),
-            i.modifiers.shift,
-            i.pointer.hover_pos(),
-        )
-    });
+    let (scroll, zoom_delta, shift, pointer) =
+        ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.shift, i.pointer.hover_pos()));
     let hovered = response.hovered() || response.contains_pointer();
     if response.clicked() || response.drag_started() {
         // Delete now refers to annotations again, not to selected thumbnails.
@@ -450,20 +445,15 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     }
     tab.viewport.offset -= delta / tab.viewport.zoom;
 
-    let (middle_down, primary_down) = ui.input(|i| {
-        (
-            i.pointer.button_down(egui::PointerButton::Middle),
-            i.pointer.primary_down(),
-        )
-    });
+    let (middle_down, primary_down) =
+        ui.input(|i| (i.pointer.button_down(egui::PointerButton::Middle), i.pointer.primary_down()));
     let tool = cx.tool;
 
     // Only use the pointer for page interaction when the page is what is under it,
     // not a popup or menu drawn on top (e.g. the annotation popup over a form field).
     // A drag that started on the page keeps going even if it passes under a popup.
-    let pointer = pointer.filter(|p| {
-        response.dragged() || response.drag_stopped() || ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
-    });
+    let pointer = pointer
+        .filter(|p| response.dragged() || response.drag_stopped() || ui.ctx().layer_id_at(*p) == Some(ui.layer_id()));
 
     if tool == Tool::Redact && !middle_down {
         redact_input(ui, tab, response, view, pointer);
@@ -486,12 +476,8 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
             && response.clicked()
             && let Some((page, p)) = pointer.and_then(|pt| screen_to_pdf(tab, pt, view, None))
         {
-            let rect = PdfBox {
-                left: p.x,
-                bottom: p.y - 20.0,
-                right: p.x + crate::engine::textbox::DEFAULT_WIDTH,
-                top: p.y,
-            };
+            let rect =
+                PdfBox { left: p.x, bottom: p.y - 20.0, right: p.x + crate::engine::textbox::DEFAULT_WIDTH, top: p.y };
             create(tab, page, cx, AnnotKind::FreeText, rect, cx.style.textbox_border, Vec::new(), Vec::new());
             return;
         }
@@ -501,7 +487,10 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     }
 
     // Moving and resizing annotations with the hand and select tools.
-    if matches!(tool, Tool::Hand | Tool::SelectText) && !middle_down && annot_drag_input(ui, tab, response, view, pointer) {
+    if matches!(tool, Tool::Hand | Tool::SelectText)
+        && !middle_down
+        && annot_drag_input(ui, tab, response, view, pointer)
+    {
         return;
     }
 
@@ -559,12 +548,8 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
     if tool == Tool::Note {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         if response.clicked() {
-            let rect = PdfBox {
-                left: pdf_pt.x,
-                top: pdf_pt.y,
-                right: pdf_pt.x + NOTE_SIZE,
-                bottom: pdf_pt.y - NOTE_SIZE,
-            };
+            let rect =
+                PdfBox { left: pdf_pt.x, top: pdf_pt.y, right: pdf_pt.x + NOTE_SIZE, bottom: pdf_pt.y - NOTE_SIZE };
             create(tab, page, cx, AnnotKind::Note, rect, cx.style.note, Vec::new(), Vec::new());
         }
         return;
@@ -654,27 +639,18 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
 
     // Text selection (select tool and text markup tools).
     let Some(text) = tab.texts.get(&page).and_then(|t| t.as_ref()) else { return };
-    let over_text = text
-        .chars
-        .iter()
-        .any(|c| c.rect.is_some_and(|r| r.expand(1.0).contains(pdf_pt.x, pdf_pt.y)));
+    let over_text = text.chars.iter().any(|c| c.rect.is_some_and(|r| r.expand(1.0).contains(pdf_pt.x, pdf_pt.y)));
     if over_text && link.is_none() {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
     }
     if response.drag_started_by(egui::PointerButton::Primary) {
         // A drag is noticed only after a few pixels of movement: start where the
         // button was pressed.
-        let origin = ui
-            .input(|i| i.pointer.press_origin())
-            .and_then(|o| screen_to_pdf_on(tab, o, view, page))
-            .unwrap_or(pdf_pt);
+        let origin =
+            ui.input(|i| i.pointer.press_origin()).and_then(|o| screen_to_pdf_on(tab, o, view, page)).unwrap_or(pdf_pt);
         if let Some(i) = caret_at(text, origin) {
             // Nothing is selected until the mouse moves away from where it started.
-            tab.selection = Some(Selection {
-                page,
-                anchor: i,
-                head: i,
-            });
+            tab.selection = Some(Selection { page, anchor: i, head: i });
             tab.selecting = true;
             tab.deselect_annot();
         }
@@ -700,11 +676,7 @@ fn handle_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
             while b + 1 < text.chars.len() && is_word(text.chars[b + 1].ch) {
                 b += 1;
             }
-            tab.selection = Some(Selection {
-                page,
-                anchor: a,
-                head: b + 1,
-            });
+            tab.selection = Some(Selection { page, anchor: a, head: b + 1 });
             if let Some(kind) = tool.markup_kind() {
                 create_markup(tab, cx, kind);
             }
@@ -727,11 +699,7 @@ fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> b
         return false;
     };
     let Some((_, p)) = screen_to_pdf(tab, pointer, view, Some(page)) else { return false };
-    let widget = tab
-        .widgets
-        .get(&page)
-        .and_then(|ws| ws.iter().find(|w| w.rect.contains(p.x, p.y)))
-        .cloned();
+    let widget = tab.widgets.get(&page).and_then(|ws| ws.iter().find(|w| w.rect.contains(p.x, p.y))).cloned();
     let focused_here = tab.form_focus == Some(page);
     let (pressed, released, double, moved, mods) = ui.input(|i| {
         let m = &i.modifiers;
@@ -762,14 +730,7 @@ fn form_input(ui: &Ui, tab: &mut DocTab, view: Rect, pointer: Option<Pos2>) -> b
         });
     }
     let mut send = |event| {
-        tab.outbox.push(Request::FormMouse {
-            doc: tab.id,
-            page,
-            event,
-            x: p.x,
-            y: p.y,
-            modifiers: mods,
-        });
+        tab.outbox.push(Request::FormMouse { doc: tab.id, page, event, x: p.x, y: p.y, modifiers: mods });
     };
     if moved {
         send(FormMouse::Move);
@@ -805,10 +766,15 @@ fn draw_tool_input(
     let poly_tool = matches!(cx.tool, Tool::Polygon | Tool::Cloud | Tool::Area);
     if poly_tool {
         // Clicks add corners; double-click, Enter or a click on the first corner finish.
-        let at = screen_to_pdf(tab, pointer, view, match &tab.draft {
-            Some(Draft::Poly { page, .. }) => Some(*page),
-            _ => None,
-        });
+        let at = screen_to_pdf(
+            tab,
+            pointer,
+            view,
+            match &tab.draft {
+                Some(Draft::Poly { page, .. }) => Some(*page),
+                _ => None,
+            },
+        );
         if let (Some(Draft::Poly { hover, .. }), Some((_, p))) = (&mut tab.draft, at) {
             *hover = Some(p);
         }
@@ -835,11 +801,7 @@ fn draw_tool_input(
                 }
                 (_, Some((page, p))) => {
                     tab.deselect_annot();
-                    tab.draft = Some(Draft::Poly {
-                        page,
-                        points: vec![p],
-                        hover: None,
-                    });
+                    tab.draft = Some(Draft::Poly { page, points: vec![p], hover: None });
                 }
                 _ => {}
             }
@@ -862,10 +824,7 @@ fn draw_tool_input(
             if let Some((page, p)) = screen_to_pdf(tab, press, view, Some(page)) {
                 tab.deselect_annot();
                 tab.draft = Some(match cx.tool {
-                    Tool::Ink => Draft::Ink {
-                        page,
-                        points: vec![p],
-                    },
+                    Tool::Ink => Draft::Ink { page, points: vec![p] },
                     _ => Draft::Shape { page, start: p, end: p },
                 });
             }
@@ -884,7 +843,11 @@ fn draw_tool_input(
                     }
                 }
                 Some(Draft::Shape { start, end, .. }) => {
-                    *end = if shift && matches!(cx.tool, Tool::Line | Tool::Arrow | Tool::Distance) { snap_45(*start, p) } else { p };
+                    *end = if shift && matches!(cx.tool, Tool::Line | Tool::Arrow | Tool::Distance) {
+                        snap_45(*start, p)
+                    } else {
+                        p
+                    };
                 }
                 Some(Draft::Poly { .. }) | None => {}
             }
@@ -897,12 +860,7 @@ fn draw_tool_input(
                 let w = style.ink_width;
                 let rect = points
                     .iter()
-                    .map(|p| PdfBox {
-                        left: p.x,
-                        bottom: p.y,
-                        right: p.x,
-                        top: p.y,
-                    })
+                    .map(|p| PdfBox { left: p.x, bottom: p.y, right: p.x, top: p.y })
                     .reduce(PdfBox::union)
                     .unwrap()
                     .expand(w);
@@ -929,12 +887,7 @@ fn draw_tool_input(
                     right = left + crate::engine::textbox::DEFAULT_WIDTH;
                 }
                 let top = start.y.max(end.y);
-                let rect = PdfBox {
-                    left,
-                    bottom: top - 20.0,
-                    right,
-                    top,
-                };
+                let rect = PdfBox { left, bottom: top - 20.0, right, top };
                 create(tab, page, cx, AnnotKind::FreeText, rect, style.textbox_border, Vec::new(), Vec::new());
             }
             Draft::Shape { page, start, end } => {
@@ -945,11 +898,7 @@ fn draw_tool_input(
                     top: start.y.max(end.y),
                 };
                 if rect.right - rect.left >= 3.0 && rect.top - rect.bottom >= 3.0 {
-                    let kind = if cx.tool == Tool::Ellipse {
-                        AnnotKind::Circle
-                    } else {
-                        AnnotKind::Square
-                    };
+                    let kind = if cx.tool == Tool::Ellipse { AnnotKind::Circle } else { AnnotKind::Square };
                     create(tab, page, cx, kind, rect, style.shape, Vec::new(), Vec::new());
                 }
             }
@@ -1037,12 +986,7 @@ fn finish_poly(tab: &mut DocTab, cx: &ViewContext<'_>) {
 
 /// Places the chosen stamp or signature centred on `at` (PDF space).
 fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
-    let point = PdfBox {
-        left: at.x,
-        bottom: at.y,
-        right: at.x,
-        top: at.y,
-    };
+    let point = PdfBox { left: at.x, bottom: at.y, right: at.x, top: at.y };
     let centred = |w: f32, h: f32| PdfBox {
         left: at.x - w / 2.0,
         bottom: at.y - h / 2.0,
@@ -1053,7 +997,7 @@ fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
     let annot = match cx.tool {
         Tool::Stamp => {
             let Some(spec) = cx.stamp else {
-                tab.error_message = Some("Choose a stamp in the tool options bar first.".into());
+                tab.error_message = Some(t("Choose a stamp in the tool options bar first.").into());
                 return;
             };
             let rect = match spec {
@@ -1074,10 +1018,8 @@ fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
                 let w = 150.0_f32;
                 let h = strokes.iter().flatten().map(|p| p[1]).fold(0.0_f32, f32::max).max(0.05) * w;
                 let r = centred(w, h);
-                let ink: Vec<Vec<(f32, f32)>> = strokes
-                    .iter()
-                    .map(|s| s.iter().map(|p| (r.left + p[0] * w, r.top - p[1] * w)).collect())
-                    .collect();
+                let ink: Vec<Vec<(f32, f32)>> =
+                    strokes.iter().map(|s| s.iter().map(|p| (r.left + p[0] * w, r.top - p[1] * w)).collect()).collect();
                 let mut a = NewAnnot::new(AnnotKind::Ink, r.expand(2.0), style.signature_color);
                 a.width = 1.5;
                 a.ink = ink;
@@ -1085,12 +1027,13 @@ fn place_stamp(tab: &mut DocTab, page: usize, at: Pos2, cx: &ViewContext<'_>) {
             }
             (Some(Signature::Image(_)), Some(spec @ StampSpec::Image { width, height, .. })) => {
                 let w = 150.0_f32;
-                let mut a = NewAnnot::new(AnnotKind::Stamp, centred(w, w * *height as f32 / (*width).max(1) as f32), [0, 0, 0]);
+                let mut a =
+                    NewAnnot::new(AnnotKind::Stamp, centred(w, w * *height as f32 / (*width).max(1) as f32), [0, 0, 0]);
                 a.stamp = Some(spec.clone());
                 a
             }
             _ => {
-                tab.error_message = Some("Create a signature first (tool options bar: Signatures…).".into());
+                tab.error_message = Some(t("Create a signature first (tool options bar: Signatures…).").into());
                 return;
             }
         },
@@ -1214,11 +1157,7 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
         visible.expand2(vec2(0.0, visible.height()))
     };
 
-    let page_bg = if cx.night {
-        Color32::from_gray(30)
-    } else {
-        Color32::WHITE
-    };
+    let page_bg = if cx.night { Color32::from_gray(30) } else { Color32::WHITE };
 
     for page in tab.layout.pages_in(prefetch) {
         let Some(rect) = tab.layout.page_rect(page) else { continue };
@@ -1227,18 +1166,10 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
         let screen = snap_to_pixels(tab.viewport.rect_to_screen(rect, view), ppp);
         let want_w = exact_width(screen.width() * ppp, size.y / size.x.max(1.0));
         let version = tab.page_version(page);
-        let key = RenderKey {
-            doc: tab.id,
-            page,
-            width_px: want_w,
-            rotation: tab.rotation,
-            version,
-            tile: 0,
-        };
+        let key = RenderKey { doc: tab.id, page, width_px: want_w, rotation: tab.rotation, version, tile: 0 };
         let is_visible = rect.intersects(visible);
         let distance = (rect.center() - center).length() / visible.size().length().max(1.0);
-        tab.wanted
-            .push((key, if is_visible { distance } else { 2.0 + distance }));
+        tab.wanted.push((key, if is_visible { distance } else { 2.0 + distance }));
 
         if !is_visible {
             continue;
@@ -1248,13 +1179,8 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
         }
 
         painter.add(
-            Shadow {
-                offset: [2, 3],
-                blur: 8,
-                spread: 0,
-                color: Color32::from_black_alpha(90),
-            }
-            .as_shape(screen, CornerRadius::ZERO),
+            Shadow { offset: [2, 3], blur: 8, spread: 0, color: Color32::from_black_alpha(90) }
+                .as_shape(screen, CornerRadius::ZERO),
         );
         painter.rect_filled(screen, CornerRadius::ZERO, page_bg);
 
@@ -1265,19 +1191,11 @@ fn paint_pages(ui: &Ui, tab: &mut DocTab, view: Rect, cx: &mut ViewContext<'_>) 
                     tab.wanted.retain(|(k, _)| *k != key);
                     tab.wanted.push((key, distance * 0.5));
                 }
-                painter.image(
-                    tex.id(),
-                    screen,
-                    Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                painter.image(tex.id(), screen, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
             }
             None => {
                 // Nothing yet: ask for a fast low-resolution render first.
-                let preview = RenderKey {
-                    width_px: width_bucket(160.0, size.y / size.x.max(1.0)).min(want_w),
-                    ..key
-                };
+                let preview = RenderKey { width_px: width_bucket(160.0, size.y / size.x.max(1.0)).min(want_w), ..key };
                 tab.wanted.push((preview, -1.0 + distance));
             }
         }
@@ -1318,8 +1236,10 @@ fn paint_tiles(
     let tile = TILE as f32;
     let to_px = |p: Pos2| ((p - screen.min) / scale).to_pos2();
     let (a, b) = (to_px(vis.min), to_px(vis.max));
-    let cols = (a.x / tile).floor().max(0.0) as u32..=((b.x / tile).ceil() as u32).min(full_w.div_ceil(TILE)).saturating_sub(1);
-    let rows = (a.y / tile).floor().max(0.0) as u32..=((b.y / tile).ceil() as u32).min(full_h.div_ceil(TILE)).saturating_sub(1);
+    let cols = (a.x / tile).floor().max(0.0) as u32
+        ..=((b.x / tile).ceil() as u32).min(full_w.div_ceil(TILE)).saturating_sub(1);
+    let rows = (a.y / tile).floor().max(0.0) as u32
+        ..=((b.y / tile).ceil() as u32).min(full_h.div_ceil(TILE)).saturating_sub(1);
     for row in rows {
         for col in cols.clone() {
             let key = RenderKey {
@@ -1332,10 +1252,8 @@ fn paint_tiles(
             };
             let (x, y) = (col * TILE, row * TILE);
             let (w, h) = (TILE.min(full_w - x), TILE.min(full_h.saturating_sub(y)).max(1));
-            let r = Rect::from_min_size(
-                screen.min + vec2(x as f32, y as f32) * scale,
-                vec2(w as f32, h as f32) * scale,
-            );
+            let r =
+                Rect::from_min_size(screen.min + vec2(x as f32, y as f32) * scale, vec2(w as f32, h as f32) * scale);
             match cx.cache.get(&key) {
                 Some(tex) => {
                     painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
@@ -1352,7 +1270,13 @@ fn paint_drag_target(painter: &egui::Painter, tab: &DocTab, view: Rect) {
     let Some(page_rect) = tab.layout.page_rect(d.page) else { return };
     let s = tab.viewport.rect_to_screen(d.current.translate(page_rect.min.to_vec2()), view);
     let blue = Color32::from_rgb(30, 120, 255);
-    painter.rect(s, CornerRadius::same(2), Color32::from_rgba_unmultiplied(30, 120, 255, 30), Stroke::new(1.5, blue), StrokeKind::Outside);
+    painter.rect(
+        s,
+        CornerRadius::same(2),
+        Color32::from_rgba_unmultiplied(30, 120, 255, 30),
+        Stroke::new(1.5, blue),
+        StrokeKind::Outside,
+    );
 }
 
 fn paint_overlays(painter: &egui::Painter, tab: &DocTab, page: usize, view: Rect) {
@@ -1437,10 +1361,7 @@ fn paint_draft(painter: &egui::Painter, tab: &DocTab, view: Rect, cx: &ViewConte
     let zoom = tab.viewport.zoom;
     match &tab.draft {
         Some(Draft::Ink { page, points }) => {
-            let pts: Vec<Pos2> = points
-                .iter()
-                .filter_map(|p| pdf_to_screen(tab, *page, *p, view))
-                .collect();
+            let pts: Vec<Pos2> = points.iter().filter_map(|p| pdf_to_screen(tab, *page, *p, view)).collect();
             let stroke = Stroke::new(cx.style.ink_width * zoom, rgb(cx.style.ink));
             painter.add(Shape::line(pts, stroke));
         }
@@ -1596,12 +1517,7 @@ fn local_to_pdf_box(tab: &DocTab, page: usize, r: Rect) -> Option<PdfBox> {
     let geom = tab.geoms.get(&page)?;
     let a = geom_local_to_pdf(r.min, geom, tab.rotation);
     let b = geom_local_to_pdf(r.max, geom, tab.rotation);
-    Some(PdfBox {
-        left: a.x.min(b.x),
-        bottom: a.y.min(b.y),
-        right: a.x.max(b.x),
-        top: a.y.max(b.y),
-    })
+    Some(PdfBox { left: a.x.min(b.x), bottom: a.y.min(b.y), right: a.x.max(b.x), top: a.y.max(b.y) })
 }
 
 fn send_rect(tab: &mut DocTab, page: usize, index: usize, rect: PdfBox) {
@@ -1615,22 +1531,13 @@ fn send_rect(tab: &mut DocTab, page: usize, index: usize, rect: PdfBox) {
         doc: tab.id,
         page,
         index,
-        change: AnnotChange {
-            rect: Some(rect),
-            ..Default::default()
-        },
+        change: AnnotChange { rect: Some(rect), ..Default::default() },
     });
 }
 
 /// Starts, updates and finishes dragging an annotation. Returns true if the input
 /// was used for that.
-fn annot_drag_input(
-    ui: &Ui,
-    tab: &mut DocTab,
-    response: &egui::Response,
-    view: Rect,
-    pointer: Option<Pos2>,
-) -> bool {
+fn annot_drag_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, pointer: Option<Pos2>) -> bool {
     let (primary_down, shift, press) =
         ui.input(|i| (i.pointer.primary_down(), i.modifiers.shift, i.pointer.press_origin()));
     let local_of = |tab: &DocTab, screen: Pos2, page: usize| -> Option<Pos2> {
@@ -1670,13 +1577,7 @@ fn annot_drag_input(
             && let Some(rect) = local_to_pdf_box(tab, to_page, d.current.translate(from.min - to.min))
         {
             tab.deselect_annot();
-            tab.outbox.push(Request::MoveAnnotToPage {
-                doc: tab.id,
-                page: d.page,
-                index: d.index,
-                to_page,
-                rect,
-            });
+            tab.outbox.push(Request::MoveAnnotToPage { doc: tab.id, page: d.page, index: d.index, to_page, rect });
         } else if moved && let Some(rect) = local_to_pdf_box(tab, d.page, d.current) {
             send_rect(tab, d.page, d.index, rect);
         }
@@ -1732,14 +1633,7 @@ fn annot_drag_input(
     };
     tab.select_annot(page, annot.index);
     tab.selection = None;
-    tab.annot_drag = Some(AnnotDrag {
-        page,
-        index: annot.index,
-        mode,
-        start: rect,
-        start_pointer,
-        current: rect,
-    });
+    tab.annot_drag = Some(AnnotDrag { page, index: annot.index, mode, start: rect, start_pointer, current: rect });
     true
 }
 
@@ -1857,10 +1751,7 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                 ui.horizontal(|ui| {
                     ui.strong(annot.kind.label());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(icons::sized(icons::TRASH, 14.0))
-                            .on_hover_text(t("Delete (Del)"))
-                            .clicked()
+                        if ui.small_button(icons::sized(icons::TRASH, 14.0)).on_hover_text(t("Delete (Del)")).clicked()
                         {
                             delete = true;
                         }
@@ -1880,13 +1771,15 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                     let is_box = annot.kind == AnnotKind::FreeText;
                     egui::Grid::new(("annot_style", tab.id)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                         ui.label(if is_box { "Border" } else { "Colour" });
-                        if let Some(Some(c)) = color_picker::color_button(ui, "annot_color", annot.color, false, recent) {
+                        if let Some(Some(c)) = color_picker::color_button(ui, "annot_color", annot.color, false, recent)
+                        {
                             change.color = Some(c);
                         }
                         ui.end_row();
                         if annot.kind.has_interior() {
                             ui.label(t("Fill"));
-                            if let Some(c) = color_picker::color_button(ui, "annot_fill", annot.interior, true, recent) {
+                            if let Some(c) = color_picker::color_button(ui, "annot_fill", annot.interior, true, recent)
+                            {
                                 change.interior = Some(c);
                             }
                             ui.end_row();
@@ -1960,7 +1853,8 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
                     );
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_reply_box"), edit.rect));
-                    let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+                    let enter =
+                        edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
                     let text = tab.reply_draft.trim().to_string();
                     let button = ui.add_enabled(!text.is_empty(), egui::Button::new(t("Reply")));
                     #[cfg(test)]
@@ -1990,19 +1884,10 @@ fn annotation_popup(ui: &Ui, tab: &mut DocTab, view: Rect, recent: &mut Vec<Rgb>
         }
     }
     if delete {
-        tab.outbox.push(Request::DeleteAnnot {
-            doc: tab.id,
-            page: sel.page,
-            index: sel.index,
-        });
+        tab.outbox.push(Request::DeleteAnnot { doc: tab.id, page: sel.page, index: sel.index });
         tab.selected_annot = None;
     } else if change != AnnotChange::default() {
-        tab.outbox.push(Request::UpdateAnnot {
-            doc: tab.id,
-            page: sel.page,
-            index: sel.index,
-            change,
-        });
+        tab.outbox.push(Request::UpdateAnnot { doc: tab.id, page: sel.page, index: sel.index, change });
     }
 }
 
@@ -2015,13 +1900,8 @@ fn slider_field(ui: &mut Ui, label: &str, value: f32, range: std::ops::RangeIncl
     ui.horizontal(|ui| {
         let slider = ui.add(egui::Slider::new(&mut v, range.clone()).step_by(step).show_value(false));
         done |= slider.drag_stopped() || (slider.changed() && !slider.dragged());
-        let field = ui.add(
-            egui::DragValue::new(&mut v)
-                .range(range)
-                .speed(0.1)
-                .suffix(" pt")
-                .update_while_editing(false),
-        );
+        let field =
+            ui.add(egui::DragValue::new(&mut v).range(range).speed(0.1).suffix(" pt").update_while_editing(false));
         #[cfg(test)]
         ui.ctx().data_mut(|d| d.insert_temp(Id::unique(("test_number_field", label)), field.rect));
         done |= field.drag_stopped() || (field.changed() && !field.dragged());
@@ -2046,12 +1926,10 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
     let Some(re) = sel.rich.as_mut() else { return };
 
     // The selection as of the last frame (characters).
-    let range = egui::TextEdit::load_state(&ctx, edit_id)
-        .and_then(|s| s.cursor.char_range())
-        .map(|r| {
-            let (a, b) = (r.primary.index.0, r.secondary.index.0);
-            (a.min(b), a.max(b))
-        });
+    let range = egui::TextEdit::load_state(&ctx, edit_id).and_then(|s| s.cursor.char_range()).map(|r| {
+        let (a, b) = (r.primary.index.0, r.secondary.index.0);
+        (a.min(b), a.max(b))
+    });
     let text_focused = ctx.memory(|m| m.has_focus(edit_id));
     if let Some((a, b)) = range.filter(|_| text_focused) {
         // Moving the cursor picks up the style of the text before it.
@@ -2109,23 +1987,26 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     if toggle(ui, current.underline, icons::TEXT_UNDERLINE, &kb(t("Underline (Ctrl+U)"))) {
                         apply(re, &|s| s.underline = !current.underline);
                     }
-                    if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, "Strikethrough") {
+                    if toggle(ui, current.strike, icons::TEXT_STRIKETHROUGH, t("Strikethrough")) {
                         apply(re, &|s| s.strike = !current.strike);
                     }
                     ui.separator();
-                    if let Some(Some(c)) = color_picker::color_button(ui, "box_text", Some(current.color), false, recent) {
+                    if let Some(Some(c)) =
+                        color_picker::color_button(ui, "box_text", Some(current.color), false, recent)
+                    {
                         apply(re, &|s| s.color = c);
                     }
                     let mut size = current.size;
-                    let size_field = ui.add(
-                        egui::DragValue::new(&mut size)
+                    let size_field = ui
+                        .add(
+                            egui::DragValue::new(&mut size)
                                 .range(4.0..=96.0)
                                 .speed(0.2)
                                 .suffix(" pt")
                                 // Typed values apply on Enter, not per keystroke.
                                 .update_while_editing(false),
-                    )
-                    .on_hover_text(t("Font size (drag, or click and type)"));
+                        )
+                        .on_hover_text(t("Font size (drag, or click and type)"));
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_bar_size"), size_field.rect));
                     if size_field.changed() {
@@ -2137,7 +2018,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                         (Align::Center, icons::ALIGN_CENTER, "Centre"),
                         (Align::Right, icons::ALIGN_RIGHT, "Align right"),
                     ] {
-                        if toggle(ui, re.align == align, icon, tip) {
+                        if toggle(ui, re.align == align, icon, t(tip)) {
                             re.align = align;
                         }
                     }
@@ -2155,11 +2036,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
         for (i, ch) in text.as_str().chars().enumerate() {
             let st = styles.get(i).copied().unwrap_or(typing);
             let stroke = |on: bool| {
-                if on {
-                    Stroke::new((st.size * 0.06 * zoom).max(1.0), rgb(st.color))
-                } else {
-                    Stroke::NONE
-                }
+                if on { Stroke::new((st.size * 0.06 * zoom).max(1.0), rgb(st.color)) } else { Stroke::NONE }
             };
             job.append(
                 ch.encode_utf8(&mut [0; 4]),
@@ -2185,39 +2062,36 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
     let mut contents = sel.contents.clone();
     let mut lost = false;
     let width = (screen.width() - 2.0 * pad - 2.0 * border).max(20.0);
-    egui::Area::new(editor_id)
-        .fixed_pos(screen.min)
-        .order(egui::Order::Foreground)
-        .show(&ctx, |ui| {
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(Stroke::new(border, rgb(annot.color.unwrap_or([0, 0, 0]))))
-                .inner_margin(pad)
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    // A box made taller than its text keeps its height while editing.
-                    ui.set_min_height((screen.height() - 2.0 * pad - 2.0 * border).max(0.0));
-                    let edit = ui.add(
-                        egui::TextEdit::multiline(&mut contents)
-                            .id(edit_id)
-                            .layouter(&mut layouter)
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::ZERO)
-                            .desired_rows(1)
-                            .desired_width(width),
-                    );
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_text_box_editor"), edit.rect));
-                    // Return focus to the text only when nothing else has it (a typed
-                    // font size in the bar, the colour picker's hex field, ...).
-                    let others_focused = ui.ctx().memory(|m| m.focused()).is_some_and(|f| f != edit_id);
-                    if sel.focus_contents && !egui::Popup::is_any_open(ui.ctx()) && !others_focused {
-                        edit.request_focus();
-                        sel.focus_contents = false;
-                    }
-                    lost = edit.lost_focus();
-                });
-        });
+    egui::Area::new(editor_id).fixed_pos(screen.min).order(egui::Order::Foreground).show(&ctx, |ui| {
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(border, rgb(annot.color.unwrap_or([0, 0, 0]))))
+            .inner_margin(pad)
+            .show(ui, |ui| {
+                ui.set_width(width);
+                // A box made taller than its text keeps its height while editing.
+                ui.set_min_height((screen.height() - 2.0 * pad - 2.0 * border).max(0.0));
+                let edit = ui.add(
+                    egui::TextEdit::multiline(&mut contents)
+                        .id(edit_id)
+                        .layouter(&mut layouter)
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .desired_rows(1)
+                        .desired_width(width),
+                );
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(Id::unique("test_text_box_editor"), edit.rect));
+                // Return focus to the text only when nothing else has it (a typed
+                // font size in the bar, the colour picker's hex field, ...).
+                let others_focused = ui.ctx().memory(|m| m.focused()).is_some_and(|f| f != edit_id);
+                if sel.focus_contents && !egui::Popup::is_any_open(ui.ctx()) && !others_focused {
+                    edit.request_focus();
+                    sel.focus_contents = false;
+                }
+                lost = edit.lost_focus();
+            });
+    });
     if contents != sel.contents {
         re.styles = crate::document::sync_styles(&sel.contents, &contents, &re.styles, re.typing);
         sel.contents = contents;
@@ -2238,10 +2112,7 @@ fn text_box_editor(ui: &Ui, tab: &mut DocTab, annot: &AnnotInfo, screen: Rect, v
                     doc: tab.id,
                     page: sel.page,
                     index: sel.index,
-                    change: AnnotChange {
-                        rich: Some(rich),
-                        ..Default::default()
-                    },
+                    change: AnnotChange { rich: Some(rich), ..Default::default() },
                 };
                 tab.outbox.push(req);
             }
@@ -2271,10 +2142,7 @@ pub fn focus_annot(tab: &mut DocTab, page: usize, index: usize, edit: bool) {
         tab.deselect_annot();
     }
     tab.select_annot(page, index);
-    if let Some(AnnotSelection {
-        focus_contents, editing, ..
-    }) = &mut tab.selected_annot
-    {
+    if let Some(AnnotSelection { focus_contents, editing, .. }) = &mut tab.selected_annot {
         *focus_contents = edit;
         *editing = edit && is_text_box;
     }
@@ -2312,19 +2180,8 @@ mod tests {
             })
             .collect();
         tab.texts.insert(0, Some(PageText { chars, links: Vec::new() }));
-        tab.geoms.insert(
-            0,
-            PageGeom {
-                size: (595.0, 842.0),
-                origin: (0.0, 0.0),
-                rotation: Rotation::R0,
-            },
-        );
-        tab.selection = Some(Selection {
-            page: 0,
-            anchor: 0,
-            head: 4,
-        });
+        tab.geoms.insert(0, PageGeom { size: (595.0, 842.0), origin: (0.0, 0.0), rotation: Rotation::R0 });
+        tab.selection = Some(Selection { page: 0, anchor: 0, head: 4 });
         tab
     }
 
@@ -2401,26 +2258,17 @@ mod tests {
         for _ in 0..3 {
             frame(&ctx, &mut tab, &mut cache, Vec::new());
         }
-        let rect: Rect = ctx
-            .data(|d| d.get_temp(Id::unique(("test_button", "Highlight"))))
-            .expect("selection toolbar is shown");
+        let rect: Rect =
+            ctx.data(|d| d.get_temp(Id::unique(("test_button", "Highlight")))).expect("selection toolbar is shown");
         let at = rect.center();
         tab.outbox.clear();
         frame(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(at)]);
         frame(&ctx, &mut tab, &mut cache, vec![button(at, true)]);
         frame(&ctx, &mut tab, &mut cache, vec![button(at, false)]);
-        let created = tab.outbox.iter().any(|r| {
-            matches!(
-                r,
-                Request::AddAnnot {
-                    annot: NewAnnot {
-                        kind: AnnotKind::Highlight,
-                        ..
-                    },
-                    ..
-                }
-            )
-        });
+        let created = tab
+            .outbox
+            .iter()
+            .any(|r| matches!(r, Request::AddAnnot { annot: NewAnnot { kind: AnnotKind::Highlight, .. }, .. }));
         assert!(created, "clicking Highlight did not create an annotation");
         assert!(tab.selection.is_none(), "selection is consumed by the highlight");
     }
@@ -2436,12 +2284,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut tab = tab_with_selection();
         tab.selection = None;
-        let rect = PdfBox {
-            left: 100.0,
-            bottom: 700.0,
-            right: 140.0,
-            top: 715.0,
-        };
+        let rect = PdfBox { left: 100.0, bottom: 700.0, right: 140.0, top: 715.0 };
         tab.annots.insert(
             0,
             vec![AnnotInfo {
@@ -2469,9 +2312,8 @@ mod tests {
         for _ in 0..3 {
             frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
         }
-        let comment: Rect = ctx
-            .data(|d| d.get_temp(Id::unique("test_comment_box")))
-            .expect("annotation popup is shown");
+        let comment: Rect =
+            ctx.data(|d| d.get_temp(Id::unique("test_comment_box"))).expect("annotation popup is shown");
         click(&ctx, &mut tab, &mut cache, comment.center(), Tool::Hand);
         frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::Text("Check this".into())], Tool::Hand);
         assert!(tab.outbox.is_empty(), "nothing is saved while still typing");
@@ -2489,11 +2331,7 @@ mod tests {
             )
         });
         assert!(saved, "comment was lost: {:?}", tab.outbox.len());
-        let saves = tab
-            .outbox
-            .iter()
-            .filter(|r| matches!(r, Request::UpdateAnnot { .. }))
-            .count();
+        let saves = tab.outbox.iter().filter(|r| matches!(r, Request::UpdateAnnot { .. })).count();
         assert_eq!(saves, 1, "comment saved more than once");
         assert!(tab.selected_annot.is_none());
     }
@@ -2503,12 +2341,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut tab = tab_with_selection();
         tab.selection = None;
-        let rect = PdfBox {
-            left: 100.0,
-            bottom: 700.0,
-            right: 140.0,
-            top: 715.0,
-        };
+        let rect = PdfBox { left: 100.0, bottom: 700.0, right: 140.0, top: 715.0 };
         tab.annots.insert(
             0,
             vec![AnnotInfo {
@@ -2535,12 +2368,7 @@ mod tests {
         tab.widgets.insert(
             0,
             vec![crate::engine::WidgetInfo {
-                rect: PdfBox {
-                    left: 0.0,
-                    bottom: 0.0,
-                    right: 595.0,
-                    top: 690.0,
-                },
+                rect: PdfBox { left: 0.0, bottom: 0.0, right: 595.0, top: 690.0 },
                 field_type: crate::engine::FIELD_TEXT,
                 name: "name".into(),
                 value: String::new(),
@@ -2553,9 +2381,8 @@ mod tests {
             for _ in 0..3 {
                 frame_with(&ctx, &mut tab, &mut cache, Vec::new(), tool);
             }
-            let comment: Rect = ctx
-                .data(|d| d.get_temp(Id::unique("test_comment_box")))
-                .expect("annotation popup is shown");
+            let comment: Rect =
+                ctx.data(|d| d.get_temp(Id::unique("test_comment_box"))).expect("annotation popup is shown");
             tab.outbox.clear();
             click(&ctx, &mut tab, &mut cache, comment.center(), tool);
             assert!(tab.selected_annot.is_some(), "{tool:?}: popup closed on click");
@@ -2575,7 +2402,8 @@ mod tests {
         tab.selection = None;
         let mut a = square(5, AnnotKind::Square);
         a.contents = "Wrong figure".into();
-        a.replies = vec![crate::engine::Reply { author: "Bob".into(), date: String::new(), text: "fixed in v2".into() }];
+        a.replies =
+            vec![crate::engine::Reply { author: "Bob".into(), date: String::new(), text: "fixed in v2".into() }];
         tab.annots.insert(0, vec![a]);
         tab.select_annot(0, 5);
         let mut cache = TextureCache::new(usize::MAX);
@@ -2612,12 +2440,7 @@ mod tests {
             vec![AnnotInfo {
                 index: 5,
                 kind: AnnotKind::Square,
-                rect: PdfBox {
-                    left: 100.0,
-                    bottom: 600.0,
-                    right: 200.0,
-                    top: 700.0,
-                },
+                rect: PdfBox { left: 100.0, bottom: 600.0, right: 200.0, top: 700.0 },
                 color: Some([0, 0, 255]),
                 interior: None,
                 width: 2.0,
@@ -2643,9 +2466,8 @@ mod tests {
         let fill: Rect = ctx.data(|d| d.get_temp(Id::unique("test_color_button"))).expect("fill button shown");
         click(&ctx, &mut tab, &mut cache, fill.center(), Tool::Hand);
         frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
-        let cell: Rect = ctx
-            .data(|d| d.get_temp(Id::unique(("test_palette_cell", 1usize, 2usize))))
-            .expect("colour picker open");
+        let cell: Rect =
+            ctx.data(|d| d.get_temp(Id::unique(("test_palette_cell", 1usize, 2usize)))).expect("colour picker open");
         tab.outbox.clear();
         click(&ctx, &mut tab, &mut cache, cell.center(), Tool::Hand);
         let interior = tab.outbox.iter().find_map(|r| match r {
@@ -2683,10 +2505,7 @@ mod tests {
             vec![AnnotInfo {
                 index: 7,
                 kind: AnnotKind::FreeText,
-                rect: PdfBox {
-                    bottom: created.rect.top - 23.0,
-                    ..created.rect
-                },
+                rect: PdfBox { bottom: created.rect.top - 23.0, ..created.rect },
                 color: Some([220, 30, 30]),
                 interior: Some([255, 255, 255]),
                 width: 1.0,
@@ -2726,12 +2545,7 @@ mod tests {
         AnnotInfo {
             index,
             kind,
-            rect: PdfBox {
-                left: 100.0,
-                bottom: 600.0,
-                right: 200.0,
-                top: 700.0,
-            },
+            rect: PdfBox { left: 100.0, bottom: 600.0, right: 200.0, top: 700.0 },
             color: Some([255, 0, 0]),
             interior: None,
             width: 2.0,
@@ -2790,7 +2604,8 @@ mod tests {
             frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Highlight);
         }
         // "test": one character per 10 pt from x = 100, baseline 700..715.
-        let [start, far, t_left, e_right] = [101.0, 128.0, 101.0, 118.0].map(|x| pdf_to_screen(&tab, 0, pos2(x, 707.0), tab.view_rect).unwrap());
+        let [start, far, t_left, e_right] =
+            [101.0, 128.0, 101.0, 118.0].map(|x| pdf_to_screen(&tab, 0, pos2(x, 707.0), tab.view_rect).unwrap());
         tab.outbox.clear();
         // Out to the third character and back to where it started.
         frame_with(&ctx, &mut tab, &mut cache, vec![egui::Event::PointerMoved(start)], Tool::Highlight);
@@ -2814,10 +2629,7 @@ mod tests {
     fn dropping_an_annotation_on_another_page_moves_it_there() {
         let ctx = egui::Context::default();
         let mut tab = DocTab::new(1, PathBuf::from("t.pdf"), LayoutMode::Horizontal, None);
-        tab.state = LoadState::Ready(DocInfo {
-            page_sizes: vec![(595.0, 842.0); 2],
-            ..Default::default()
-        });
+        tab.state = LoadState::Ready(DocInfo { page_sizes: vec![(595.0, 842.0); 2], ..Default::default() });
         for p in 0..2 {
             tab.geoms.insert(p, PageGeom { size: (595.0, 842.0), origin: (0.0, 0.0), rotation: Rotation::R0 });
         }
@@ -2830,7 +2642,8 @@ mod tests {
         }
         tab.outbox.clear();
         let a = tab.annots[&0][0].rect;
-        let from = pdf_to_screen(&tab, 0, pos2((a.left + a.right) / 2.0, (a.bottom + a.top) / 2.0), tab.view_rect).unwrap();
+        let from =
+            pdf_to_screen(&tab, 0, pos2((a.left + a.right) / 2.0, (a.bottom + a.top) / 2.0), tab.view_rect).unwrap();
         let to = pdf_to_screen(&tab, 1, pos2(300.0, 400.0), tab.view_rect).unwrap();
         drag(&ctx, &mut tab, &mut cache, from, to, Tool::Hand);
         let moved = tab.outbox.iter().find_map(|r| match r {
@@ -2905,13 +2718,7 @@ mod tests {
     }
 
     fn key(k: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
-        let ev = |pressed| egui::Event::Key {
-            key: k,
-            physical_key: None,
-            pressed,
-            repeat: false,
-            modifiers,
-        };
+        let ev = |pressed| egui::Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers };
         vec![ev(true), ev(false)]
     }
 
@@ -2987,9 +2794,8 @@ mod tests {
         for _ in 0..3 {
             frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
         }
-        let field: Rect = ctx
-            .data(|d| d.get_temp(Id::unique(("test_number_field", "Size"))))
-            .expect("size field shown");
+        let field: Rect =
+            ctx.data(|d| d.get_temp(Id::unique(("test_number_field", "Size")))).expect("size field shown");
         tab.outbox.clear();
         click(&ctx, &mut tab, &mut cache, field.center(), Tool::Hand);
         frame_with(&ctx, &mut tab, &mut cache, Vec::new(), Tool::Hand);
@@ -3128,10 +2934,7 @@ mod tests {
         click(&ctx, &mut tab, &mut cache, page.center(), Tool::Stamp);
         assert!(added(&tab).is_empty());
         assert!(tab.error_message.take().is_some(), "asks to choose a stamp");
-        let spec = StampSpec::Text {
-            title: "DRAFT".into(),
-            subtitle: String::new(),
-        };
+        let spec = StampSpec::Text { title: "DRAFT".into(), subtitle: String::new() };
         TEST_STAMP.with(|s| *s.borrow_mut() = Some(spec.clone()));
         ctx.input_mut(|i| i.time += 1.0);
         click(&ctx, &mut tab, &mut cache, page.center(), Tool::Stamp);
@@ -3142,4 +2945,3 @@ mod tests {
         assert_eq!(a[0].rect.left, a[0].rect.right, "the engine sizes text stamps");
     }
 }
-
