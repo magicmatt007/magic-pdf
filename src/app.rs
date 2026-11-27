@@ -56,6 +56,8 @@ pub struct App {
     engine: Result<Engine, String>,
     /// The app icon, shown at the start of the menu bar.
     app_icon: egui::TextureHandle,
+    /// The large app icon on the start screen (decoded when first shown).
+    logo: Option<egui::TextureHandle>,
     ctx: egui::Context,
     tabs: Vec<DocTab>,
     active: usize,
@@ -297,6 +299,7 @@ impl App {
         let mut app = Self {
             engine,
             app_icon,
+            logo: None,
             ctx,
             tabs: Vec::new(),
             active: 0,
@@ -2770,6 +2773,11 @@ impl App {
                 self.undo(true);
             }
             ui.separator();
+            // The tools and page controls need a document: greyed out on the start
+            // screen (the rest of the row).
+            if !has_doc {
+                ui.disable();
+            }
             for tool in [Tool::Hand, Tool::SelectText] {
                 ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
             }
@@ -3724,24 +3732,50 @@ impl App {
     fn welcome(&mut self, ui: &mut Ui) {
         // The central panel has no frame (pages draw their own background).
         ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+        let logo = self
+            .logo
+            .get_or_insert_with(|| {
+                let image = image::load_from_memory(include_bytes!("../assets/icons/magic-pdf-256.png"))
+                    .map(|i| i.to_rgba8())
+                    .unwrap_or_default();
+                let size = [image.width() as usize, image.height() as usize];
+                ui.ctx().load_texture(
+                    "logo",
+                    egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                    egui::TextureOptions {
+                        mipmap_mode: Some(egui::TextureFilter::Linear),
+                        ..egui::TextureOptions::LINEAR
+                    },
+                )
+            })
+            .clone();
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.25);
+            ui.add_space(ui.available_height() * 0.18);
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(72.0, 72.0)));
+            ui.add_space(6.0);
             ui.heading(t("magic-pdf"));
-            ui.add_space(8.0);
+            ui.add_space(14.0);
             if let Err(e) = &self.engine {
                 ui.colored_label(ui.visuals().error_fg_color, e);
                 return;
             }
-            if ui.button(t("Open a PDF…")).clicked() {
+            let open = egui::Button::new(
+                egui::RichText::new(t("Open a PDF…")).size(15.0).color(egui::Color32::WHITE).strong(),
+            )
+            .fill(crate::theme::ACCENT)
+            .min_size(egui::vec2(160.0, 34.0));
+            if ui.add(open).clicked() {
                 self.open_dialog();
             }
+            ui.add_space(2.0);
             ui.weak(t("or drop files here"));
             if !self.settings.recent.is_empty() || !self.settings.pinned.is_empty() {
-                ui.add_space(16.0);
-                ui.strong(t("Recent files"));
-                ui.add_space(4.0);
-                let width = 520.0_f32.min(ui.available_width());
-                ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
+                ui.add_space(28.0);
+                let width = 560.0_f32.min(ui.available_width() - 32.0);
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(width);
+                    ui.strong(t("Recent files"));
+                    ui.add_space(4.0);
                     if let Some(a) = recent_list(ui, &self.settings, false) {
                         self.recent_action(a);
                     }
@@ -4130,7 +4164,7 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
         }
         was_pinned = pinned;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let folder = path.parent().map(short_folder).unwrap_or_default();
         ui.horizontal(|ui| {
             let pin = icons::text(icons::PUSH_PIN).size(14.0);
             let pin = if pinned { pin.color(ui.visuals().selection.stroke.color) } else { pin.weak() };
@@ -4152,7 +4186,15 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
                 0.0,
                 egui::TextFormat::simple(egui::FontId::proportional(12.0), ui.visuals().weak_text_color()),
             );
-            let button = egui::Button::new(text).frame(menu);
+            // One line within the list's width: a long folder ends in "…" (the full
+            // path shows on hover).
+            text.wrap = egui::text::TextWrapping {
+                max_width: if menu { 520.0 } else { ui.available_width() - 8.0 },
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let button = egui::Button::new(text).frame(menu).truncate();
             let button = if menu { button } else { button.frame(false) };
             let response = ui.add(button).on_hover_text(path.display().to_string());
             if response.clicked() {
@@ -4171,6 +4213,16 @@ fn recent_list(ui: &mut Ui, settings: &crate::settings::Settings, menu: bool) ->
         });
     }
     action
+}
+
+/// The last two folders of a path, e.g. `…\datasheets\out` (whole if short).
+fn short_folder(dir: &Path) -> String {
+    let parts: Vec<_> = dir.components().collect();
+    if parts.len() <= 3 {
+        return dir.display().to_string();
+    }
+    let tail: PathBuf = parts[parts.len() - 2..].iter().collect();
+    format!("…{}{}", std::path::MAIN_SEPARATOR, tail.display())
 }
 
 /// The notice after pages were written to other files.
