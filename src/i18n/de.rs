@@ -981,4 +981,26 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("written by the worker", "wird beim Schreiben erledigt"),
     ("{file} already exists", "{file} gibt es schon"),
     ("{kind} annotations cannot be copied", "Anmerkungen der Art {kind} können nicht kopiert werden"),
+    ("{name} (issued by {issuer}, expired {date})", "{name} (ausgestellt von {issuer}, abgelaufen am {date})"),
+    (
+        "{name} (issued by {issuer}, not meant for signing)",
+        "{name} (ausgestellt von {issuer}, nicht zum Signieren gedacht)",
+    ),
+    ("Show all certificates ({n} more)", "Alle Zertifikate anzeigen ({n} weitere)"),
+    (
+        "Also expired certificates and ones not meant for signing, such as login certificates",
+        "Auch abgelaufene Zertifikate und solche, die nicht zum Signieren gedacht sind, etwa Anmeldezertifikate",
+    ),
+    (
+        "None of your certificates is valid and meant for signing.",
+        "Keines Ihrer Zertifikate ist gültig und zum Signieren gedacht.",
+    ),
+    (
+        "This certificate expired on {date}: signatures made with it will not be valid.",
+        "Dieses Zertifikat ist am {date} abgelaufen: Signaturen damit sind nicht gültig.",
+    ),
+    (
+        "This certificate is not meant for signing documents; others may not accept the signature.",
+        "Dieses Zertifikat ist nicht zum Signieren von Dokumenten gedacht; andere akzeptieren die Signatur womöglich nicht.",
+    ),
 ];

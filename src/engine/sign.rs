@@ -26,6 +26,10 @@ pub struct SigningIdentity {
     pub self_signed: bool,
     /// Last day the certificate is valid (YYYY-MM-DD).
     pub expires: String,
+    /// Today lies within the certificate's validity.
+    pub valid_now: bool,
+    /// The certificate is meant for signing.
+    pub for_signing: bool,
 }
 
 enum Key {
@@ -105,8 +109,9 @@ impl SigningIdentity {
         let cert = Certificate::parse(&tlv)?;
         let (name, issuer, self_signed) =
             (cert.subject_name.clone(), cert.issuer_name.clone(), cert.subject_raw == cert.issuer_raw);
-        let expires = cert.not_after.clone();
-        Some(SigningIdentity { key, chain, name, issuer, self_signed, expires })
+        let summary = certificate_summary(chain.first()?)?;
+        let (expires, valid_now, for_signing) = (summary.expires, summary.valid_now, summary.for_signing);
+        Some(SigningIdentity { key, chain, name, issuer, self_signed, expires, valid_now, for_signing })
     }
 
     fn digest_oid(&self) -> &'static [u8] {
@@ -162,10 +167,32 @@ impl SigningIdentity {
 
 /// Name, issuer and expiry date (YYYY-MM-DD) of a certificate (DER).
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn certificate_summary(der: &[u8]) -> Option<(String, String, String)> {
+pub fn certificate_summary(der: &[u8]) -> Option<CertificateSummary> {
     let (tlv, _) = Tlv::read(der)?;
     let c = Certificate::parse(&tlv)?;
-    Some((c.subject_name.clone(), c.issuer_name.clone(), c.not_after.clone()))
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    Some(CertificateSummary {
+        name: c.subject_name.clone(),
+        issuer: c.issuer_name.clone(),
+        expires: c.not_after.clone(),
+        // YYYY-MM-DD compares as text; an unreadable date counts as valid.
+        valid_now: (c.not_before.is_empty() || c.not_before <= today)
+            && (c.not_after.is_empty() || today <= c.not_after),
+        for_signing: c.for_signing,
+    })
+}
+
+/// What a certificate says about itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertificateSummary {
+    pub name: String,
+    pub issuer: String,
+    /// Last day of validity (YYYY-MM-DD).
+    pub expires: String,
+    /// Today lies within its validity.
+    pub valid_now: bool,
+    /// Meant for signing (not e.g. a login-only device certificate).
+    pub for_signing: bool,
 }
 
 /// The kind of key a certificate (DER) holds, if magic-pdf can sign with it.
@@ -856,6 +883,22 @@ mod tests {
         assert_eq!(verify_all(&signed), vec![("Test Signer EC".to_string(), SigStatus::Valid)]);
         assert_eq!(unsigned_integer(&[0, 0, 0x80, 1]), vec![0, 0x80, 1]);
         assert_eq!(unsigned_integer(&[0, 0x7F]), vec![0x7F]);
+    }
+
+    /// Which certificates the signing dialog offers by default.
+    #[test]
+    fn certificates_for_signing_are_told_apart() {
+        let summary = |name: &str| certificate_summary(&fixture(name)).unwrap();
+        let login = summary("cert-login.der");
+        assert!(login.valid_now && !login.for_signing, "a login-only certificate: {login:?}");
+        let email = summary("cert-email.der");
+        assert!(email.valid_now && email.for_signing, "e-mail protection and signatures: {email:?}");
+        let old = summary("cert-expired.der");
+        assert!(!old.valid_now && old.for_signing, "expired: {old:?}");
+        assert_eq!(old.expires, "2021-01-01");
+        // The test certificates without stated purposes may sign.
+        let id = SigningIdentity::from_pkcs12(&fixture("signer-rsa.p12"), "magic").unwrap();
+        assert!(id.valid_now && id.for_signing);
     }
 
     #[test]

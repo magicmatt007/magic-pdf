@@ -18,6 +18,17 @@ pub struct StoreCertificate {
     pub name: String,
     pub issuer: String,
     pub expires: String,
+    /// Today lies within its validity.
+    pub valid_now: bool,
+    /// Meant for signing (not e.g. a login-only device certificate).
+    pub for_signing: bool,
+}
+
+impl StoreCertificate {
+    /// Offered by default: valid today and meant for signing.
+    pub fn usable(&self) -> bool {
+        self.valid_now && self.for_signing
+    }
 }
 
 /// An open "MY" store of the current user (closed on drop).
@@ -70,20 +81,28 @@ fn thumbprint(der: &[u8]) -> String {
     Sha1::digest(der).iter().map(|b| format!("{b:02X}")).collect()
 }
 
-/// The certificates with a private key, newest expiry first.
+/// The certificates with a private key, usable ones first.
 pub fn list() -> Result<Vec<StoreCertificate>, String> {
     let store = Store::open()?;
     let mut out = Vec::new();
     store.each(|ctx, der| {
         if has_private_key(ctx)
             && certificate_key_kind(der).is_some()
-            && let Some((name, issuer, expires)) = super::sign::certificate_summary(der)
+            && let Some(c) = super::sign::certificate_summary(der)
         {
-            out.push(StoreCertificate { thumbprint: thumbprint(der), name, issuer, expires });
+            out.push(StoreCertificate {
+                thumbprint: thumbprint(der),
+                name: c.name,
+                issuer: c.issuer,
+                expires: c.expires,
+                valid_now: c.valid_now,
+                for_signing: c.for_signing,
+            });
         }
         true
     });
-    out.sort_by(|a, b| b.expires.cmp(&a.expires));
+    // Usable ones first, then the longest valid.
+    out.sort_by(|a, b| b.usable().cmp(&a.usable()).then(b.expires.cmp(&a.expires)));
     Ok(out)
 }
 

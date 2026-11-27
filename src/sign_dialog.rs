@@ -24,6 +24,9 @@ pub struct SignDialog {
     /// Windows: the certificates in the Windows certificate store (listed once).
     #[cfg(windows)]
     store: Option<Result<Vec<crate::engine::cert_store::StoreCertificate>, String>>,
+    /// Windows: list expired certificates and ones not meant for signing too.
+    #[cfg(windows)]
+    show_all: bool,
 }
 
 /// What the dialog asks the app to do.
@@ -49,6 +52,8 @@ impl SignDialog {
             focus_password: true,
             #[cfg(windows)]
             store: None,
+            #[cfg(windows)]
+            show_all: false,
         }
     }
 
@@ -233,11 +238,26 @@ impl SignDialog {
             return None;
         }
         let label = |c: &cert_store::StoreCertificate| {
-            tf(
-                "{name} (issued by {issuer}, valid until {date})",
-                &[("name", &c.name), ("issuer", &c.issuer), ("date", &c.expires)],
-            )
+            let args: &[(&str, &dyn std::fmt::Display)] =
+                &[("name", &c.name), ("issuer", &c.issuer), ("date", &c.expires)];
+            match (c.valid_now, c.for_signing) {
+                (false, _) => tf("{name} (issued by {issuer}, expired {date})", args),
+                (true, false) => tf("{name} (issued by {issuer}, not meant for signing)", args),
+                (true, true) => tf("{name} (issued by {issuer}, valid until {date})", args),
+            }
         };
+        let hidden = list.iter().filter(|c| !c.usable()).count();
+        if hidden > 0 {
+            ui.checkbox(&mut self.show_all, tf("Show all certificates ({n} more)", &[("n", &hidden)])).on_hover_text(
+                t("Also expired certificates and ones not meant for signing, such as login certificates"),
+            );
+        }
+        let list: Vec<cert_store::StoreCertificate> =
+            list.into_iter().filter(|c| self.show_all || c.usable()).collect();
+        if list.is_empty() {
+            ui.weak(t("None of your certificates is valid and meant for signing."));
+            return None;
+        }
         let chosen = settings
             .sign_store_certificate
             .as_ref()
@@ -301,8 +321,22 @@ impl SignDialog {
 /// Who the certificate names, and a warning for a self-made one.
 fn signer_ui(ui: &mut Ui, id: &SigningIdentity) {
     ui.label(tf("Signer: {name}", &[("name", &id.name)]));
-    if !id.expires.is_empty() {
+    if !id.valid_now {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            tf(
+                "This certificate expired on {date}: signatures made with it will not be valid.",
+                &[("date", &id.expires)],
+            ),
+        );
+    } else if !id.expires.is_empty() {
         ui.weak(tf("Valid until {date}", &[("date", &id.expires)]));
+    }
+    if !id.for_signing {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            t("This certificate is not meant for signing documents; others may not accept the signature."),
+        );
     }
     if id.self_signed {
         ui.weak(t("A self-made certificate: others can check that the document is unchanged, but not who signed it."));

@@ -270,8 +270,13 @@ pub(super) struct Certificate<'a> {
     pub(super) subject_raw: &'a [u8],
     pub(super) issuer_name: String,
     pub(super) subject_name: String,
-    /// End of validity as YYYY-MM-DD (empty if unreadable).
+    /// Validity as YYYY-MM-DD (empty if unreadable).
     pub(super) not_after: String,
+    pub(super) not_before: String,
+    /// The certificate may sign documents: its key usage (if stated) allows
+    /// signatures, and its purposes (if stated) include e-mail protection, document
+    /// signing or any purpose; not e.g. a login-only device certificate.
+    pub(super) for_signing: bool,
     /// Subject key identifier extension, if any.
     key_id: Option<&'a [u8]>,
     pub(super) key: Key<'a>,
@@ -307,15 +312,21 @@ impl<'a> Certificate<'a> {
             },
             _ => Key::Other,
         };
-        let key_id = f.iter().find(|t| t.tag == 0xA3).and_then(|ext| {
-            ext.children().next()?.children().find_map(|e| {
-                let mut p = e.children();
-                (p.next()?.value == OID_SUBJECT_KEY_ID).then(|| {
-                    let wrapped = p.last()?; // OCTET STRING holding an OCTET STRING
-                    Tlv::read(wrapped.value).map(|(t, _)| t.value)
-                })?
+        // An extension's value: an OCTET STRING holding the DER of the value.
+        let extension = |oid: &[u8]| -> Option<Tlv<'a>> {
+            f.iter().find(|t| t.tag == 0xA3).and_then(|ext| {
+                ext.children().next()?.children().find_map(|e| {
+                    let mut p = e.children();
+                    (p.next()?.value == oid).then(|| Tlv::read(p.last()?.value).map(|(t, _)| t))?
+                })
             })
-        });
+        };
+        let key_id = extension(OID_SUBJECT_KEY_ID).map(|t| t.value);
+        // KeyUsage BIT STRING: digitalSignature (bit 0) or nonRepudiation (bit 1).
+        let signs = extension(OID_KEY_USAGE).map(|bits| bits.value.get(1).is_some_and(|b| b & 0xC0 != 0));
+        let purposes: Option<Vec<&'a [u8]>> =
+            extension(OID_EXT_KEY_USAGE).map(|seq| seq.children().map(|o| o.value).collect());
+        let not_before = validity.children().next().map(|t| asn1_date(t.tag, t.value)).unwrap_or_default();
         Some(Certificate {
             serial: serial.value,
             issuer_raw: issuer.raw,
@@ -323,6 +334,9 @@ impl<'a> Certificate<'a> {
             issuer_name: name(issuer),
             subject_name: name(subject),
             not_after,
+            not_before,
+            for_signing: signs != Some(false)
+                && purposes.is_none_or(|p| p.iter().any(|o| SIGNING_PURPOSES.contains(o))),
             key_id,
             key,
         })
@@ -397,6 +411,17 @@ pub(super) const OID_P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
 pub(super) const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
 pub(super) const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
 pub(super) const OID_SUBJECT_KEY_ID: &[u8] = &[0x55, 0x1D, 0x0E];
+const OID_KEY_USAGE: &[u8] = &[0x55, 0x1D, 0x0F];
+const OID_EXT_KEY_USAGE: &[u8] = &[0x55, 0x1D, 0x25];
+/// Extended key usages for signing documents: any purpose, e-mail protection,
+/// Microsoft document signing, Adobe Authentic Documents, PDF signing (RFC 9336).
+const SIGNING_PURPOSES: &[&[u8]] = &[
+    &[0x55, 0x1D, 0x25, 0x00],
+    &[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x04],
+    &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0A, 0x03, 0x0C],
+    &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x2F, 0x01, 0x01, 0x05],
+    &[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x24],
+];
 
 /// One DER (or BER, with indefinite lengths) element.
 #[derive(Clone, Copy, Debug)]
