@@ -555,6 +555,28 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("Edit bookmarks", "Lesezeichen bearbeiten"),
     ("Redact", "Schwärzen"),
     ("Edit text", "Text bearbeiten"),
+    ("Delete this text", "Diesen Text löschen"),
+    ("Done", "Fertig"),
+    (
+        "Enter: keep, Shift+Enter: new line, Esc: cancel, drag the frame to move the text",
+        "Enter: übernehmen, Shift+Enter: neue Zeile, Esc: abbrechen, Rahmen ziehen verschiebt den Text",
+    ),
+    ("Find", "Suchen"),
+    ("Nothing found to replace", "Nichts zum Ersetzen gefunden"),
+    ("Replace all", "Alle ersetzen"),
+    ("Replace text", "Text ersetzen"),
+    ("Replace text…\tCtrl+H", "Text ersetzen…\tCtrl+H"),
+    ("Replace with", "Ersetzen durch"),
+    ("Replaced: {n}", "Ersetzt: {n}"),
+    (
+        " ({n} not replaced: the text's font cannot write the new characters)",
+        " ({n} nicht ersetzt: die Schrift des Textes kann die neuen Zeichen nicht schreiben)",
+    ),
+    (
+        "Replaces the text in all pages. Text the PDF stores in pieces may not be found.",
+        "Ersetzt den Text auf allen Seiten. Text, den das PDF in Stücken speichert, wird eventuell nicht gefunden.",
+    ),
+    ("nothing to find", "nichts zu suchen"),
     ("{op}: {e}", "{op}: {e}"),
     ("{op} failed: {e}", "{op} fehlgeschlagen: {e}"),
     (

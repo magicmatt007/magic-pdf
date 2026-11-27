@@ -212,18 +212,100 @@ pub fn sync_styles(old: &str, new: &str, styles: &[CharStyle], typing: CharStyle
     out
 }
 
-/// A text object being edited with the edit-text tool.
+/// Text being changed with the edit-text tool: one line or a paragraph.
 pub struct TextEditing {
     pub page: usize,
-    pub index: usize,
+    /// Its text objects, top to bottom.
+    pub objects: Vec<usize>,
     pub original: String,
     pub text: String,
-    /// Where it is (PDF page space), its font size and colour (for the editor).
+    /// Where it was (PDF page space), its size and colour as found.
     pub rect: PdfBox,
     pub size: f32,
     pub color: crate::engine::Rgb,
+    /// The changes besides the text.
+    pub offset: (f32, f32),
+    pub new_size: f32,
+    pub new_color: crate::engine::Rgb,
     /// The editor still has to take the keyboard focus.
     pub focus: bool,
+    /// The change last sent for a preview, and whether its answer is still out.
+    pub asked: Option<crate::engine::TextChange>,
+    pub waiting: bool,
+    /// The newest preview: its change, the page region it shows and the picture.
+    pub preview: Option<(crate::engine::TextChange, PdfBox, eframe::egui::TextureHandle)>,
+    /// Where the text is in the newest preview.
+    pub preview_text: Option<PdfBox>,
+    /// Why the change cannot be made (from the last preview).
+    pub error: Option<String>,
+    /// A drag moving the text: where it started (PDF space) and the offset then.
+    pub drag: Option<(Pos2, (f32, f32))>,
+    /// Started by dragging the text: the move is kept when the drag ends.
+    pub move_only: bool,
+}
+
+impl TextEditing {
+    pub fn new(page: usize, objects: &[&crate::engine::TextObject]) -> TextEditing {
+        let first = objects[0];
+        let text = objects.iter().map(|o| o.text.trim()).collect::<Vec<_>>().join(" ");
+        let rect = objects.iter().skip(1).fold(first.rect, |r, o| PdfBox {
+            left: r.left.min(o.rect.left),
+            bottom: r.bottom.min(o.rect.bottom),
+            right: r.right.max(o.rect.right),
+            top: r.top.max(o.rect.top),
+        });
+        TextEditing {
+            page,
+            objects: objects.iter().map(|o| o.index).collect(),
+            original: text.clone(),
+            text,
+            rect,
+            size: first.size,
+            color: first.color,
+            offset: (0.0, 0.0),
+            new_size: first.size,
+            new_color: first.color,
+            focus: true,
+            asked: None,
+            waiting: false,
+            preview: None,
+            preview_text: None,
+            error: None,
+            drag: None,
+            move_only: false,
+        }
+    }
+
+    /// The change as it stands.
+    pub fn change(&self) -> crate::engine::TextChange {
+        crate::engine::TextChange {
+            objects: self.objects.clone(),
+            text: (self.text != self.original).then(|| self.text.clone()),
+            offset: self.offset,
+            size: ((self.new_size - self.size).abs() > 0.01).then_some(self.new_size),
+            color: (self.new_color != self.color).then_some(self.new_color),
+            delete: false,
+        }
+    }
+
+    /// Where the text is now: as the newest preview shows it, or estimated (moved,
+    /// and resized from its top left corner).
+    pub fn frame(&self) -> PdfBox {
+        if let (Some((change, _, _)), Some(text)) = (&self.preview, self.preview_text)
+            && *change == self.change()
+        {
+            return text;
+        }
+        let k = self.new_size / self.size.max(0.01);
+        let r = self.rect;
+        let (dx, dy) = self.offset;
+        PdfBox {
+            left: r.left + dx,
+            top: r.top + dy,
+            right: r.left + (r.right - r.left) * k + dx,
+            bottom: r.top - (r.top - r.bottom) * k + dy,
+        }
+    }
 }
 
 pub struct DocTab {
@@ -282,6 +364,11 @@ pub struct DocTab {
     /// the pages asked for, and the text being edited.
     pub text_objects: HashMap<usize, Vec<crate::engine::TextObject>>,
     pub text_objects_requested: HashSet<usize>,
+    /// Text objects grouped into paragraphs, per page (see `Response::TextObjects`).
+    pub text_paragraphs: HashMap<usize, Vec<Vec<usize>>>,
+    /// Outlines the edit-text tool draws over the pages this frame: page, box, and
+    /// whether it is the text under the pointer.
+    pub text_outlines: Vec<(usize, PdfBox, bool)>,
     pub text_editing: Option<TextEditing>,
     pub annot_drag: Option<AnnotDrag>,
     /// Arrow-key nudge of the selected annotation, in displayed page points.
@@ -369,6 +456,8 @@ impl DocTab {
             redact_drag: None,
             text_objects: HashMap::new(),
             text_objects_requested: HashSet::new(),
+            text_paragraphs: HashMap::new(),
+            text_outlines: Vec::new(),
             text_editing: None,
             annot_drag: None,
             nudge: Vec2::ZERO,
@@ -573,6 +662,7 @@ impl DocTab {
         // Text objects are listed anew after any page change.
         self.text_objects.clear();
         self.text_objects_requested.clear();
+        self.text_paragraphs.clear();
         self.text_editing = None;
         let map = |p: usize| m.map.get(p).copied().flatten();
         let keep = |p: usize| map(p).filter(|n| !m.changed.contains(n));

@@ -81,6 +81,8 @@ struct OpenDoc {
     form_dirty: bool,
     /// Signatures as checked when the file was opened.
     signatures: Vec<SignatureInfo>,
+    /// What the last find and replace did: (replaced, failed).
+    last_replace: (usize, usize),
 }
 
 impl OpenDoc {
@@ -337,11 +339,15 @@ impl Worker {
                 }
             }
             Request::TextObjects { doc, page } => {
-                let Some(objects) = self.docs.get(&doc).and_then(|od| od.doc.page(page)).map(|p| p.text_objects())
+                let Some((objects, paragraphs)) =
+                    self.docs.get(&doc).and_then(|od| od.doc.page(page)).map(|p| p.text_objects())
                 else {
                     return;
                 };
-                self.send(Response::TextObjects { doc, page, objects });
+                self.send(Response::TextObjects { doc, page, objects, paragraphs });
+            }
+            Request::PreviewText { doc, page, change, width_px, rotation } => {
+                self.preview_text(doc, page, change, width_px, rotation);
             }
             Request::Search { doc, generation, query } => {
                 self.searches.retain(|s| s.doc != doc);
@@ -681,6 +687,7 @@ impl Worker {
                         colors: HashMap::new(),
                         form_dirty: false,
                         signatures: info.signatures.clone(),
+                        last_replace: (0, 0),
                     },
                 );
                 self.send(Response::Opened { doc: id, info });
@@ -720,6 +727,43 @@ impl Worker {
             Some((size, rgba)) => self.send(Response::Rendered { key, size, rgba }),
             None => self.send(Response::RenderFailed { key }),
         }
+    }
+
+    /// Renders how a text change would look and drops the change again.
+    fn preview_text(&mut self, doc: DocId, page: usize, change: TextChange, width_px: u32, rotation: Rotation) {
+        let Some(od) = self.docs.get(&doc) else { return };
+        od.doc.kill_form_focus();
+        let result = (|| {
+            let changed = od.doc.change_text(page, &change)?;
+            let p = od.doc.page(page).ok_or(t("page not found"))?;
+            let before = changed.before;
+            let region = match changed.after {
+                Some(a) => PdfBox {
+                    left: before.left.min(a.left),
+                    bottom: before.bottom.min(a.bottom),
+                    right: before.right.max(a.right),
+                    top: before.top.max(a.top),
+                },
+                None => before,
+            }
+            .expand(3.0);
+            let (w, h) = od.doc.page_size(page);
+            let (out_w, out_h) = if rotation.swaps_axes() { (h, w) } else { (w, h) };
+            // At most about 2000 pixels across the region.
+            let region_w = (region.right - region.left).max(region.top - region.bottom).max(1.0);
+            let max_width = 2000.0 * out_w / region_w;
+            let width = (width_px.max(1) as f32).min(max_width).max(1.0) as usize;
+            let height = ((out_h / out_w) * width as f32).round().max(1.0) as usize;
+            let (x, y, rw, rh) = p.region_pixels((width, height), rotation, region);
+            if rw == 0 || rh == 0 {
+                return Err(t("the text was not found on the page").to_string());
+            }
+            let rgba =
+                p.render_region((width, height), (x, y, rw, rh), rotation).ok_or(t("could not render the page"))?;
+            Ok(TextPreview { region, text: changed.after, size: [rw, rh], rgba })
+        })();
+        od.doc.discard_page(page);
+        self.send(Response::TextPreview { doc, page, change, preview: result });
     }
 
     fn page_text(&mut self, doc: DocId, page_index: usize) {
@@ -831,12 +875,21 @@ impl Worker {
                 if let PageOp::InsertFile { count: n, .. } = &mut op {
                     *n = inserted;
                 }
+                let report = matches!(op, PageOp::ReplaceText { .. }).then_some(od.last_replace);
+                if let Some((0, failed)) = report {
+                    // Nothing changed: no undo step.
+                    self.send(Response::Replaced { doc, replaced: 0, failed });
+                    return true;
+                }
                 let mapping = op.mapping(count);
                 let edit = PagesEdit { op, snapshot, deleted: od.deleted.clone(), colors: od.colors.clone() };
                 remap_bookkeeping(od, &mapping);
                 Self::push_edit(od, Edit::Pages(Box::new(edit)));
                 trim_snapshots(od);
                 self.pages_changed(doc, mapping);
+                if let Some((replaced, failed)) = report {
+                    self.send(Response::Replaced { doc, replaced, failed });
+                }
                 true
             }
             Err(e) => {
@@ -1367,6 +1420,12 @@ fn apply_op(lib: Lib, od: &mut OpenDoc, op: &PageOp) -> Result<usize, String> {
             let bytes = od.keep_signatures(&base, bytes)?;
             od.doc = Doc::open_bytes(lib, bytes, None).map_err(|_| t("could not reopen the document"))?;
             Ok(0)
+        }
+        PageOp::ReplaceText { find, replace, match_case } => {
+            od.doc.kill_form_focus();
+            od.doc.close_all_pages();
+            od.last_replace = od.doc.replace_text(find, replace, *match_case)?;
+            Ok(od.last_replace.0)
         }
         _ => od.doc.apply_page_op(op),
     }

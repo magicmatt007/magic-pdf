@@ -247,6 +247,7 @@ pub fn show(ui: &mut Ui, tab: &mut DocTab, mut cx: ViewContext<'_>) {
     update_current_page(tab, view);
 
     paint_pages(ui, tab, view, &mut cx);
+    paint_text_editing(ui, tab, view);
     if tab.mode == LayoutMode::Grid
         && let Some(rect) = tab.grid_focus.and_then(|p| tab.layout.page_rect(p))
     {
@@ -377,82 +378,95 @@ fn redact_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect
 /// it in an editor over the page; Enter (or a click elsewhere) changes the text in
 /// the PDF, Esc cancels.
 fn edit_text_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: Rect, pointer: Option<Pos2>) {
+    use crate::document::TextEditing;
+    tab.text_outlines.clear();
     for page in tab.visible_pages.clone() {
         if !tab.text_objects.contains_key(&page) && tab.text_objects_requested.insert(page) {
             tab.outbox.push(Request::TextObjects { doc: tab.id, page });
         }
     }
-    let on_screen = |tab: &DocTab, page: usize, r: PdfBox| {
-        let a = pdf_to_screen(tab, page, pos2(r.left, r.bottom), view)?;
-        let b = pdf_to_screen(tab, page, pos2(r.right, r.top), view)?;
-        Some(Rect::from_two_pos(a, b))
-    };
-    // Debug aid for screenshots: MAGIC_PDF_EDIT_TEXT opens the first text on page 1
-    // with that text typed in.
+    // Debug aid for screenshots: MAGIC_PDF_EDIT_TEXT opens the paragraph of the
+    // `MAGIC_PDF_EDIT_OBJECT`th text on page 1 (default the first) with that text
+    // typed in.
     static DEBUG_EDIT: std::sync::Once = std::sync::Once::new();
     if tab.text_editing.is_none()
         && let Ok(typed) = std::env::var("MAGIC_PDF_EDIT_TEXT")
-        && let Some(obj) = tab.text_objects.get(&0).and_then(|o| o.first()).cloned()
+        && let Some(objects) = tab.text_objects.get(&0)
     {
-        DEBUG_EDIT.call_once(|| {
-            tab.text_editing = Some(crate::document::TextEditing {
-                page: 0,
-                index: obj.index,
-                original: obj.text,
-                text: typed,
-                rect: obj.rect,
-                size: obj.size,
-                color: obj.color,
-                focus: true,
+        let nth: usize = std::env::var("MAGIC_PDF_EDIT_OBJECT").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        if let Some(obj) = objects.get(nth) {
+            let members = paragraph_of(tab, 0, obj.index);
+            DEBUG_EDIT.call_once(|| {
+                let mut e = TextEditing::new(0, &members.iter().collect::<Vec<_>>());
+                if !typed.is_empty() {
+                    e.text = typed;
+                }
+                tab.text_editing = Some(e);
             });
-        });
+        }
     }
-    let accent = crate::theme::ACCENT;
+
+    let on_screen = |tab: &DocTab, page: usize, r: PdfBox| pdf_box_to_screen(tab, page, &r, view);
     let mut commit = false;
     let mut cancel = false;
+    let mut delete = false;
     if let Some(e) = &tab.text_editing {
-        let rect = on_screen(tab, e.page, e.rect);
-        let size = (e.size * tab.viewport.zoom).clamp(6.0, 200.0);
-        let (color, width) = (rgb(e.color), rect.map_or(120.0, |r| r.width()));
-        let at = rect.map_or(view.center(), |r| r.min) - vec2(3.0, 3.0);
+        let page = e.page;
+        let frame = on_screen(tab, page, e.frame());
+        // Dragging the text moves it.
+        let over_frame = pointer.zip(frame).is_some_and(|(p, f)| f.expand(3.0).contains(p));
         let editing = tab.text_editing.as_mut().expect("checked");
-        egui::Area::new(egui::Id::unique(("edit_text", tab.id))).fixed_pos(at).order(egui::Order::Foreground).show(
-            ui.ctx(),
-            |ui| {
-                egui::Frame::new()
-                    .fill(Color32::WHITE)
-                    .stroke(Stroke::new(1.5, accent))
-                    .inner_margin(egui::Margin::same(2))
-                    .show(ui, |ui| {
-                        let field = egui::TextEdit::singleline(&mut editing.text)
-                            .font(egui::FontId::proportional(size))
-                            .text_color(color)
-                            .background_color(Color32::WHITE)
-                            .frame(egui::Frame::NONE)
-                            .desired_width((width + 24.0).max(60.0));
-                        let r = ui.add(field);
-                        if std::mem::take(&mut editing.focus) {
-                            r.request_focus();
-                        }
-                        let (enter, esc) =
-                            ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
-                        if r.lost_focus() && enter {
-                            commit = true;
-                        }
-                        if esc {
-                            cancel = true;
-                        }
-                    });
-            },
-        );
+        if response.drag_started() && over_frame {
+            if let Some(start) = pointer.and_then(|p| screen_to_pdf_on(tab, p, view, page)) {
+                tab.text_editing.as_mut().expect("checked").drag =
+                    Some((start, tab.text_editing.as_ref().expect("checked").offset));
+            }
+        } else if let Some((start, before)) = editing.drag {
+            if let Some(now) = pointer.and_then(|p| screen_to_pdf_on(tab, p, view, page)) {
+                tab.text_editing.as_mut().expect("checked").offset =
+                    (before.0 + now.x - start.x, before.1 + now.y - start.y);
+            }
+            if response.drag_stopped() {
+                let e = tab.text_editing.as_mut().expect("checked");
+                e.drag = None;
+                if e.move_only {
+                    commit = true;
+                }
+            }
+        }
+        if over_frame || tab.text_editing.as_ref().is_some_and(|e| e.drag.is_some()) {
+            ui.ctx().set_cursor_icon(CursorIcon::Move);
+        }
         // A click elsewhere on the page keeps the change.
-        if response.clicked() {
+        if response.clicked() && !over_frame {
             commit = true;
+        }
+        if !tab.text_editing.as_ref().expect("checked").move_only {
+            let (c, x, d) = text_editor_panel(ui, tab, frame.unwrap_or(view.shrink(40.0)), view);
+            commit |= c;
+            cancel |= x;
+            delete |= d;
+        }
+        // Ask for a preview of the change as it stands (one at a time).
+        let ppp = ui.ctx().pixels_per_point();
+        let width_px =
+            tab.layout.page_rect(page).map_or(1000, |r| (r.width() * tab.viewport.zoom * ppp).round().max(1.0) as u32);
+        let (id, rotation) = (tab.id, tab.rotation);
+        let e = tab.text_editing.as_mut().expect("checked");
+        let change = e.change();
+        if change.is_empty() {
+            e.asked = None;
+            e.preview = None;
+            e.error = None;
+        } else if !e.waiting && e.asked.as_ref() != Some(&change) {
+            e.asked = Some(change.clone());
+            e.waiting = true;
+            tab.outbox.push(Request::PreviewText { doc: id, page, change, width_px, rotation });
         }
     } else if let Some((page, p)) =
         pointer.filter(|p| view.contains(*p)).and_then(|pt| screen_to_pdf(tab, pt, view, None))
     {
-        // The smallest text object under the pointer.
+        // The smallest text object under the pointer, and its paragraph.
         let hit = tab.text_objects.get(&page).and_then(|objs| {
             objs.iter()
                 .filter(|o| o.rect.expand(1.0).contains(p.x, p.y))
@@ -460,37 +474,153 @@ fn edit_text_input(ui: &Ui, tab: &mut DocTab, response: &egui::Response, view: R
                 .cloned()
         });
         if let Some(obj) = hit {
+            let members = paragraph_of(tab, page, obj.index);
             ui.ctx().set_cursor_icon(CursorIcon::Text);
-            if let Some(r) = on_screen(tab, page, obj.rect) {
-                ui.painter().rect_stroke(
-                    r.expand(2.0),
-                    CornerRadius::same(2),
-                    Stroke::new(1.5, accent),
-                    StrokeKind::Outside,
-                );
+            let start = || TextEditing::new(page, &members.iter().collect::<Vec<_>>());
+            for m in &members {
+                tab.text_outlines.push((page, m.rect, m.index == obj.index));
             }
             if response.clicked() {
-                tab.text_editing = Some(crate::document::TextEditing {
-                    page,
-                    index: obj.index,
-                    original: obj.text.clone(),
-                    text: obj.text,
-                    rect: obj.rect,
-                    size: obj.size,
-                    color: obj.color,
-                    focus: true,
-                });
+                tab.text_editing = Some(start());
+            } else if response.drag_started() {
+                let mut e = start();
+                e.move_only = true;
+                e.focus = false;
+                e.drag = Some((p, (0.0, 0.0)));
+                tab.text_editing = Some(e);
             }
         }
     }
-    if commit && let Some(e) = tab.text_editing.take() {
-        if e.text != e.original && !e.text.trim().is_empty() {
-            let op = crate::engine::PageOp::EditText { page: e.page, index: e.index, text: e.text };
-            tab.outbox.push(Request::EditPages { doc: tab.id, op });
+    if delete && let Some(e) = tab.text_editing.take() {
+        let change = crate::engine::TextChange { objects: e.objects, delete: true, ..Default::default() };
+        tab.outbox
+            .push(Request::EditPages { doc: tab.id, op: crate::engine::PageOp::EditText { page: e.page, change } });
+    } else if commit && let Some(e) = tab.text_editing.take() {
+        let change = e.change();
+        let emptied = change.text.as_ref().is_some_and(|t| t.trim().is_empty());
+        if !change.is_empty() && !emptied {
+            tab.outbox
+                .push(Request::EditPages { doc: tab.id, op: crate::engine::PageOp::EditText { page: e.page, change } });
         }
     } else if cancel {
         tab.text_editing = None;
     }
+}
+
+/// Draws over the pages what the edit-text tool shows: the preview of the change and
+/// its frame, or the text under the pointer.
+fn paint_text_editing(ui: &Ui, tab: &DocTab, view: Rect) {
+    let accent = crate::theme::ACCENT;
+    let painter = ui.painter_at(view);
+    if let Some(e) = &tab.text_editing {
+        if let Some((_, region, texture)) = &e.preview
+            && let Some(r) = pdf_box_to_screen(tab, e.page, region, view)
+        {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(texture.id(), r, uv, Color32::WHITE);
+        }
+        if let Some(f) = pdf_box_to_screen(tab, e.page, &e.frame(), view) {
+            painter.rect_stroke(f.expand(3.0), CornerRadius::same(2), Stroke::new(1.5, accent), StrokeKind::Outside);
+        }
+    }
+    for (page, rect, strong) in &tab.text_outlines {
+        if let Some(r) = pdf_box_to_screen(tab, *page, rect, view) {
+            let stroke = if *strong { Stroke::new(1.5, accent) } else { Stroke::new(1.0, accent.gamma_multiply(0.5)) };
+            painter.rect_stroke(r.expand(2.0), CornerRadius::same(2), stroke, StrokeKind::Outside);
+        }
+    }
+}
+
+/// The text objects of the paragraph that object `index` on `page` belongs to.
+fn paragraph_of(tab: &DocTab, page: usize, index: usize) -> Vec<crate::engine::TextObject> {
+    let Some(objects) = tab.text_objects.get(&page) else { return Vec::new() };
+    let group = tab
+        .text_paragraphs
+        .get(&page)
+        .and_then(|groups| groups.iter().find(|g| g.contains(&index)).cloned())
+        .unwrap_or_else(|| vec![index]);
+    group.iter().filter_map(|i| objects.iter().find(|o| o.index == *i).cloned()).collect()
+}
+
+/// The panel under the text being edited: its text, size and colour, and Delete.
+/// Returns (keep the change, cancel, delete).
+fn text_editor_panel(ui: &Ui, tab: &mut DocTab, frame: Rect, view: Rect) -> (bool, bool, bool) {
+    let (mut commit, mut cancel, mut delete) = (false, false, false);
+    let width = frame.width().clamp(280.0, 460.0);
+    // Below the text, above it, to its right or left, wherever there is room.
+    const HEIGHT: f32 = 250.0;
+    let at = if frame.bottom() + 10.0 + HEIGHT < view.bottom() {
+        pos2(frame.left(), frame.bottom() + 10.0)
+    } else if frame.top() - 10.0 - HEIGHT > view.top() {
+        pos2(frame.left(), frame.top() - 10.0 - HEIGHT)
+    } else if frame.right() + 14.0 + width + 20.0 < view.right() {
+        pos2(frame.right() + 14.0, frame.top())
+    } else if frame.left() - 14.0 - width - 20.0 > view.left() {
+        pos2(frame.left() - 14.0 - width - 20.0, frame.top())
+    } else {
+        pos2(frame.left(), view.bottom() - HEIGHT)
+    };
+    let at = pos2(
+        at.x.clamp(view.left() + 4.0, (view.right() - width - 24.0).max(view.left())),
+        at.y.clamp(view.top() + 4.0, (view.bottom() - HEIGHT).max(view.top())),
+    );
+    let e = tab.text_editing.as_mut().expect("editing");
+    egui::Area::new(egui::Id::unique(("edit_text", tab.id))).fixed_pos(at).order(egui::Order::Foreground).show(
+        ui.ctx(),
+        |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                // Enter keeps the change; Shift+Enter starts a new line.
+                let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                let rows = e.text.len() / 60 + 1;
+                let r = egui::ScrollArea::vertical()
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut e.text)
+                                .desired_width(width)
+                                .desired_rows(rows.clamp(1, 6))
+                                .hint_text(t("Text")),
+                        )
+                    })
+                    .inner;
+                if std::mem::take(&mut e.focus) {
+                    r.request_focus();
+                }
+                if enter {
+                    commit = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(t("Size"));
+                    ui.add(
+                        egui::DragValue::new(&mut e.new_size)
+                            .range(1.0..=400.0)
+                            .speed(0.2)
+                            .max_decimals(1)
+                            .suffix(" pt"),
+                    );
+                    ui.label(t("Colour"));
+                    ui.color_edit_button_srgb(&mut e.new_color);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t("Done")).clicked() {
+                            commit = true;
+                        }
+                        if ui.button(icons::sized(icons::TRASH, 15.0)).on_hover_text(t("Delete this text")).clicked() {
+                            delete = true;
+                        }
+                    });
+                });
+                if let Some(error) = &e.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                ui.weak(t("Enter: keep, Shift+Enter: new line, Esc: cancel, drag the frame to move the text"));
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+            });
+        },
+    );
+    (commit, cancel, delete)
 }
 
 fn area(r: PdfBox) -> f32 {

@@ -211,6 +211,41 @@ pub struct TextObject {
     pub color: Rgb,
 }
 
+/// A change to text on a page: to one line, or to the lines of a paragraph (their
+/// text objects, top to bottom, as `TextObjects` groups them).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextChange {
+    pub objects: Vec<usize>,
+    /// New text. A paragraph's text is wrapped to the paragraph's width (lines that
+    /// stay the same keep their breaks); a line break in it starts a new line.
+    pub text: Option<String>,
+    /// Moved by this much (points, page space).
+    pub offset: (f32, f32),
+    /// New font size as drawn (points).
+    pub size: Option<f32>,
+    pub color: Option<Rgb>,
+    /// Removed from the page.
+    pub delete: bool,
+}
+
+impl TextChange {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.offset == (0.0, 0.0) && self.size.is_none() && self.color.is_none() && !self.delete
+    }
+}
+
+/// How a text change looks: the page region around the text before and after it,
+/// rendered with the change applied (the document itself is not changed).
+#[derive(Clone, Debug)]
+pub struct TextPreview {
+    /// The region shown (PDF page space).
+    pub region: PdfBox,
+    /// Where the text is after the change (None: removed).
+    pub text: Option<PdfBox>,
+    pub size: [usize; 2],
+    pub rgba: Vec<u8>,
+}
+
 /// Document properties (the PDF's information dictionary).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocProperties {
@@ -686,6 +721,15 @@ pub enum Request {
         doc: DocId,
         page: usize,
     },
+    /// Renders how `change` would look (answered with `TextPreview`). The page is
+    /// drawn `width_px` wide, turned by `rotation`, as for `Render`.
+    PreviewText {
+        doc: DocId,
+        page: usize,
+        change: TextChange,
+        width_px: u32,
+        rotation: Rotation,
+    },
     /// Start (or restart) a document-wide search. `generation` tags results.
     Search {
         doc: DocId,
@@ -904,6 +948,23 @@ pub enum Response {
         doc: DocId,
         page: usize,
         objects: Vec<TextObject>,
+        /// The objects grouped into paragraphs (indices, top to bottom); every object
+        /// is in exactly one.
+        paragraphs: Vec<Vec<usize>>,
+    },
+    /// How a text change would look, or why it cannot be made.
+    TextPreview {
+        doc: DocId,
+        page: usize,
+        change: TextChange,
+        preview: Result<TextPreview, String>,
+    },
+    /// Find and replace finished: how many places were changed, and how many could
+    /// not be (the text's font cannot write the new characters).
+    Replaced {
+        doc: DocId,
+        replaced: usize,
+        failed: usize,
     },
     SearchResults {
         doc: DocId,
