@@ -79,6 +79,13 @@ pub enum PageOp {
     SetProperties {
         properties: super::commands::EditableProperties,
     },
+    /// Replaces the text of a text object on a page (`index` in the page's objects,
+    /// as listed by `TextObjects`).
+    EditText {
+        page: usize,
+        index: usize,
+        text: String,
+    },
 }
 
 /// Margins in points: top, right, bottom, left (as the page is displayed).
@@ -182,6 +189,7 @@ impl PageOp {
             PageOp::Watermark { .. } => "Watermark",
             PageOp::RemoveWatermark { .. } => "Remove watermark",
             PageOp::Flatten { .. } => "Flatten annotations and form fields",
+            PageOp::EditText { .. } => "Edit text",
         }
     }
 
@@ -197,6 +205,8 @@ impl PageOp {
             }
         };
         match self {
+            PageOp::EditText { page, .. } if *page >= count => Err(t("page does not exist").into()),
+            PageOp::EditText { .. } => Ok(()),
             PageOp::Delete { pages } => {
                 in_range(pages)?;
                 if sorted_unique(pages).len() >= count {
@@ -281,6 +291,9 @@ impl PageOp {
             },
             PageOp::SetOutline { .. } | PageOp::SetProperties { .. } => {
                 PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: Vec::new() }
+            }
+            PageOp::EditText { page, .. } => {
+                PageMapping { map: (0..count).map(Some).collect(), new_count: count, changed: vec![*page] }
             }
             PageOp::InsertBlank { at, .. } => insert_mapping(count, *at, 1),
             PageOp::InsertFile { at, count: n, .. } => insert_mapping(count, *at, *n),

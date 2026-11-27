@@ -336,6 +336,13 @@ impl Worker {
                     self.text_requests.push((doc, page));
                 }
             }
+            Request::TextObjects { doc, page } => {
+                let Some(objects) = self.docs.get(&doc).and_then(|od| od.doc.page(page)).map(|p| p.text_objects())
+                else {
+                    return;
+                };
+                self.send(Response::TextObjects { doc, page, objects });
+            }
             Request::Search { doc, generation, query } => {
                 self.searches.retain(|s| s.doc != doc);
                 self.searches.push(SearchJob { doc, generation, query, next_page: 0 });
@@ -806,12 +813,13 @@ impl Worker {
         let Some(od) = self.docs.get_mut(&doc) else { return false };
         let count = od.doc.page_count();
         if let Err(e) = op.validate(count) {
-            self.error(doc, format!("{}: {e}", op.label()));
+            self.error(doc, tf("{op}: {e}", &[("op", &t(op.label())), ("e", &e)]));
             return false;
         }
         // Text still being typed in a form field belongs to the state undo restores.
         od.doc.kill_form_focus();
-        let snapshot = match od.doc.save_to_bytes() {
+        // A signed file keeps its signed bytes, so undo does not break the signatures.
+        let snapshot = match od.base_bytes() {
             Ok(b) => Arc::new(b),
             Err(e) => {
                 self.error(doc, e);
@@ -836,7 +844,7 @@ impl Worker {
                 if let Ok(d) = Doc::open_bytes(self.lib, snapshot.as_ref().clone(), None) {
                     od.doc = d;
                 }
-                self.error(doc, format!("{} failed: {e}", op.label()));
+                self.error(doc, tf("{op} failed: {e}", &[("op", &t(op.label())), ("e", &e)]));
                 self.pages_changed(
                     doc,
                     PageMapping {

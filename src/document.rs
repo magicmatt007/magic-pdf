@@ -212,6 +212,20 @@ pub fn sync_styles(old: &str, new: &str, styles: &[CharStyle], typing: CharStyle
     out
 }
 
+/// A text object being edited with the edit-text tool.
+pub struct TextEditing {
+    pub page: usize,
+    pub index: usize,
+    pub original: String,
+    pub text: String,
+    /// Where it is (PDF page space), its font size and colour (for the editor).
+    pub rect: PdfBox,
+    pub size: f32,
+    pub color: crate::engine::Rgb,
+    /// The editor still has to take the keyboard focus.
+    pub focus: bool,
+}
+
 pub struct DocTab {
     pub id: DocId,
     pub path: PathBuf,
@@ -264,6 +278,11 @@ pub struct DocTab {
     pub redactions: Vec<(usize, PdfBox)>,
     /// Redaction area being dragged out: page, start and end (PDF page space).
     pub redact_drag: Option<(usize, Pos2, Pos2)>,
+    /// Text objects per page for the edit-text tool (fetched when the tool is used),
+    /// the pages asked for, and the text being edited.
+    pub text_objects: HashMap<usize, Vec<crate::engine::TextObject>>,
+    pub text_objects_requested: HashSet<usize>,
+    pub text_editing: Option<TextEditing>,
     pub annot_drag: Option<AnnotDrag>,
     /// Arrow-key nudge of the selected annotation, in displayed page points.
     pub nudge: Vec2,
@@ -348,6 +367,9 @@ impl DocTab {
             pending_show: None,
             grid_focus: None,
             redact_drag: None,
+            text_objects: HashMap::new(),
+            text_objects_requested: HashSet::new(),
+            text_editing: None,
             annot_drag: None,
             nudge: Vec2::ZERO,
             page_versions: HashMap::new(),
@@ -548,6 +570,10 @@ impl DocTab {
 
     /// Updates everything keyed by page number after the page structure changed.
     pub fn apply_page_mapping(&mut self, info: DocInfo, m: &crate::engine::PageMapping) {
+        // Text objects are listed anew after any page change.
+        self.text_objects.clear();
+        self.text_objects_requested.clear();
+        self.text_editing = None;
         let map = |p: usize| m.map.get(p).copied().flatten();
         let keep = |p: usize| map(p).filter(|n| !m.changed.contains(n));
         fn remap<T>(old: HashMap<usize, T>, f: impl Fn(usize) -> Option<usize>) -> HashMap<usize, T> {

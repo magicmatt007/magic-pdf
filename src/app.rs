@@ -385,7 +385,7 @@ impl App {
             let wanted = std::env::var("MAGIC_PDF_TOOL").unwrap_or_default();
             if let Some(t) = Tool::ANNOTATION_TOOLS
                 .iter()
-                .chain([&Tool::Redact])
+                .chain([&Tool::Redact, &Tool::EditText])
                 .find(|t| format!("{t:?}").eq_ignore_ascii_case(&wanted))
             {
                 app.tool = *t;
@@ -1086,6 +1086,13 @@ impl App {
             Response::PageChanged { doc, page } => {
                 if let Some(tab) = self.tab_mut(doc) {
                     *tab.page_versions.entry(page).or_insert(0) += 1;
+                    tab.text_objects.remove(&page);
+                    tab.text_objects_requested.remove(&page);
+                }
+            }
+            Response::TextObjects { doc, page, objects } => {
+                if let Some(tab) = self.tab_mut(doc) {
+                    tab.text_objects.insert(page, objects);
                 }
             }
             Response::AnnotAdded { doc, page, index } => {
@@ -2852,7 +2859,7 @@ impl App {
             if !has_doc {
                 ui.disable();
             }
-            for tool in [Tool::Hand, Tool::SelectText] {
+            for tool in [Tool::Hand, Tool::SelectText, Tool::EditText] {
                 ui.selectable_value(&mut self.tool, tool, tool.icon()).on_hover_text(tool.label());
             }
             ui.separator();
@@ -4035,6 +4042,12 @@ impl eframe::App for App {
             self.settings.save();
         }
         self.sign_ui(&ctx);
+        // An unfinished text edit is dropped when another tool is picked.
+        if self.tool != Tool::EditText
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.text_editing = None;
+        }
         self.check_signature_trust(&ctx);
         self.combine_ui(&ctx);
 

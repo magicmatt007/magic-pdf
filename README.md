@@ -36,6 +36,9 @@ Built with Rust, [egui](https://github.com/emilk/egui) and Google's
 - Annotation editing: drag to move, resize with handles (Shift keeps proportions),
   nudge with arrow keys; undo/redo, Save / Save As (deleted annotations are removed from the file)
 
+- Editing existing text: click a line of text, change it, press Enter (stays in the
+  file's own font where it has the characters, otherwise a matching standard font; undoable)
+
 - Form filling: text fields, checkboxes, radio buttons, combo and list boxes
   (typing, Tab between fields, copy/paste, field undo); filled values are saved
 - Printing: a print dialog backed by CUPS on Linux/macOS (printer, copies, page
@@ -193,7 +196,8 @@ test fails when a text has no translation.
 
 `MAGIC_PDF_SCREENSHOT=out.ppm magic-pdf file.pdf` opens the file, saves a screenshot
 of the app's own window after three seconds and quits (`MAGIC_PDF_TOOL=highlight`, `note`, … picks
-the starting tool). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
+the starting tool; with `MAGIC_PDF_TOOL=edittext`, `MAGIC_PDF_EDIT_TEXT=…` opens the first
+text on page 1 for editing with that text typed in). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
 file's page count to `out.txt` and quits; the release workflow uses it to smoke-test the
 macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting. `MAGIC_PDF_WINDOW=800x600` starts with that window size. `MAGIC_PDF_BENCH=report.txt magic-pdf big.pdf` pages through the
 whole file, searches it (`MAGIC_PDF_BENCH_QUERY`, default "the") and writes timings, frame times

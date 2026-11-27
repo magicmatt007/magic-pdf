@@ -2216,6 +2216,98 @@ mod tests {
         }
     }
 
+    fn text_objects(engine: &Engine, doc: DocId) -> Vec<TextObject> {
+        engine.send(Request::TextObjects { doc, page: 0 });
+        recv_until(engine, |r| match r {
+            Response::TextObjects { objects, .. } => Some(objects),
+            _ => None,
+        })
+    }
+
+    fn object_text(engine: &Engine, doc: DocId) -> String {
+        text_objects(engine, doc).into_iter().map(|o| o.text).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn existing_text_can_be_edited_and_saved() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let objects = text_objects(&engine, 1);
+        assert!(!objects.is_empty(), "the sample has text");
+        let first = objects[0].clone();
+        assert!(first.size > 0.0 && first.rect.right > first.rect.left, "{first:?}");
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::EditText { page: 0, index: first.index, text: "Grüezi 1".into() },
+        });
+        let _ = pages_changed(&engine);
+        let after = text_objects(&engine, 1);
+        assert_eq!(after.len(), objects.len());
+        let edited = after.iter().find(|o| o.index == first.index).unwrap();
+        assert_eq!(edited.text, "Grüezi 1");
+        assert!((edited.rect.left - first.rect.left).abs() < 3.0, "stays in place: {first:?} {edited:?}");
+
+        let path = std::env::temp_dir().join(format!("magic-pdf-edit-text-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        open(&engine, 2, path.clone());
+        assert!(object_text(&engine, 2).contains("Grüezi 1"), "saved");
+        std::fs::remove_file(path).ok();
+
+        // Undo brings the old text back.
+        engine.send(Request::Undo { doc: 1 });
+        let _ = pages_changed(&engine);
+        assert_eq!(text_objects(&engine, 1)[0].text, first.text);
+    }
+
+    #[test]
+    fn text_the_font_cannot_write_is_refused() {
+        let (_serial, engine) = start();
+        open(&engine, 1, sample());
+        let before = text_objects(&engine, 1);
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::EditText { page: 0, index: before[0].index, text: "你好世界".into() },
+        });
+        let message = recv_until(&engine, |r| match r {
+            Response::Error { message, .. } => Some(message),
+            _ => None,
+        });
+        assert!(message.contains("cannot be written"), "{message}");
+        assert_eq!(text_objects(&engine, 1)[0].text, before[0].text, "unchanged");
+    }
+
+    #[test]
+    fn editing_text_in_a_signed_file_keeps_the_signature() {
+        let (_serial, engine) = start();
+        let original = std::fs::read(fixtures().join("signed.pdf")).unwrap();
+        open(&engine, 1, fixtures().join("signed.pdf"));
+        let objects = text_objects(&engine, 1);
+        engine.send(Request::EditPages {
+            doc: 1,
+            op: PageOp::EditText { page: 0, index: objects[0].index, text: "Changed".into() },
+        });
+        let _ = pages_changed(&engine);
+        let path = std::env::temp_dir().join(format!("magic-pdf-signed-edit-text-{}.pdf", std::process::id()));
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        let saved = std::fs::read(&path).unwrap();
+        assert!(saved.starts_with(&original), "appended, not rewritten");
+        let info = open(&engine, 2, path.clone());
+        assert_eq!(info.signatures[0].check.status, signatures::SigStatus::ChangedAfter);
+        assert!(object_text(&engine, 2).contains("Changed"));
+
+        // Undo, then save again: still the signed bytes plus an update.
+        engine.send(Request::Undo { doc: 1 });
+        let _ = pages_changed(&engine);
+        engine.send(Request::Save { doc: 1, path: path.clone() });
+        recv_until(&engine, |r| matches!(r, Response::Saved { .. }).then_some(()));
+        assert!(std::fs::read(&path).unwrap().starts_with(&original), "undo keeps the signed bytes");
+        let info = open(&engine, 3, path.clone());
+        assert!(!matches!(info.signatures[0].check.status, signatures::SigStatus::Invalid(_)));
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn saving_a_signed_file_keeps_its_signature() {
         let (_serial, engine) = start();
