@@ -190,6 +190,12 @@ pub struct SignatureInfo {
     /// What the signature still allows to change (1 nothing, 2 form filling and
     /// signing, 3 also annotations); 0 when not a certifying signature.
     pub permission: u32,
+    /// Whether the signer's certificate is trusted; None until checked (the app checks
+    /// in the background, as asking about revocation can take a moment).
+    pub trust: Option<super::trust::Trust>,
+    /// Whether the timestamp's authority is trusted; None until checked or without a
+    /// timestamp.
+    pub timestamp_trusted: Option<bool>,
 }
 
 /// Document properties (the PDF's information dictionary).

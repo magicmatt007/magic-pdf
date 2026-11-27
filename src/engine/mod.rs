@@ -17,6 +17,7 @@ pub mod shapes;
 pub mod sign;
 pub mod signatures;
 pub mod textbox;
+pub mod trust;
 mod worker;
 
 use crate::i18n::t;

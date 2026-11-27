@@ -384,6 +384,13 @@ impl DocTab {
         tab
     }
 
+    pub fn info_mut(&mut self) -> Option<&mut DocInfo> {
+        match &mut self.state {
+            LoadState::Ready(info) => Some(info),
+            _ => None,
+        }
+    }
+
     pub fn info(&self) -> Option<&DocInfo> {
         match &self.state {
             LoadState::Ready(info) => Some(info),

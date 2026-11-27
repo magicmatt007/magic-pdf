@@ -1007,4 +1007,46 @@ pub static TEXTS: &[(&str, &str)] = &[
     ("No file in the history matches.", "Keine Datei im Verlauf passt."),
     ("{n} older files: search to find them", "{n} ältere Dateien: mit der Suche finden"),
     ("All open tabs ({n})", "Alle offenen Tabs ({n})"),
+    // Signature trust.
+    (
+        "Certificate not trusted: it is not from an authority this computer trusts.",
+        "Zertifikat nicht vertrauenswürdig: Es stammt nicht von einer Stelle, der dieser Computer vertraut.",
+    ),
+    (
+        "Certificate not trusted: its issuer is unknown.",
+        "Zertifikat nicht vertrauenswürdig: Sein Aussteller ist unbekannt.",
+    ),
+    (
+        "Certificate not valid at the time of signing (expired or not yet valid).",
+        "Zertifikat zum Zeitpunkt der Signatur nicht gültig (abgelaufen oder noch nicht gültig).",
+    ),
+    ("Certificate revoked by its issuer.", "Zertifikat von seinem Aussteller widerrufen."),
+    (
+        "Certificate trusted: issued by a trusted authority (revocation not checked).",
+        "Zertifikat vertrauenswürdig: von einer vertrauenswürdigen Stelle ausgestellt (Widerruf nicht geprüft).",
+    ),
+    (
+        "Certificate trusted: issued by a trusted authority and not revoked.",
+        "Zertifikat vertrauenswürdig: von einer vertrauenswürdigen Stelle ausgestellt und nicht widerrufen.",
+    ),
+    (
+        "Certificates are checked against this computer's trusted authorities (revocation is not checked); with a trusted timestamp, at the time of signing.",
+        "Zertifikate werden mit den vertrauenswürdigen Stellen dieses Computers geprüft (ohne Widerruf); mit vertrauenswürdigem Zeitstempel zum Zeitpunkt der Signatur.",
+    ),
+    (
+        "Certificates are checked with Windows, against its trusted authorities and their revocation lists; with a trusted timestamp, at the time of signing.",
+        "Zertifikate werden mit Windows geprüft, mit dessen vertrauenswürdigen Stellen und deren Widerrufslisten; mit vertrauenswürdigem Zeitstempel zum Zeitpunkt der Signatur.",
+    ),
+    ("Checking the certificate…", "Zertifikat wird geprüft…"),
+    (
+        "Comments and page changes saved with magic-pdf are added after the signed part, so the signatures stay intact. Only redaction rewrites the file.",
+        "Kommentare und Seitenänderungen, die magic-pdf speichert, kommen nach dem signierten Teil; die Signaturen bleiben intakt. Nur das Schwärzen schreibt die Datei neu.",
+    ),
+    ("The certificate could not be checked.", "Das Zertifikat konnte nicht geprüft werden."),
+    ("Timestamp", "Zeitstempel"),
+    ("authority not trusted", "Stelle nicht vertrauenswürdig"),
+    ("checking…", "wird geprüft…"),
+    ("does not match this signature", "passt nicht zu dieser Signatur"),
+    ("trusted", "vertrauenswürdig"),
+    ("{time} UTC by {authority}", "{time} UTC von {authority}"),
 ];

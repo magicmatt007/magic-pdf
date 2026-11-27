@@ -440,6 +440,8 @@ impl Doc {
                     reason: utf16_buf_to_string(&rbuf),
                     time,
                     permission: lib.FPDFSignatureObj_GetDocMDPPermission(sig),
+                    trust: None,
+                    timestamp_trusted: None,
                 })
             })
             .collect()
