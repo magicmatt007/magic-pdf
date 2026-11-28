@@ -201,7 +201,8 @@ test fails when a text has no translation.
 of the app's own window after three seconds and quits (`MAGIC_PDF_TOOL=highlight`, `note`, … picks
 the starting tool; with `MAGIC_PDF_TOOL=edittext`, `MAGIC_PDF_EDIT_TEXT=…` opens the
 paragraph of the first text on page 1, or of the `MAGIC_PDF_EDIT_OBJECT`th, for editing with that text
-typed in; `MAGIC_PDF_TOOL=replace` opens the Replace text window). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
+typed in; `MAGIC_PDF_TOOL=replace` opens the Replace text window, `uptodate` the "up to date" answer of
+Check for updates). `MAGIC_PDF_SELFTEST=out.txt magic-pdf a.pdf b.pdf` writes each opened
 file's page count to `out.txt` and quits; the release workflow uses it to smoke-test the
 macOS app bundle. `MAGIC_PDF_LANG=de|en` overrides the language setting. `MAGIC_PDF_WINDOW=800x600` starts with that window size. `MAGIC_PDF_BENCH=report.txt magic-pdf big.pdf` pages through the
 whole file, searches it (`MAGIC_PDF_BENCH_QUERY`, default "the") and writes timings, frame times

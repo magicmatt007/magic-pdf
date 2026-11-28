@@ -198,6 +198,10 @@ enum UpdateEvent {
 enum UpdateUi {
     #[default]
     Hidden,
+    /// Checking because the user asked (Help > Check for updates).
+    Checking,
+    /// The user asked and there is no newer version.
+    UpToDate,
     Available(crate::update::Release),
     Downloading(crate::update::Release),
     Ready(crate::update::Release, PathBuf),
@@ -396,6 +400,10 @@ impl App {
             app.show_settings = wanted == "settings";
             app.signatures_on_load = wanted == "signatures";
             app.present_on_load = wanted == "present";
+            if wanted == "uptodate" {
+                // The answer to Help > Check for updates when there is nothing new.
+                app.update = UpdateUi::UpToDate;
+            }
             if wanted == "replace" {
                 app.replace_dialog = Some(("lazy dog".into(), "sleepy cat".into(), false));
             }
@@ -506,6 +514,9 @@ impl App {
     fn check_for_updates(&mut self, manual: bool) {
         self.settings.last_update_check = crate::settings::now();
         self.settings.save();
+        if manual {
+            self.update = UpdateUi::Checking;
+        }
         let tx = self.update_events.0.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -521,9 +532,11 @@ impl App {
                     Ok(Some(r)) if manual || self.settings.skipped_version.as_deref() != Some(r.version()) => {
                         self.update = UpdateUi::Available(r);
                     }
-                    Ok(_) if manual => self
-                        .notice(&tf("magic-pdf {version} is up to date", &[("version", &env!("CARGO_PKG_VERSION"))])),
-                    Err(e) if manual => self.error = Some(tf("Could not check for updates: {e}", &[("e", &e)])),
+                    Ok(_) if manual => self.update = UpdateUi::UpToDate,
+                    Err(e) if manual => {
+                        self.update = UpdateUi::Hidden;
+                        self.error = Some(tf("Could not check for updates: {e}", &[("e", &e)]));
+                    }
                     Err(e) => log::info!("update check failed: {e}"),
                     _ => {}
                 },
@@ -534,8 +547,34 @@ impl App {
                 },
             }
         }
+        if matches!(self.update, UpdateUi::Checking | UpdateUi::UpToDate) {
+            let mut close = false;
+            egui::Window::new(t("Check for updates"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+                .show(ctx, |ui| {
+                    ui.set_width(300.0);
+                    if matches!(self.update, UpdateUi::Checking) {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(t("Checking for updates…"));
+                        });
+                    } else {
+                        ui.label(tf("magic-pdf {version} is up to date", &[("version", &env!("CARGO_PKG_VERSION"))]));
+                        ui.add_space(4.0);
+                        if ui.add(crate::theme::primary_button(t("OK"))).clicked() {
+                            close = true;
+                        }
+                    }
+                });
+            if close {
+                self.update = UpdateUi::Hidden;
+            }
+            return;
+        }
         let release = match &self.update {
-            UpdateUi::Hidden => return,
+            UpdateUi::Hidden | UpdateUi::Checking | UpdateUi::UpToDate => return,
             UpdateUi::Available(r) | UpdateUi::Downloading(r) | UpdateUi::Ready(r, _) => r.clone(),
         };
         let mut action = None;
@@ -2899,6 +2938,7 @@ impl App {
                 {
                     self.make_default_viewer();
                 }
+                ui.weak(tf("Version {version}", &[("version", &env!("CARGO_PKG_VERSION"))]));
                 if ui.button(t("Check for updates…")).clicked() {
                     self.check_for_updates(true);
                     ui.close();
@@ -3976,7 +4016,8 @@ impl App {
             ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(72.0, 72.0)));
             ui.add_space(6.0);
             ui.heading(t("magic-pdf"));
-            ui.add_space(14.0);
+            ui.weak(tf("Version {version}", &[("version", &env!("CARGO_PKG_VERSION"))]));
+            ui.add_space(10.0);
             if let Err(e) = &self.engine {
                 ui.colored_label(ui.visuals().error_fg_color, e);
                 return;
